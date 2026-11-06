@@ -3,20 +3,14 @@ use std::path::{Path, PathBuf};
 
 use rustc_hash::FxHashSet;
 
-use crate::hidden;
-
-#[derive(Clone, Debug)]
-pub struct Volume {
-    pub name: String,
-    pub mount: PathBuf,
-    pub total: u64,
-    pub used: u64,
-    pub available: u64,
-    pub is_root: bool,
-}
+use super::{apfs, space};
+use crate::platform::{DeviceId, unix};
+use crate::volumes::Volume;
 
 const SPARE_SLOTS_FOR_MOUNTS_APPEARING_BETWEEN_CALLS: usize = 4;
 const TCC_PROTECTED_HOME_FOLDERS: [&str; 2] = ["Library/Mail", "Library/Safari"];
+const DEFAULT_STARTUP_DISK_NAME: &str = "Macintosh HD";
+const USER_VOLUMES_FOLDER: &str = "/Volumes";
 
 struct Mount {
     on: PathBuf,
@@ -58,87 +52,45 @@ fn mounts_via_getfsstat_into_own_buffer() -> Vec<Mount> {
         .collect()
 }
 
-fn container_of(from: &str) -> Option<&str> {
-    let dev = from.strip_prefix("/dev/")?;
-    let disk_prefix = "disk";
-    let rest = dev.strip_prefix(disk_prefix)?;
-    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
-    if digits == 0 {
-        return None;
-    }
-    Some(&dev[..disk_prefix.len() + digits])
-}
-
-pub fn container_devices(root: &Path) -> FxHashSet<i32> {
+pub(super) fn other_volumes_of_the_same_container(root: &Path) -> FxHashSet<DeviceId> {
     let all = mounts_via_getfsstat_into_own_buffer();
     let Some(root_from) = all.iter().find(|m| m.on == root).map(|m| m.from.clone()) else {
         return FxHashSet::default();
     };
-    let Some(container) = container_of(&root_from) else {
+    let Some(container) = apfs::container_of(&root_from) else {
         return FxHashSet::default();
     };
     all.iter()
-        .filter(|m| m.fstype == "apfs" && container_of(&m.from) == Some(container))
-        .filter_map(|m| super::dev_of(&m.on).ok())
+        .filter(|m| m.fstype == "apfs" && apfs::container_of(&m.from) == Some(container))
+        .filter_map(|m| unix::device_of(&m.on).ok())
         .collect()
 }
 
-pub fn firmlink_skip_paths() -> FxHashSet<Vec<u8>> {
-    let mut out = FxHashSet::default();
-    match std::fs::read("/usr/share/firmlinks") {
-        Ok(content) => {
-            for line in content.split(|&b| b == b'\n') {
-                if let Some(tab) = line.iter().position(|&b| b == b'\t') {
-                    let target = &line[tab + 1..];
-                    if !target.is_empty() {
-                        let mut p = b"/System/Volumes/Data/".to_vec();
-                        p.extend_from_slice(target);
-                        out.insert(p);
-                    }
-                }
-            }
-        }
-        Err(_) => {
-            out.insert(b"/System/Volumes/Data".to_vec());
-        }
-    }
-    out
-}
-
-pub fn list_volumes() -> Vec<Volume> {
-    let mut out: Vec<Volume> = mounts_via_getfsstat_into_own_buffer()
+pub(super) fn mounted_volumes() -> Vec<Volume> {
+    mounts_via_getfsstat_into_own_buffer()
         .into_iter()
         .filter(|m| m.fstype == "apfs")
         .filter_map(|m| {
             let is_root = m.on == Path::new("/");
             let browsable = m.flags & (libc::MNT_DONTBROWSE as u32) == 0;
-            let user_visible = is_root || (browsable && m.on.starts_with("/Volumes"));
+            let user_visible = is_root || (browsable && m.on.starts_with(USER_VOLUMES_FOLDER));
             if !user_visible {
                 return None;
             }
-            let space = hidden::space_info(&m.on).ok()?;
-            let name = hidden::volume_name(&m.on).unwrap_or_else(|| {
+            let space = space::space_info(&m.on).ok()?;
+            let name = space::volume_name(&m.on).unwrap_or_else(|| {
                 if is_root {
-                    "Macintosh HD".into()
+                    DEFAULT_STARTUP_DISK_NAME.into()
                 } else {
                     m.on.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
                 }
             });
-            Some(Volume {
-                name,
-                mount: m.on,
-                total: space.total,
-                used: space.used,
-                available: space.available_important.max(space.available),
-                is_root,
-            })
+            Some(Volume::new(name, m.on, &space, is_root))
         })
-        .collect();
-    out.sort_by_key(|v| (!v.is_root, v.name.clone()));
-    out
+        .collect()
 }
 
-pub fn has_full_disk_access() -> bool {
+pub(super) fn has_full_disk_access() -> bool {
     let Some(home) = std::env::var_os("HOME") else { return true };
     TCC_PROTECTED_HOME_FOLDERS
         .iter()
@@ -152,16 +104,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn container_of_takes_the_whole_disk_from_a_volume_device() {
-        assert_eq!(container_of("/dev/disk3s1s1"), Some("disk3"));
-        assert_eq!(container_of("/dev/disk12s5"), Some("disk12"));
-        assert_eq!(container_of("devfs"), None);
-        assert_eq!(container_of("com.apple.TimeMachine.x@/dev/disk3s5"), None);
-    }
-
-    #[test]
     fn root_volume_listed() {
-        let v = list_volumes();
+        let v = mounted_volumes();
         assert!(v.iter().any(|v| v.is_root && v.total > 0 && v.used > 0));
     }
 
@@ -182,8 +126,8 @@ mod tests {
     }
 
     #[test]
-    fn root_container_includes_data() {
-        let devs = container_devices(Path::new("/"));
-        assert!(devs.len() >= 2, "expected System + Data volumes, got {devs:?}");
+    fn the_startup_disk_container_holds_the_system_and_the_data_volume() {
+        let devices = other_volumes_of_the_same_container(Path::new("/"));
+        assert!(devices.len() >= 2, "expected System + Data volumes, got {devices:?}");
     }
 }

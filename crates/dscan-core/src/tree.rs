@@ -1,11 +1,10 @@
 use std::borrow::Cow;
 use std::cmp::Reverse;
-use std::ffi::OsStr;
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::kind::Kind;
+use crate::platform::{Current, Platform};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NodeId(pub u32);
@@ -244,7 +243,7 @@ impl Tree {
         parts.reverse();
         let mut p = self.root_path.clone();
         for part in parts {
-            p.push(OsStr::from_bytes(part));
+            p.push(Current::os_str_from_bytes(part));
         }
         p
     }

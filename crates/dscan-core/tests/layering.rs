@@ -6,6 +6,19 @@ const UI_OR_ASYNC_RUNTIME_CRATES: &[&str] = &["iced", "winit", "wgpu", "rfd", "t
 
 const CORE_ONLY_APIS: &[&str] = &["std::fs", "libc::", "objc2", "getattrlist", "statfs", "trash::"];
 
+const OS_SPECIFIC_APIS: &[&str] = &[
+    "libc::",
+    "objc2",
+    "windows_sys",
+    "std::os::unix",
+    "std::os::windows",
+    "target_os",
+    "cfg(unix)",
+    "cfg(windows)",
+    "trash::macos",
+];
+const PLATFORM_LAYER: &str = "platform";
+
 const HEADLESS_UI_TEST_SCAFFOLDING: &[&str] = &["iced_inspect.rs", "inspect_tests.rs"];
 const UNIT_TEST_MODULE_START: &str = "\n#[cfg(test)]\nmod tests";
 
@@ -46,8 +59,7 @@ fn gui_does_no_file_system_or_os_work() {
             continue;
         }
         let source = std::fs::read_to_string(&path).unwrap();
-        let app_code_before_unit_tests_that_may_build_fixtures_on_disk =
-            source.split(UNIT_TEST_MODULE_START).next().unwrap();
+        let app_code_before_unit_tests_that_may_build_fixtures_on_disk = code_before_unit_tests(&source);
         for (n, line) in app_code_before_unit_tests_that_may_build_fixtures_on_disk.lines().enumerate() {
             let is_comment_line = line.trim_start().starts_with("//");
             if is_comment_line {
@@ -63,6 +75,56 @@ fn gui_does_no_file_system_or_os_work() {
         "GUI code must go through dscan-core's API (see CLAUDE.md):\n{}",
         violations.join("\n")
     );
+}
+
+fn rust_files_below(dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            files.extend(rust_files_below(&path));
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            files.push(path);
+        }
+    }
+    files
+}
+
+fn code_before_unit_tests(source: &str) -> &str {
+    source.split(UNIT_TEST_MODULE_START).next().unwrap()
+}
+
+#[test]
+fn os_specific_code_lives_only_in_the_platform_layer() {
+    let core_src = Path::new(CORE).join("src");
+    let mut violations = Vec::new();
+    for path in rust_files_below(&core_src) {
+        let relative = path.strip_prefix(&core_src).unwrap();
+        if relative.starts_with(PLATFORM_LAYER) {
+            continue;
+        }
+        let source = std::fs::read_to_string(&path).unwrap();
+        for (n, line) in code_before_unit_tests(&source).lines().enumerate() {
+            if let Some(api) = OS_SPECIFIC_APIS.iter().find(|api| line.contains(*api)) {
+                violations.push(format!("{}:{}: uses `{api}`: {}", relative.display(), n + 1, line.trim()));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "OS-specific code belongs in dscan-core/src/platform/<os>/ behind the Platform trait (see CLAUDE.md):\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn every_platform_folder_implements_the_platform_trait() {
+    let platform = Path::new(CORE).join("src").join(PLATFORM_LAYER);
+    for os in ["macos", "linux"] {
+        let sources: String =
+            rust_files_below(&platform.join(os)).iter().map(|f| std::fs::read_to_string(f).unwrap()).collect();
+        assert!(sources.contains("impl Platform for"), "platform/{os} must implement the Platform trait");
+    }
 }
 
 fn dependency_lines(manifest: &str) -> Vec<&str> {

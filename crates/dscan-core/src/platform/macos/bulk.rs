@@ -1,5 +1,8 @@
-use std::ffi::{CStr, CString};
+use std::ffi::CString;
 use std::io;
+
+use crate::platform::unix::{Fd, entry_with_unreadable_attributes, open_dir_without_following_symlink};
+use crate::platform::{DeviceId, DirEntry, EntryType};
 
 const ATTR_CMN_ERROR: u32 = 0x2000_0000;
 const BUF_SIZE: usize = 256 * 1024;
@@ -9,28 +12,49 @@ const CLONE_INFO_ATTRIBUTES: u32 = libc::ATTR_CMNEXT_CLONEID | libc::ATTR_CMNEXT
 const RECORD_LENGTH_SIZE: usize = 4;
 const STAT_BLOCK_SIZE: u64 = 512;
 
-pub const VREG: u32 = 1;
-pub const VDIR: u32 = 2;
-pub const VLNK: u32 = 5;
+const VREG: u32 = 1;
+const VDIR: u32 = 2;
+const VLNK: u32 = 5;
 
 #[derive(Debug, Clone, Copy)]
-pub struct RawEntry<'a> {
-    pub name: &'a [u8],
-    pub error: u32,
-    pub dev: i32,
-    pub objtype: u32,
-    pub ino: u64,
-    pub links: u32,
-    pub alloc: u64,
-    pub logical: u64,
-    pub data_stream: Option<u64>,
-    pub may_share_blocks: bool,
+struct RawEntry<'a> {
+    name: &'a [u8],
+    error: u32,
+    dev: i32,
+    objtype: u32,
+    ino: u64,
+    links: u32,
+    alloc: u64,
+    logical: u64,
+    data_stream: Option<u64>,
+    may_share_blocks: bool,
     sizes_reported: bool,
 }
 
-impl RawEntry<'_> {
-    pub fn attributes_unavailable(&self) -> bool {
+impl<'a> RawEntry<'a> {
+    fn attributes_unavailable(&self) -> bool {
         self.error != 0
+    }
+
+    fn as_dir_entry(&self) -> DirEntry<'a> {
+        let device = DeviceId(self.dev as u64);
+        if self.attributes_unavailable() {
+            return entry_with_unreadable_attributes(self.name, device);
+        }
+        let is_regular_file = self.objtype == VREG;
+        DirEntry {
+            name: self.name,
+            entry_type: Some(match self.objtype {
+                VDIR => EntryType::Directory,
+                VLNK => EntryType::Symlink,
+                _ => EntryType::File,
+            }),
+            device,
+            allocated: self.alloc,
+            logical: self.logical,
+            hard_link_id: (is_regular_file && self.links > 1).then_some(self.ino),
+            shared_data_stream_id: self.data_stream.filter(|_| is_regular_file && self.may_share_blocks),
+        }
     }
 
     fn needs_sizes_from_stat(&self) -> bool {
@@ -54,27 +78,17 @@ thread_local! {
     static BUF: std::cell::RefCell<Vec<u8>> = std::cell::RefCell::new(vec![0u8; BUF_SIZE]);
 }
 
-struct Fd(i32);
-impl Drop for Fd {
-    fn drop(&mut self) {
-        unsafe { libc::close(self.0) };
-    }
-}
-
-fn open_dir_without_following_symlink(path: &CStr) -> io::Result<Fd> {
-    let fd =
-        unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
-    if fd < 0 { Err(io::Error::last_os_error()) } else { Ok(Fd(fd)) }
-}
-
 fn read_u32(bytes: &[u8], at: usize) -> u32 {
     u32::from_ne_bytes(bytes[at..at + 4].try_into().unwrap())
 }
 
-pub fn read_dir(path: &CStr, mut f: impl FnMut(RawEntry<'_>)) -> io::Result<()> {
+pub(super) fn read_dir(path: &[u8], mut visit: impl FnMut(DirEntry<'_>)) -> io::Result<()> {
     let fd = open_dir_without_following_symlink(path)?;
-    match read_entries(&fd, AttributeRequest::WithCloneInfo, &mut f) {
-        Err(e) if file_system_rejects_attribute_request(&e) => read_entries(&fd, AttributeRequest::Basic, &mut f),
+    let mut visit_raw = |entry: RawEntry<'_>| visit(entry.as_dir_entry());
+    match read_entries(&fd, AttributeRequest::WithCloneInfo, &mut visit_raw) {
+        Err(e) if file_system_rejects_attribute_request(&e) => {
+            read_entries(&fd, AttributeRequest::Basic, &mut visit_raw)
+        }
         other => other,
     }
 }
@@ -261,7 +275,6 @@ fn parse_entry(record: &[u8]) -> RawEntry<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
 
     #[test]
@@ -269,38 +282,37 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.txt"), vec![1u8; 10_000]).unwrap();
         std::fs::create_dir(dir.path().join("sub")).unwrap();
-        let c = CString::new(dir.path().as_os_str().as_bytes()).unwrap();
         let mut seen = Vec::new();
-        read_dir(&c, |e| seen.push((e.name.to_vec(), e.objtype, e.logical, e.alloc))).unwrap();
-        seen.sort();
+        read_dir(dir.path().as_os_str().as_bytes(), |e| {
+            seen.push((e.name.to_vec(), e.entry_type, e.logical, e.allocated))
+        })
+        .unwrap();
+        seen.sort_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(seen.len(), 2);
         assert_eq!(seen[0].0, b"a.txt");
-        assert_eq!(seen[0].1, VREG);
+        assert_eq!(seen[0].1, Some(EntryType::File));
         assert_eq!(seen[0].2, 10_000);
         assert!(seen[0].3 >= 10_000);
         assert_eq!(seen[1].0, b"sub");
-        assert_eq!(seen[1].1, VDIR);
+        assert_eq!(seen[1].1, Some(EntryType::Directory));
     }
 
     #[derive(Clone, Copy)]
     struct Entry {
-        objtype: u32,
+        entry_type: Option<EntryType>,
         logical: u64,
-        alloc: u64,
-        data_stream: Option<u64>,
-        may_share_blocks: bool,
+        allocated: u64,
+        shared_data_stream_id: Option<u64>,
     }
 
     fn entries(dir: &std::path::Path) -> std::collections::HashMap<String, Entry> {
         let mut seen = std::collections::HashMap::new();
-        let path = CString::new(dir.as_os_str().as_bytes()).unwrap();
-        read_dir(&path, |e| {
+        read_dir(dir.as_os_str().as_bytes(), |e| {
             let entry = Entry {
-                objtype: e.objtype,
+                entry_type: e.entry_type,
                 logical: e.logical,
-                alloc: e.alloc,
-                data_stream: e.data_stream,
-                may_share_blocks: e.may_share_blocks,
+                allocated: e.allocated,
+                shared_data_stream_id: e.shared_data_stream_id,
             };
             seen.insert(String::from_utf8_lossy(e.name).into_owned(), entry);
         })
@@ -333,31 +345,32 @@ mod tests {
     fn file_sizes_parse_correctly_alongside_clone_info() {
         let dir = original_clone_and_unrelated_file();
         for (name, e) in entries(dir.path()) {
-            assert_eq!(e.objtype, VREG, "{name}");
+            assert_eq!(e.entry_type, Some(EntryType::File), "{name}");
             assert_eq!(e.logical, 200_000, "{name}");
-            assert!(e.alloc >= 200_000, "{name}");
-            assert!(e.data_stream.is_some(), "{name} reports a data stream on APFS");
+            assert!(e.allocated >= 200_000, "{name}");
         }
     }
 
     #[test]
-    fn pure_clones_share_the_data_stream_and_both_sides_may_share_blocks() {
+    fn pure_clones_share_the_data_stream_and_files_that_share_no_blocks_report_none() {
         let dir = original_clone_and_unrelated_file();
         let seen = entries(dir.path());
         let (orig, clone, other) = (seen["orig.bin"], seen["clone.bin"], seen["other.bin"]);
-        assert_eq!(orig.data_stream, clone.data_stream);
-        assert_ne!(orig.data_stream, other.data_stream);
-        assert!(orig.may_share_blocks && clone.may_share_blocks, "either side may be met first by the walk");
-        assert!(!other.may_share_blocks);
+        assert!(orig.shared_data_stream_id.is_some(), "either side may be met first by the walk");
+        assert_eq!(orig.shared_data_stream_id, clone.shared_data_stream_id);
+        assert_eq!(other.shared_data_stream_id, None);
     }
 
     #[test]
     fn editing_a_clone_gives_it_its_own_data_stream() {
         let dir = original_clone_and_unrelated_file();
-        let original_stream = entries(dir.path())["orig.bin"].data_stream;
+        let original_stream = entries(dir.path())["orig.bin"].shared_data_stream_id;
         overwrite_part_of(&dir.path().join("clone.bin"));
         let seen = entries(dir.path());
-        assert_eq!(seen["orig.bin"].data_stream, original_stream);
-        assert_ne!(seen["clone.bin"].data_stream, original_stream, "a partial clone is never taken for a pure one");
+        assert_eq!(seen["orig.bin"].shared_data_stream_id, original_stream);
+        assert_ne!(
+            seen["clone.bin"].shared_data_stream_id, original_stream,
+            "a partial clone is never taken for a pure one"
+        );
     }
 }

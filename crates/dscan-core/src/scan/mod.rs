@@ -1,9 +1,3 @@
-pub mod bulk;
-pub mod volumes;
-
-use std::ffi::{CString, OsStr};
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
@@ -15,6 +9,7 @@ use rustc_hash::FxHashSet;
 
 use crate::hidden;
 use crate::kind::Kind;
+use crate::platform::{Current, DeviceId, DirEntry, EntryType, Platform, WholeDiskBoundaries};
 use crate::tree::{self, DirNode, ScanStats, Synthetic, Tree, flags};
 
 #[derive(Clone, Debug)]
@@ -138,14 +133,14 @@ pub enum ScanError {
 
 const SEEN_SHARDS: usize = 64;
 
-struct ShardedSeenSet(Vec<Mutex<FxHashSet<(i32, u64)>>>);
+struct ShardedSeenSet(Vec<Mutex<FxHashSet<(DeviceId, u64)>>>);
 
 impl ShardedSeenSet {
     fn new() -> Self {
         ShardedSeenSet((0..SEEN_SHARDS).map(|_| Mutex::new(FxHashSet::default())).collect())
     }
-    fn first_sight(&self, dev: i32, id: u64) -> bool {
-        self.0[(id as usize) % SEEN_SHARDS].lock().insert((dev, id))
+    fn first_sight(&self, device: DeviceId, id: u64) -> bool {
+        self.0[(id as usize) % SEEN_SHARDS].lock().insert((device, id))
     }
 }
 
@@ -156,8 +151,7 @@ enum Duplicate {
 const MAX_ERROR_SAMPLES: usize = 100;
 
 struct Ctx<'a> {
-    sibling_volume_devices: FxHashSet<i32>,
-    firmlinked_duplicate_paths: FxHashSet<Vec<u8>>,
+    boundaries: WholeDiskBoundaries,
     system_top_level_dirs: FxHashSet<&'static [u8]>,
     hard_linked_inodes: ShardedSeenSet,
     shared_data_streams: ShardedSeenSet,
@@ -168,34 +162,31 @@ struct Ctx<'a> {
 }
 
 impl Ctx<'_> {
-    fn already_counted(&self, e: &bulk::RawEntry<'_>) -> Option<Duplicate> {
-        if e.objtype != bulk::VREG {
-            return None;
-        }
-        if e.links > 1 && !self.hard_linked_inodes.first_sight(e.dev, e.ino) {
+    fn already_counted(&self, e: &DirEntry<'_>) -> Option<Duplicate> {
+        if let Some(id) = e.hard_link_id
+            && !self.hard_linked_inodes.first_sight(e.device, id)
+        {
             return Some(Duplicate::HardLink);
         }
-        match e.data_stream {
-            Some(stream) if e.may_share_blocks && !self.shared_data_streams.first_sight(e.dev, stream) => {
-                Some(Duplicate::PureClone)
-            }
+        match e.shared_data_stream_id {
+            Some(stream) if !self.shared_data_streams.first_sight(e.device, stream) => Some(Duplicate::PureClone),
             _ => None,
         }
     }
 
-    fn may_enter_device(&self, parent_dev: i32, child_dev: i32) -> bool {
-        child_dev == parent_dev || self.sibling_volume_devices.contains(&child_dev)
+    fn may_enter_device(&self, parent: DeviceId, child: DeviceId) -> bool {
+        child == parent || self.boundaries.other_devices_of_the_disk.contains(&child)
     }
 
-    fn is_firmlinked_duplicate(&self, path: &[u8]) -> bool {
-        self.firmlinked_duplicate_paths.contains(path)
+    fn is_duplicate_view(&self, path: &[u8]) -> bool {
+        self.boundaries.duplicate_views.contains(path)
     }
 
     fn record_error(&self, path: &[u8]) {
         self.errors.fetch_add(1, Relaxed);
         let mut s = self.error_samples.lock();
         if s.len() < MAX_ERROR_SAMPLES {
-            s.push(PathBuf::from(OsStr::from_bytes(path)));
+            s.push(PathBuf::from(Current::os_str_from_bytes(path).into_owned()));
         }
     }
 }
@@ -211,12 +202,8 @@ fn default_scan_threads() -> usize {
     (cores * IO_BOUND_THREADS_PER_CORE).clamp(MIN_SCAN_THREADS, MAX_SCAN_THREADS)
 }
 
-fn dev_of(path: &Path) -> std::io::Result<i32> {
-    std::fs::symlink_metadata(path).map(|m| m.dev() as i32)
-}
-
 fn canonical_root(root: &Path) -> Result<PathBuf, ScanError> {
-    std::fs::canonicalize(root).map_err(|source| ScanError::Root { path: root.to_path_buf(), source })
+    Current::canonical_root(root).map_err(|source| ScanError::Root { path: root.to_path_buf(), source })
 }
 
 fn ensure_readable(root: &Path) -> Result<(), ScanError> {
@@ -230,26 +217,22 @@ fn vanished_while_scanning(error: &std::io::Error) -> bool {
 pub fn scan(opts: &ScanOptions, progress: &Progress, cancel: &CancelToken) -> Result<Tree, ScanError> {
     let started = Instant::now();
     let root = canonical_root(&opts.root)?;
-    let root_dev = dev_of(&root).map_err(|source| ScanError::Root { path: root.clone(), source })?;
+    let root_dev = Current::device_of(&root).map_err(|source| ScanError::Root { path: root.clone(), source })?;
     ensure_readable(&root)?;
 
     let space = opts.whole_disk.then(|| hidden::space_info(&root).ok()).flatten();
     if let Some(space) = &space {
         progress.expected_bytes_or_zero.store(space.used, Relaxed);
     }
-    let (sibling_volume_devices, firmlinked_duplicate_paths) = if opts.whole_disk {
-        (volumes::container_devices(&root), volumes::firmlink_skip_paths())
+    let boundaries = if opts.whole_disk { Current::whole_disk_boundaries(&root) } else { Default::default() };
+    let system_top_level_dirs = if opts.whole_disk && Current::is_system_root(&root) {
+        Current::SYSTEM_FOLDERS_AT_SYSTEM_ROOT.iter().map(|name| name.as_bytes()).collect()
     } else {
-        (FxHashSet::default(), FxHashSet::default())
+        FxHashSet::default()
     };
-    let mut system_top_level_dirs: FxHashSet<&'static [u8]> = FxHashSet::default();
-    if opts.whole_disk && root == Path::new("/") {
-        system_top_level_dirs.extend([&b"System"[..], b"usr", b"bin", b"sbin", b"private", b"cores", b"etc", b"var"]);
-    }
 
     let ctx = Ctx {
-        sibling_volume_devices,
-        firmlinked_duplicate_paths,
+        boundaries,
         system_top_level_dirs,
         hard_linked_inodes: ShardedSeenSet::new(),
         shared_data_streams: ShardedSeenSet::new(),
@@ -266,7 +249,7 @@ pub fn scan(opts: &ScanOptions, progress: &Progress, cancel: &CancelToken) -> Re
         .build()
         .expect("failed to build scan thread pool");
 
-    let root_bytes = root.as_os_str().as_bytes().to_vec();
+    let root_bytes = Current::path_bytes(&root).into_owned();
     let root_node = pool.install(|| scan_dir(&ctx, root_bytes, Box::default(), root_dev, 0));
     if cancel.is_cancelled() {
         return Err(ScanError::Cancelled);
@@ -300,14 +283,14 @@ pub fn scan(opts: &ScanOptions, progress: &Progress, cancel: &CancelToken) -> Re
 fn join(parent: &[u8], name: &[u8]) -> Vec<u8> {
     let mut p = Vec::with_capacity(parent.len() + 1 + name.len());
     p.extend_from_slice(parent);
-    if p.last() != Some(&b'/') {
-        p.push(b'/');
+    if p.last() != Some(&Current::PATH_SEPARATOR) {
+        p.push(Current::PATH_SEPARATOR);
     }
     p.extend_from_slice(name);
     p
 }
 
-fn scan_dir(ctx: &Ctx<'_>, path: Vec<u8>, name: Box<[u8]>, dev: i32, depth: u32) -> DirNode {
+fn scan_dir(ctx: &Ctx<'_>, path: Vec<u8>, name: Box<[u8]>, dev: DeviceId, depth: u32) -> DirNode {
     let forced = if depth == 1 && ctx.system_top_level_dirs.contains(&name[..]) {
         Some(Kind::System)
     } else {
@@ -318,22 +301,18 @@ fn scan_dir(ctx: &Ctx<'_>, path: Vec<u8>, name: Box<[u8]>, dev: i32, depth: u32)
     if ctx.cancel.is_cancelled() {
         return node;
     }
-    let Ok(cpath) = CString::new(path) else {
-        node.flags |= flags::UNREADABLE;
-        return node;
-    };
-    let path = cpath.as_bytes();
+    let path = &path[..];
 
-    let mut subdirs: Vec<(Box<[u8]>, i32)> = Vec::new();
+    let mut subdirs: Vec<(Box<[u8]>, DeviceId)> = Vec::new();
     let mut file_bytes = 0u64;
-    let res = bulk::read_dir(&cpath, |e| match e.objtype {
-        _ if e.attributes_unavailable() => {
+    let res = Current::read_dir(path, |e| match e.entry_type {
+        None => {
             ctx.record_error(&join(path, e.name));
             node.push_file(e.name, Kind::Other, flags::UNREADABLE, 0, 0);
         }
-        bulk::VDIR => subdirs.push((e.name.into(), e.dev)),
-        _ => {
-            let (mut alloc, mut logical, mut fl) = (e.alloc, e.logical, 0u8);
+        Some(EntryType::Directory) => subdirs.push((e.name.into(), e.device)),
+        Some(EntryType::File | EntryType::Symlink) => {
+            let (mut alloc, mut logical, mut fl) = (e.allocated, e.logical, 0u8);
             match ctx.already_counted(&e) {
                 Some(Duplicate::HardLink) => {
                     alloc = 0;
@@ -346,7 +325,7 @@ fn scan_dir(ctx: &Ctx<'_>, path: Vec<u8>, name: Box<[u8]>, dev: i32, depth: u32)
                 }
                 None => {}
             }
-            let kind = if e.objtype == bulk::VLNK {
+            let kind = if e.entry_type == Some(EntryType::Symlink) {
                 fl |= flags::SYMLINK;
                 Kind::Other
             } else {
@@ -383,14 +362,14 @@ fn scan_dir(ctx: &Ctx<'_>, path: Vec<u8>, name: Box<[u8]>, dev: i32, depth: u32)
 fn subdirs_to_descend(
     ctx: &Ctx<'_>,
     path: &[u8],
-    dev: i32,
-    subdirs: Vec<(Box<[u8]>, i32)>,
-) -> Vec<(Vec<u8>, Box<[u8]>, i32)> {
+    dev: DeviceId,
+    subdirs: Vec<(Box<[u8]>, DeviceId)>,
+) -> Vec<(Vec<u8>, Box<[u8]>, DeviceId)> {
     subdirs
         .into_iter()
         .filter(|&(_, child_dev)| ctx.may_enter_device(dev, child_dev))
         .map(|(child, child_dev)| (join(path, &child), child, child_dev))
-        .filter(|(child_path, _, _)| !ctx.is_firmlinked_duplicate(child_path))
+        .filter(|(child_path, _, _)| !ctx.is_duplicate_view(child_path))
         .collect()
 }
 
@@ -398,7 +377,6 @@ fn subdirs_to_descend(
 mod tests {
     use super::*;
     use crate::tree::Metric;
-    use std::os::unix::fs::PermissionsExt;
 
     fn find(t: &Tree, path: &str) -> crate::NodeId {
         let mut cur = t.root();
@@ -411,50 +389,68 @@ mod tests {
         cur
     }
 
+    fn scan_folder(root: &Path) -> Tree {
+        scan(&ScanOptions::folder(root), &Progress::default(), &CancelToken::default()).unwrap()
+    }
+
     #[test]
-    fn scans_fixture() {
+    fn scans_nested_folders_and_counts_a_hard_linked_file_once() {
         let dir = tempfile::tempdir().unwrap();
         let r = dir.path();
         std::fs::create_dir_all(r.join("a/b")).unwrap();
         std::fs::write(r.join("a/one.bin"), vec![7u8; 100_000]).unwrap();
         std::fs::write(r.join("a/b/two.bin"), vec![7u8; 50_000]).unwrap();
         std::fs::hard_link(r.join("a/one.bin"), r.join("link.bin")).unwrap();
-        std::os::unix::fs::symlink(r.join("a"), r.join("sym")).unwrap();
-        let sparse_file = std::fs::File::create(r.join("sparse.img")).unwrap();
-        sparse_file.set_len(1 << 30).unwrap();
-        std::fs::create_dir(r.join("locked")).unwrap();
-        std::fs::set_permissions(r.join("locked"), std::fs::Permissions::from_mode(0o000)).unwrap();
 
         let progress = Progress::default();
         let t = scan(&ScanOptions::folder(r), &progress, &CancelToken::default()).unwrap();
-        std::fs::set_permissions(r.join("locked"), std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        let one = find(&t, "a/one.bin");
-        let link = find(&t, "link.bin");
-        let sizes = [t.size(one, Metric::Allocated), t.size(link, Metric::Allocated)];
+        let names = [find(&t, "a/one.bin"), find(&t, "link.bin")];
+        let sizes = names.map(|id| t.size(id, Metric::Allocated));
         assert!(sizes.contains(&0) && sizes.iter().any(|&s| s >= 100_000), "exactly one hard link carries the size");
-
-        let sparse = find(&t, "sparse.img");
-        assert_eq!(t.size(sparse, Metric::Logical), 1 << 30);
-        assert!(t.size(sparse, Metric::Allocated) < 1 << 20, "a sparse file allocates little");
-
-        let sym = find(&t, "sym");
-        assert!(!t.node(sym).is_dir());
-
-        assert_eq!(t.stats.errors, 1);
-        assert!(t.node(find(&t, "locked")).flags() & flags::UNREADABLE != 0);
-
+        let marked_as_copies = names.iter().filter(|&&id| t.node(id).flags() & flags::HARDLINK_DUP != 0).count();
+        assert_eq!(marked_as_copies, 1, "the name met second is marked as the copy");
+        assert_eq!(scan_folder(r).size(t.root(), Metric::Allocated), t.size(t.root(), Metric::Allocated));
         let a = find(&t, "a");
         let sum: u64 = t.children(a, Metric::Allocated).map(|c| t.size(c, Metric::Allocated)).sum();
         assert_eq!(sum, t.size(a, Metric::Allocated), "a folder's size is the sum of its children");
-        let temp_dir_behind_var_symlink = r.canonicalize().unwrap();
-        assert_eq!(t.path(find(&t, "a/b/two.bin")), temp_dir_behind_var_symlink.join("a/b/two.bin"));
+        assert_eq!(t.size(find(&t, "a/b/two.bin"), Metric::Logical), 50_000);
+        let root_as_the_platform_spells_it = Current::canonical_root(r).unwrap();
+        assert_eq!(t.path(find(&t, "a/b/two.bin")), root_as_the_platform_spells_it.join("a").join("b").join("two.bin"));
+        assert_eq!(t.stats.errors, 0);
         assert_eq!(progress.snapshot().files, t.node(t.root()).items() as u64);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_are_not_followed_sparse_files_count_their_allocation_and_unreadable_folders_are_flagged() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        std::fs::create_dir(r.join("a")).unwrap();
+        std::fs::write(r.join("a/one.bin"), vec![7u8; 100_000]).unwrap();
+        std::os::unix::fs::symlink(r.join("a"), r.join("sym")).unwrap();
+        std::fs::File::create(r.join("sparse.img")).unwrap().set_len(1 << 30).unwrap();
+        std::fs::create_dir(r.join("locked")).unwrap();
+        std::fs::set_permissions(r.join("locked"), std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let t = scan_folder(r);
+        std::fs::set_permissions(r.join("locked"), std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(!t.node(find(&t, "sym")).is_dir());
+        let sparse = find(&t, "sparse.img");
+        assert_eq!(t.size(sparse, Metric::Logical), 1 << 30);
+        assert!(t.size(sparse, Metric::Allocated) < 1 << 20, "a sparse file allocates little");
+        assert_eq!(t.stats.errors, 1, "run the tests as a normal user: root can read a mode 000 folder");
+        assert!(t.node(find(&t, "locked")).flags() & flags::UNREADABLE != 0);
+    }
+
+    #[cfg(target_os = "macos")]
     #[test]
     fn counts_pure_clones_once() {
+        use std::ffi::CString;
         use std::io::{Seek, Write};
+        use std::os::unix::ffi::OsStrExt;
         let dir = tempfile::tempdir().unwrap();
         let r = dir.path();
         let c = |p: &str| CString::new(r.join(p).as_os_str().as_bytes()).unwrap();
@@ -469,7 +465,7 @@ mod tests {
         fh.sync_all().unwrap();
         drop(fh);
 
-        let t = scan(&ScanOptions::folder(r), &Progress::default(), &CancelToken::default()).unwrap();
+        let t = scan_folder(r);
         let (orig, pure, edited) = (find(&t, "orig.bin"), find(&t, "copies/pure.bin"), find(&t, "copies/edited.bin"));
         let alloc = |id| t.size(id, Metric::Allocated);
         assert!(alloc(orig) >= 1_000_000 || alloc(pure) >= 1_000_000);
@@ -483,6 +479,7 @@ mod tests {
         assert!((2_000_000..2_100_000).contains(&total), "two streams on disk, not three: {total}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn follows_symlinked_root() {
         let dir = tempfile::tempdir().unwrap();
@@ -490,7 +487,7 @@ mod tests {
         std::fs::create_dir(r.join("real")).unwrap();
         std::fs::write(r.join("real/f.bin"), vec![1u8; 10_000]).unwrap();
         std::os::unix::fs::symlink(r.join("real"), r.join("link")).unwrap();
-        let t = scan(&ScanOptions::folder(r.join("link")), &Progress::default(), &CancelToken::default()).unwrap();
+        let t = scan_folder(&r.join("link"));
         assert_eq!(t.stats.errors, 0);
         assert_eq!(t.size(find(&t, "f.bin"), Metric::Logical), 10_000);
     }
@@ -504,16 +501,18 @@ mod tests {
             std::fs::write(d.join("f"), b"x").unwrap();
         }
         let (progress, ctl) = (Progress::default(), CancelToken::default());
+        let held_for = Duration::from_millis(200);
         ctl.set_paused(true);
+        let wall_clock = Instant::now();
         std::thread::scope(|s| {
             let scan = s.spawn(|| scan(&ScanOptions::folder(dir.path()), &progress, &ctl));
-            std::thread::sleep(Duration::from_millis(200));
+            std::thread::sleep(held_for);
             assert_eq!(progress.snapshot().dirs, 0, "nothing is read while paused");
             assert!(!scan.is_finished());
             ctl.set_paused(false);
             let t = scan.join().unwrap().unwrap();
             assert_eq!(t.stats.dirs, 51);
-            assert!(t.stats.duration < Duration::from_millis(150), "paused time is not counted");
+            assert!(t.stats.duration + held_for <= wall_clock.elapsed(), "paused time is not counted");
         });
     }
 

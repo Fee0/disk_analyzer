@@ -2,17 +2,21 @@ pub mod actions;
 pub mod hidden;
 pub mod kind;
 pub mod layout;
+mod platform;
+mod protection;
 pub mod scan;
 pub mod search;
 pub mod tree;
+pub mod volumes;
 
-pub use actions::{Collection, Refusal, Removal, is_protected};
+pub use actions::{Collection, Refusal, Removal};
 pub use kind::Kind;
 pub use layout::{Arc, Layout, LayoutParams, MAX_DEPTH, Segment, sunburst};
-pub use scan::volumes::{Volume, has_full_disk_access, list_volumes};
+pub use protection::is_protected;
 pub use scan::{CancelToken, Progress, ProgressSnapshot, ScanError, ScanOptions, scan};
 pub use search::{SearchResult, search};
 pub use tree::{Metric, NodeId, ScanStats, Tree};
+pub use volumes::{TRASH_NAME, Volume, has_full_disk_access, list_volumes};
 
 pub fn format_size(bytes: u64) -> String {
     use humansize::{DECIMAL, FormatSizeOptions, format_size as fs};

@@ -1,7 +1,7 @@
 # Disk Analyzer
 
-A fast, local, DaisyDisk-style disk usage explorer for macOS (APFS), written in
-Rust with an [iced](https://iced.rs) GUI. It has no licensing, telemetry or
+A fast, local, DaisyDisk-style disk usage explorer for macOS (APFS) and Linux,
+written in Rust with an [iced](https://iced.rs) GUI. It has no licensing, telemetry or
 network access.
 
 ## Run
@@ -11,10 +11,21 @@ cargo run --release -p dscan-gui              # start screen: volumes + "Open fo
 cargo run --release -p dscan-gui -- ~/Movies  # scan a folder right away
 ```
 
-For a whole-disk scan, give the terminal you launch from **Full Disk Access**
-(System Settings → Privacy & Security → Full Disk Access) and restart it.
-Without it, protected folders show as "no access" and their bytes end up in
-*Hidden space*.
+On macOS, for a whole-disk scan, give the terminal you launch from **Full Disk
+Access** (System Settings → Privacy & Security → Full Disk Access) and restart
+it. Without it, protected folders show as "no access" and their bytes end up in
+*Hidden space*. On Linux, folders your user can't read are counted the same
+way; run as root to see everything.
+
+| | macOS | Linux |
+|---|---|---|
+| Directory reader | `getattrlistbulk` (hundreds of entries per call) | `readdir` + `fstatat` |
+| Whole-disk scan | all volumes of the APFS container, firmlinks once | the root file system and its other subvolumes (btrfs), bind mounts once |
+| Hard links counted once | ✓ | ✓ |
+| Clones counted once | ✓ (APFS) | – (reflinks count in full, like `du`) |
+| Purgeable space | ✓ | – |
+| Remove | Trash | Trash (freedesktop) |
+| Tested | natively | in Docker (arm64), all tests |
 
 ## Using it
 
@@ -30,21 +41,26 @@ Without it, protected folders show as "no access" and their bytes end up in
 | Esc | clear the search, then the selection |
 | C, or drag onto the collector | collect items, then **Move to Trash…**, or hold **Hold 3 s to delete permanently** for 3 seconds to delete them right away |
 
+⌘ is Ctrl on Linux.
+
 *On disk* shows allocated bytes, which is what deleting actually frees; hard
 links count once. *Logical* shows file lengths, as Finder does. In a
-whole-volume scan, two grey segments show *Purgeable space* and *Hidden space*:
-container usage the file walk can't see, such as APFS snapshots, other
-volumes' metadata and unreadable folders.
+whole-volume scan, grey segments show *Purgeable space* (macOS) and *Hidden
+space*: usage the file walk can't see, such as snapshots, file system metadata
+and unreadable folders.
 
 ## Layout
 
 ```
 crates/dscan-core   library, no GUI dependencies
-  scan/bulk.rs      getattrlistbulk(2) directory reader (one syscall per ~hundreds of entries)
-  scan/mod.rs       parallel walk (rayon), hard-link dedup, APFS firmlink/volume rules
-  scan/volumes.rs   mounted volumes, container siblings, firmlinks, Full Disk Access probe
+  scan/mod.rs       parallel walk (rayon), hard-link and clone dedup, whole-disk boundaries
+  platform/         everything OS-specific, behind one `Platform` trait
+    macos/          getattrlistbulk reader, APFS container + firmlinks, NSURL purgeable space
+    linux/          readdir+fstatat reader, /proc/self/mountinfo volumes, statvfs
+    */protected.rs  folders the collector refuses, per OS
   tree.rs           compact breadth-first arena (≈40 B/node) with per-metric sort orders
-  hidden.rs         container used / purgeable / hidden space
+  volumes.rs        start-screen volume list
+  hidden.rs         used / purgeable / hidden space
   layout.rs         sunburst geometry + O(log n) hit-testing
   search.rs         parallel case-insensitive name search
   actions.rs        collector, Move to Trash / delete permanently + tree update
@@ -63,6 +79,8 @@ cargo test --workspace
 ```
 
 The core tests use real temporary file trees: hard links, sparse files,
-symlinks and unreadable folders. The GUI tests drive the views headlessly with
+symlinks and unreadable folders. Platform logic that needs no syscalls (mount
+tables, protected folders) is tested for every OS on any host. See CLAUDE.md for the Linux (Docker) and
+cross-target checks. The GUI tests drive the views headlessly with
 `iced_test`: keyboard navigation, drag-to-collect and the metric toggle. They
 also write screenshots to `target/iced-inspect/`.

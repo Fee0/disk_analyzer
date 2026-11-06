@@ -1,4 +1,4 @@
-use dscan_core::{Kind, Metric, NodeId, Segment, format_size};
+use dscan_core::{Kind, Metric, NodeId, Segment, TRASH_NAME, format_size};
 use iced::border;
 use iced::widget::text::Wrapping;
 use iced::widget::{
@@ -417,13 +417,17 @@ fn collector(b: &Browser) -> Element<'_, Message> {
 
     let body: Element<'_, Message> = if b.confirm_trash {
         row![
-            text(format!("Move {} item(s), {}, to the Trash?", collected.len(), format_size(collected.size(&b.tree))))
-                .size(14),
+            text(format!(
+                "Move {} item(s), {}, to the {TRASH_NAME}?",
+                collected.len(),
+                format_size(collected.size(&b.tree))
+            ))
+            .size(14),
             Space::new().width(Fill),
             button(text("Cancel").size(13))
                 .style(filled_white_text_button(theme::NEUTRAL_BUTTON))
                 .on_press(Message::CancelTrash),
-            button(text("Move to Trash").size(13))
+            button(text(format!("Move to {TRASH_NAME}")).size(13))
                 .style(filled_white_text_button(theme::DANGER))
                 .on_press(Message::ConfirmTrash),
         ]
@@ -469,7 +473,7 @@ fn collector(b: &Browser) -> Element<'_, Message> {
             button(text("Clear").size(13))
                 .style(filled_white_text_button(theme::NEUTRAL_BUTTON))
                 .on_press(Message::ClearCollector),
-            button(text("Move to Trash…").size(13))
+            button(text(format!("Move to {TRASH_NAME}…")).size(13))
                 .style(filled_white_text_button(theme::DANGER))
                 .on_press(Message::AskTrash),
             hold_to_delete_button(b),

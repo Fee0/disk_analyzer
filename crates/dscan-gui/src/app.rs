@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use dscan_core::{
     CancelToken, Collection, Layout, LayoutParams, Metric, NodeId, Progress, ProgressSnapshot, Refusal, Removal,
-    ScanError, ScanOptions, SearchResult, Segment, Tree, Volume, actions, format_size,
+    ScanError, ScanOptions, SearchResult, Segment, TRASH_NAME, Tree, Volume, actions, format_size,
 };
 use iced::keyboard::{self, Key, key::Named};
 use iced::widget::canvas::Cache;
@@ -620,7 +620,7 @@ impl Browser {
     fn collect(&mut self, id: NodeId) {
         if let Err(Refusal::Protected) = self.collector.add(&self.tree, id) {
             self.status = Some(format!(
-                "“{}” is a protected system location and can't be moved to the Trash.",
+                "“{}” is a protected system location and can't be moved to the {TRASH_NAME}.",
                 truncate(&self.tree.name(id), 40)
             ));
         }
@@ -653,7 +653,7 @@ impl Browser {
         let items_phrase = format!("{} item{}", report.removed, if report.removed == 1 { "" } else { "s" });
         let mut msg = match removal {
             Removal::MoveToTrash => format!(
-                "Moved {items_phrase} ({}) to the Trash. Empty the Trash to free the space.",
+                "Moved {items_phrase} ({}) to the {TRASH_NAME}. Empty the {TRASH_NAME} to free the space.",
                 format_size(report.bytes)
             ),
             Removal::DeletePermanently => {

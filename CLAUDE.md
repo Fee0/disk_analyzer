@@ -1,7 +1,7 @@
 # Disk Analyzer
 
-A DaisyDisk-style disk usage explorer for macOS/APFS: Rust, with an iced 0.14
-GUI. It is a personal tool: no licensing, no network, no caching (every launch
+A DaisyDisk-style disk usage explorer for macOS (APFS) and Linux:
+Rust, with an iced 0.14 GUI. It is a personal tool: no licensing, no network, no caching (every launch
 scans fresh). Performance and UX both matter.
 
 ## Core / GUI split (enforced)
@@ -39,11 +39,36 @@ Rules:
    background thread, never directly in `update`/`view`.
 
 `crates/dscan-core/tests/layering.rs` checks rules 1 and 3 mechanically (core's
-dependencies, and banned APIs in GUI sources). If it fails, move the code to the
+dependencies, and banned APIs in GUI sources), and the platform rules below. If it fails, move the code to the
 right crate rather than loosening the test.
 
 When adding a feature, first decide what is core (data, rules, I/O) and what is
 GUI (how it looks and is driven), and put each part in its crate.
+
+## Platform layer (enforced)
+
+Everything that differs between operating systems lives in
+`crates/dscan-core/src/platform/`, one folder per OS, behind the `Platform`
+trait in `platform/mod.rs`. Each OS implements it once (`MacOs`, `Linux`), and `platform::Current` picks the one for the build target.
+
+Rules:
+
+1. **OS code only in `platform/<os>/`.** Outside `src/platform/`, core code
+   must not use `libc`, `objc2`, `windows_sys`, `std::os::unix`/`windows`,
+   or `cfg(unix)`/`cfg(windows)`/`cfg(target_os …)` (unit-test modules may,
+   for fixtures). Shared code calls `Current::…` through the trait.
+2. **Every OS implements the whole trait.** Adding a capability means adding
+   a trait item and implementing it for every OS. Never stub one OS silently;
+   if an OS has no equivalent (e.g. purgeable space off macOS), return the
+   honest neutral value.
+3. **Pure logic is tested on every host.** Parsing and rules that need no
+   syscalls (mountinfo, APFS container names, path syntax,
+   protected-folder tables) go in their own modules that compile under
+   `cfg(any(target_os = "<os>", test))`, so `cargo test` on any machine
+   checks every platform. Only the modules that make syscalls are gated
+   to their OS.
+4. **Shared Unix helpers** (fds, `CString` paths, devices) go in
+   `platform/unix.rs`, not copied into `macos/` and `linux/`.
 
 ## Dependencies
 
@@ -58,10 +83,16 @@ Linux-only or unused here. `layering.rs` checks this too.
 
 ```
 crates/dscan-core/src/
-  scan/{mod,bulk,volumes}.rs   parallel walk, getattrlistbulk, APFS volumes/firmlinks
+  scan/mod.rs                  parallel walk (platform-neutral), progress, pause/cancel
+  platform/mod.rs              Platform trait, DirEntry, DeviceId, WholeDiskBoundaries
+  platform/unix.rs             helpers shared by macOS and Linux
+  platform/macos/              getattrlistbulk reader, APFS container/firmlinks, NSURL space
+  platform/linux/              readdir+fstatat reader, /proc/self/mountinfo, statvfs
+  platform/*/protected.rs      per-OS protected folders (matched by protection.rs)
   tree.rs                      arena tree (NodeId), sizes, remove(), sort orders
   layout.rs                    sunburst geometry + hit-testing
-  search.rs, actions.rs, hidden.rs, kind.rs
+  volumes.rs, hidden.rs        volume list, hidden/purgeable split
+  search.rs, actions.rs, protection.rs, kind.rs
   examples/scan.rs             CLI for benchmarking
 crates/dscan-gui/src/
   app.rs      state, Message, update, subscriptions
@@ -85,6 +116,21 @@ cargo test --workspace                                  # unit, layering and hea
 - Fix what they report; don't silence it. Don't add `#[allow(...)]`, skip or
   `#[ignore]` tests, or loosen `layering.rs` to get green. If a lint is truly
   wrong for a spot, say so and explain why.
+- If you touched platform code or dependencies, also check the other targets
+  (they need no linker; `rustup target add` them once):
+
+  ```sh
+  cargo clippy -p dscan-core --all-targets --target x86_64-unknown-linux-gnu -- -D warnings
+  ```
+
+  and run the Linux tests for real in Docker (as a normal user, so that
+  permission tests mean something):
+
+  ```sh
+  docker run --rm -u "$(id -u):$(id -g)" -v "$PWD":/work -w /work \
+    -e CARGO_HOME=/work/target/docker-cargo -e CARGO_TARGET_DIR=/work/target/docker-linux \
+    rust:1-bookworm cargo test --workspace
+  ```
 - If you touched `Cargo.toml` or features, also build each crate alone
   (`cargo test -p dscan-core`, `cargo test -p dscan-gui`): the workspace build
   can hide a missing feature that another crate happens to enable.
