@@ -5,12 +5,13 @@ use iced::border;
 use iced::widget::text::Wrapping;
 use iced::widget::{
     Column, Space, button, canvas, center, column, container, mouse_area, pin, progress_bar, row, scrollable, stack,
-    text, text_input,
+    text, text_input, tooltip,
 };
 use iced::{Alignment, Color, Element, Fill, Length, Shrink, Theme};
 
 use crate::app::{App, Browser, Message, Row, SEARCH_ID, ScanJob, Screen};
-use crate::fmt::{thousands, truncate, truncate_middle};
+use crate::fmt::{thousands, truncate};
+use crate::icon;
 use crate::sunburst::Sunburst;
 use crate::theme;
 
@@ -63,6 +64,12 @@ fn subtle_button<'a>(content: impl Into<Element<'a, Message>>, msg: Option<Messa
         .on_press_maybe(msg)
 }
 
+/// An icon-only button with a hover label.
+fn icon_button<'a>(icon: impl Into<Element<'a, Message>>, label: &'a str, msg: Message) -> Element<'a, Message> {
+    let tip = container(text(label).size(12)).padding([4, 8]).style(|_| boxed(theme::PANEL_HI, 6.0));
+    tooltip(subtle_button(icon, Some(msg)).padding(6), tip, tooltip::Position::Bottom).gap(4).into()
+}
+
 // ---------------------------------------------------------------------------
 // Start screen
 // ---------------------------------------------------------------------------
@@ -104,17 +111,20 @@ fn start(app: &App) -> Element<'_, Message> {
         }
     };
 
+    let disks_header = row![
+        text("Disks").size(13).color(theme::TEXT_DIM),
+        Space::new().width(Fill),
+        icon_button(icon::refresh(14.0, theme::TEXT_DIM), "Refresh disks", Message::RefreshVolumes),
+    ]
+    .align_y(Alignment::Center);
+
     let mut col = column![
         text("Disk Analyzer").size(34),
         text("Choose a disk or a folder to see what takes up space.").size(15).color(theme::TEXT_DIM),
         Space::new().height(12),
-        cards,
+        column![disks_header, cards].spacing(4).width(Shrink),
         Space::new().height(4),
-        row![
-            button(text("Open folder…").size(14)).padding([8, 16]).on_press(Message::OpenFolder),
-            subtle_button(text("Refresh").size(13), Some(Message::RefreshVolumes)),
-        ]
-        .spacing(10),
+        button(text("Open folder…").size(14)).padding([8, 16]).on_press(Message::OpenFolder),
     ]
     .spacing(12)
     .align_x(Alignment::Center);
@@ -139,7 +149,15 @@ fn start(app: &App) -> Element<'_, Message> {
     if let Some(err) = &app.error {
         col = col.push(text(err.clone()).color(theme::DANGER).size(14));
     }
-    center(col).padding(24).into()
+    let page = center(col).padding(24);
+    match &app.parked {
+        Some(b) => {
+            let label = format!("‹  Back to {}", truncate(&b.tree.name(b.tree.root()), 40));
+            let back = subtle_button(text(label).size(13), Some(Message::ResumeBrowse));
+            column![container(back).padding([12, 12]), page].into()
+        }
+        None => page.into(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -148,14 +166,15 @@ fn start(app: &App) -> Element<'_, Message> {
 
 fn scanning(job: &ScanJob) -> Element<'_, Message> {
     let s = &job.snapshot;
-    let elapsed = job.started.elapsed().as_secs_f32();
-    let rate = if elapsed > 0.1 { s.files as f32 / elapsed } else { 0.0 };
+    let stat = |label, n| {
+        row![text(label).size(15).color(theme::TEXT_DIM), Space::new().width(Fill), text(thousands(n)).size(15)]
+            .width(220)
+    };
     let mut col = column![
         text(format!("Scanning {}…", job.opts.display_name())).size(26),
         Space::new().height(8),
         text(format_size(s.bytes)).size(44).color(theme::kind_color(Kind::Video)),
-        text(format!("{} files · {} folders", thousands(s.files), thousands(s.dirs))).size(15),
-        text(format!("{elapsed:.1} s · {} files/s", thousands(rate as u64))).size(13).color(theme::TEXT_DIM),
+        column![stat("Files", s.files), stat("Folders", s.dirs)].spacing(4),
     ]
     .spacing(8)
     .align_x(Alignment::Center);
@@ -164,7 +183,6 @@ fn scanning(job: &ScanJob) -> Element<'_, Message> {
         col = col.push(container(progress_bar(0.0..=1.0, frac).girth(6)).width(420));
     }
     col = col
-        .push(text(truncate_middle(&s.current, 80)).size(12).color(theme::TEXT_DIM))
         .push(Space::new().height(12))
         .push(button(text("Cancel").size(14)).padding([8, 18]).style(button::secondary).on_press(Message::CancelScan));
     center(col).into()
@@ -233,12 +251,12 @@ fn toolbar(b: &Browser) -> Element<'_, Message> {
         .width(220);
 
     row![
+        icon_button(icon::home(16.0, theme::TEXT), "Start page", Message::GoHome),
         nav,
         container(crumbs).width(Fill).clip(true),
         metric,
         search,
-        subtle_button(text("Rescan").size(13), Some(Message::Rescan)),
-        subtle_button(text("New scan").size(13), Some(Message::NewScan)),
+        icon_button(icon::refresh(16.0, theme::TEXT), "Rescan", Message::Rescan),
     ]
     .spacing(10)
     .align_y(Alignment::Center)

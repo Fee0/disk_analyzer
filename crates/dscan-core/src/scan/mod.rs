@@ -57,7 +57,6 @@ pub struct Progress {
     bytes: AtomicU64,
     /// Bytes the scan is expected to find (whole-disk mode), 0 if unknown.
     expected: AtomicU64,
-    current: Mutex<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -66,7 +65,6 @@ pub struct ProgressSnapshot {
     pub dirs: u64,
     pub bytes: u64,
     pub expected: Option<u64>,
-    pub current: String,
 }
 
 impl Progress {
@@ -76,7 +74,6 @@ impl Progress {
             dirs: self.dirs.load(Relaxed),
             bytes: self.bytes.load(Relaxed),
             expected: Some(self.expected.load(Relaxed)).filter(|&e| e > 0),
-            current: self.current.lock().clone(),
         }
     }
 }
@@ -280,11 +277,7 @@ fn scan_dir(ctx: &Ctx<'_>, path: Vec<u8>, name: Box<[u8]>, dev: i32, depth: u32)
     let p = ctx.progress;
     p.files.fetch_add(node.files.len() as u64, Relaxed);
     p.bytes.fetch_add(file_bytes, Relaxed);
-    if p.dirs.fetch_add(1, Relaxed).is_multiple_of(128)
-        && let Some(mut cur) = p.current.try_lock()
-    {
-        *cur = String::from_utf8_lossy(path).into_owned();
-    }
+    p.dirs.fetch_add(1, Relaxed);
 
     // Decide what to descend into first, so the parallel collect knows its
     // exact length.

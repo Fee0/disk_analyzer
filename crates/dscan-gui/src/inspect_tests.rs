@@ -200,3 +200,54 @@ fn metric_toggle_relayouts() {
     let b = browser(&app);
     assert_eq!(b.layout.total, b.tree.size(b.tree.root(), dscan_core::Metric::Logical));
 }
+
+#[test]
+fn inspect_scanning() -> Result<(), Error> {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut app, _) = App::new(None);
+    // The returned task (the actual scan) is never run here.
+    let _ = app.update(Message::FolderPicked(Some(dir.path().to_path_buf())));
+    let Screen::Scanning(job) = &mut app.screen else { panic!("not scanning") };
+    job.snapshot = dscan_core::ProgressSnapshot { files: 673_862, dirs: 163_187, bytes: 86_624_714_752, expected: None };
+    let mut ui = sim(&app);
+    let report = ui_inspect::report(&mut ui, VIEW);
+    println!("{report}");
+    assert!(report.contains("\"Files\"") && report.contains("\"673,862\"") && report.contains("\"163,187\""));
+    println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, "scanning")?.display());
+    Ok(())
+}
+
+#[test]
+fn inspect_home_and_resume() -> Result<(), Error> {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = browser_app(dir.path());
+    let focus = browser(&app).tree.children(browser(&app).tree.root(), browser(&app).metric).next().unwrap();
+    let _ = app.update(Message::Navigate(focus));
+
+    let _ = app.update(Message::GoHome);
+    assert!(matches!(app.screen, Screen::Start) && app.parked.is_some());
+    app.volumes = Some(dscan_core::list_volumes());
+    {
+        let mut ui = sim(&app);
+        let report = ui_inspect::report(&mut ui, VIEW);
+        println!("{report}");
+        println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, "home-parked")?.display());
+    }
+    let msgs: Vec<Message> = {
+        let mut ui = sim(&app);
+        ui.click(format!("‹  Back to {}", browser_name(&app)).as_str())?;
+        ui.into_messages().collect()
+    };
+    assert!(matches!(msgs[..], [Message::ResumeBrowse]), "{msgs:?}");
+    for m in msgs {
+        let _ = app.update(m);
+    }
+    assert_eq!(browser(&app).focus, focus, "results and position are restored");
+    assert!(app.parked.is_none());
+    Ok(())
+}
+
+fn browser_name(app: &App) -> String {
+    let b = app.parked.as_ref().unwrap();
+    b.tree.name(b.tree.root()).into_owned()
+}

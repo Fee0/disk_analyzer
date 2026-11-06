@@ -2,6 +2,7 @@
 
 mod app;
 mod fmt;
+mod icon;
 mod quicklook;
 mod sunburst;
 mod theme;

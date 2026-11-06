@@ -10,7 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 dscan-core = { path = "../dscan-core" }
-iced = { version = "0.14", features = ["canvas", "tokio", "advanced"] }
+iced = { version = "0.14", features = ["canvas", "svg", "tokio", "advanced"] }
 rfd = "0.17"
 mimalloc = "0.1"
 parking_lot = "0.12"

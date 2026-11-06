@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use dscan_core::{
     CancelToken, Collection, Layout, LayoutParams, Metric, NodeId, Progress, ProgressSnapshot, ScanError,
@@ -39,6 +39,9 @@ pub struct App {
     pub volumes: Option<Vec<Volume>>,
     pub full_disk_access: bool,
     pub error: Option<String>,
+    /// The last results, kept while on the start page so they can be
+    /// resumed; dropped when the next scan starts.
+    pub parked: Option<Box<Browser>>,
     next_job: u64,
 }
 
@@ -56,7 +59,6 @@ pub struct ScanJob {
     pub opts: ScanOptions,
     pub progress: Arc<Progress>,
     pub cancel: CancelToken,
-    pub started: Instant,
     pub snapshot: ProgressSnapshot,
     slot: ScanSlot,
 }
@@ -175,13 +177,16 @@ pub enum Message {
     // Misc
     QuickLook,
     Rescan,
-    NewScan,
+    /// Go to the start page, keeping the current results resumable.
+    GoHome,
+    ResumeBrowse,
     DismissStatus,
 }
 
 impl App {
     pub fn new(initial: Option<PathBuf>) -> (Self, Task<Message>) {
-        let mut app = App { screen: Screen::Start, volumes: None, full_disk_access: true, error: None, next_job: 1 };
+        let mut app =
+            App { screen: Screen::Start, volumes: None, full_disk_access: true, error: None, parked: None, next_job: 1 };
         let load = Self::load_volumes();
         let task = match initial {
             Some(path) => Task::batch([load, app.start_scan(ScanOptions::folder(path))]),
@@ -218,11 +223,16 @@ impl App {
         }
     }
 
-    /// Leave the browser, freeing its tree off the UI thread (it can be
-    /// hundreds of MB).
+    /// Leave the browser and drop it and any parked results, freeing the
+    /// trees off the UI thread (they can be gigabytes).
     fn leave_browser(&mut self) {
-        if let Screen::Browse(old) = std::mem::replace(&mut self.screen, Screen::Start) {
-            std::thread::spawn(move || drop(old));
+        let current = match std::mem::replace(&mut self.screen, Screen::Start) {
+            Screen::Browse(b) => Some(b),
+            _ => None,
+        };
+        let parked = self.parked.take();
+        if current.is_some() || parked.is_some() {
+            std::thread::spawn(move || drop((current, parked)));
         }
     }
 
@@ -243,7 +253,6 @@ impl App {
             opts,
             progress,
             cancel,
-            started: Instant::now(),
             snapshot: ProgressSnapshot::default(),
             slot,
         });
@@ -308,9 +317,19 @@ impl App {
                     }
                 }
             }
-            Message::NewScan => {
-                self.leave_browser();
+            Message::GoHome => {
+                if let Screen::Browse(mut b) = std::mem::replace(&mut self.screen, Screen::Start) {
+                    b.quicklook.close();
+                    b.drag = None;
+                    self.parked = Some(b);
+                }
+                self.error = None;
                 return Self::load_volumes();
+            }
+            Message::ResumeBrowse => {
+                if let Some(b) = self.parked.take() {
+                    self.screen = Screen::Browse(b);
+                }
             }
             Message::Rescan => {
                 if let Screen::Browse(b) = &self.screen {

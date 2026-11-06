@@ -22,24 +22,11 @@ pub fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-/// Like [`truncate`], but keeps both ends (for paths).
-pub fn truncate_middle(s: &str, max: usize) -> String {
-    let n = s.chars().count();
-    if n <= max {
-        return s.to_string();
-    }
-    let half = (max - 1) / 2;
-    let head: String = s.chars().take(half).collect();
-    let tail: String = s.chars().skip(n - half).collect();
-    format!("{head}…{tail}")
-}
-
 #[cfg(test)]
 mod tests {
     #[test]
     fn formats() {
         assert_eq!(super::thousands(1234567), "1,234,567");
         assert_eq!(super::truncate("abcdef", 4), "abc…");
-        assert_eq!(super::truncate_middle("abcdefghij", 5), "ab…ij");
     }
 }
