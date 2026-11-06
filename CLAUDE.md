@@ -186,4 +186,6 @@ updated from the skill.
   reasoning.
 - Tests must not touch the real Trash or anything outside a temp dir.
 - Performance-sensitive paths: the scan walk, `tree::build`, search and layout.
-  Measure with `examples/scan.rs` before and after changing them.
+  Measure with `examples/scan.rs` before and after changing them, and read
+  `docs/scan-performance.md` first: the whole-disk scan is bound by APFS
+  metadata I/O, and many obvious tweaks were measured there without effect.
