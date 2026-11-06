@@ -170,8 +170,10 @@ fn scanning(job: &ScanJob) -> Element<'_, Message> {
         row![text(label).size(15).color(theme::TEXT_DIM), Space::new().width(Fill), text(thousands(n)).size(15)]
             .width(220)
     };
+    let paused = job.cancel.is_paused();
+    let title = if paused { format!("Paused: {}", job.opts.display_name()) } else { format!("Scanning {}…", job.opts.display_name()) };
     let mut col = column![
-        text(format!("Scanning {}…", job.opts.display_name())).size(26),
+        text(title).size(26),
         Space::new().height(8),
         text(format_size(s.bytes)).size(44).color(theme::kind_color(Kind::Video)),
         column![stat("Files", s.files), stat("Folders", s.dirs)].spacing(4),
@@ -182,9 +184,12 @@ fn scanning(job: &ScanJob) -> Element<'_, Message> {
         let frac = (s.bytes as f32 / expected as f32).min(0.99);
         col = col.push(container(progress_bar(0.0..=1.0, frac).girth(6)).width(420));
     }
-    col = col
-        .push(Space::new().height(12))
-        .push(button(text("Cancel").size(14)).padding([8, 18]).style(button::secondary).on_press(Message::CancelScan));
+    let buttons = row![
+        button(text(if paused { "Resume" } else { "Pause" }).size(14)).padding([8, 18]).on_press(Message::TogglePause),
+        button(text("Cancel").size(14)).padding([8, 18]).style(button::secondary).on_press(Message::CancelScan),
+    ]
+    .spacing(10);
+    col = col.push(Space::new().height(12)).push(buttons);
     center(col).into()
 }
 

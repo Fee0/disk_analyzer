@@ -9,9 +9,9 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 use rayon::prelude::*;
 use rustc_hash::FxHashSet;
 
@@ -78,16 +78,68 @@ impl Progress {
     }
 }
 
-/// Cooperative cancellation flag.
+/// Cooperative cancellation and pausing of long-running work (scans
+/// pause before each folder; search only honors cancellation).
 #[derive(Clone, Debug, Default)]
-pub struct CancelToken(Arc<AtomicBool>);
+pub struct CancelToken(Arc<Control>);
+
+#[derive(Debug, Default)]
+struct Control {
+    cancelled: AtomicBool,
+    /// Fast-path flag; changed only while holding `clock`.
+    paused: AtomicBool,
+    clock: Mutex<PauseClock>,
+    wake: Condvar,
+}
+
+#[derive(Debug, Default)]
+struct PauseClock {
+    since: Option<Instant>,
+    total: Duration,
+}
 
 impl CancelToken {
     pub fn cancel(&self) {
-        self.0.store(true, Relaxed);
+        self.0.cancelled.store(true, Relaxed);
+        let _clock = self.0.clock.lock();
+        self.0.wake.notify_all();
     }
     pub fn is_cancelled(&self) -> bool {
-        self.0.load(Relaxed)
+        self.0.cancelled.load(Relaxed)
+    }
+
+    pub fn set_paused(&self, paused: bool) {
+        let mut clock = self.0.clock.lock();
+        if self.0.paused.swap(paused, Relaxed) == paused {
+            return;
+        }
+        if paused {
+            clock.since = Some(Instant::now());
+        } else {
+            let paused = clock.since.take().map_or(Duration::ZERO, |t| t.elapsed());
+            clock.total += paused;
+            self.0.wake.notify_all();
+        }
+    }
+    pub fn is_paused(&self) -> bool {
+        self.0.paused.load(Relaxed)
+    }
+
+    /// Total time spent paused so far.
+    pub fn paused_for(&self) -> Duration {
+        let clock = self.0.clock.lock();
+        clock.total + clock.since.map_or(Duration::ZERO, |t| t.elapsed())
+    }
+
+    /// Block while paused; returns at once when cancelled.
+    fn checkpoint(&self) {
+        if !self.is_paused() {
+            return;
+        }
+        let mut clock = self.0.clock.lock();
+        while self.is_paused() && !self.is_cancelled() {
+            self.0.wake.wait(&mut clock);
+        }
     }
 }
 
@@ -195,7 +247,7 @@ pub fn scan(opts: &ScanOptions, progress: &Progress, cancel: &CancelToken) -> Re
         dirs: progress.dirs.load(Relaxed),
         errors: ctx.errors.load(Relaxed),
         error_samples: std::mem::take(&mut *ctx.error_samples.lock()),
-        duration: started.elapsed(),
+        duration: started.elapsed().saturating_sub(cancel.paused_for()),
         hidden: 0,
         purgeable: 0,
     };
@@ -228,6 +280,7 @@ fn join(parent: &[u8], name: &[u8]) -> Vec<u8> {
 fn scan_dir(ctx: &Ctx<'_>, path: Vec<u8>, name: Box<[u8]>, dev: i32, depth: u32) -> DirNode {
     let forced = if depth == 1 && ctx.system_top.contains(&name[..]) { Some(Kind::System) } else { Kind::of_dir(&name) };
     let mut node = DirNode::new(name);
+    ctx.cancel.checkpoint();
     if ctx.cancel.is_cancelled() {
         return node;
     }
@@ -367,6 +420,41 @@ mod tests {
         let t = scan(&ScanOptions::folder(r.join("link")), &Progress::default(), &CancelToken::default()).unwrap();
         assert_eq!(t.stats.errors, 0);
         assert_eq!(t.size(find(&t, "f.bin"), Metric::Logical), 10_000);
+    }
+
+    #[test]
+    fn pause_holds_the_scan_until_resumed() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..50 {
+            let d = dir.path().join(format!("d{i}"));
+            std::fs::create_dir(&d).unwrap();
+            std::fs::write(d.join("f"), b"x").unwrap();
+        }
+        let (progress, ctl) = (Progress::default(), CancelToken::default());
+        ctl.set_paused(true);
+        std::thread::scope(|s| {
+            let scan = s.spawn(|| scan(&ScanOptions::folder(dir.path()), &progress, &ctl));
+            std::thread::sleep(Duration::from_millis(200));
+            assert_eq!(progress.snapshot().dirs, 0, "nothing is read while paused");
+            assert!(!scan.is_finished());
+            ctl.set_paused(false);
+            let t = scan.join().unwrap().unwrap();
+            assert_eq!(t.stats.dirs, 51);
+            assert!(t.stats.duration < Duration::from_millis(150), "paused time is not counted");
+        });
+    }
+
+    #[test]
+    fn cancel_wakes_a_paused_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctl = CancelToken::default();
+        ctl.set_paused(true);
+        std::thread::scope(|s| {
+            let scan = s.spawn(|| scan(&ScanOptions::folder(dir.path()), &Progress::default(), &ctl));
+            std::thread::sleep(Duration::from_millis(50));
+            ctl.cancel();
+            assert!(matches!(scan.join().unwrap(), Err(ScanError::Cancelled)));
+        });
     }
 
     #[test]

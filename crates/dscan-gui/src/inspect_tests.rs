@@ -214,6 +214,21 @@ fn inspect_scanning() -> Result<(), Error> {
     println!("{report}");
     assert!(report.contains("\"Files\"") && report.contains("\"673,862\"") && report.contains("\"163,187\""));
     println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, "scanning")?.display());
+
+    ui.click("Pause")?;
+    let msgs: Vec<Message> = ui.into_messages().collect();
+    assert!(matches!(msgs[..], [Message::TogglePause]), "{msgs:?}");
+    let _ = app.update(Message::TogglePause);
+    let Screen::Scanning(job) = &app.screen else { panic!("not scanning") };
+    assert!(job.cancel.is_paused());
+    let mut ui = sim(&app);
+    let report = ui_inspect::report(&mut ui, VIEW);
+    assert!(report.contains("\"Resume\"") && report.contains("Paused: "), "{report}");
+    println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, "paused")?.display());
+    drop(ui);
+    let _ = app.update(Message::TogglePause);
+    let Screen::Scanning(job) = &app.screen else { panic!("not scanning") };
+    assert!(!job.cancel.is_paused());
     Ok(())
 }
 

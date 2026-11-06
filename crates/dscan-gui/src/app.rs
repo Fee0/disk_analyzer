@@ -140,6 +140,8 @@ pub enum Message {
     // Scanning
     Tick,
     CancelScan,
+    /// Pause or resume the running scan.
+    TogglePause,
     /// Scan job finished; carries the panic message if the scan crashed.
     ScanFinished(u64, Option<String>),
     // Browsing: chart and list share these
@@ -215,6 +217,8 @@ impl App {
     pub fn subscription(&self) -> Subscription<Message> {
         match &self.screen {
             Screen::Start => Subscription::none(),
+            // No progress to show while paused.
+            Screen::Scanning(job) if job.cancel.is_paused() => Subscription::none(),
             Screen::Scanning(_) => iced::time::every(Duration::from_millis(100)).map(|_| Message::Tick),
             Screen::Browse(b) => {
                 let base = event::listen_with(global_event);
@@ -292,6 +296,11 @@ impl App {
             Message::Tick => {
                 if let Screen::Scanning(job) = &mut self.screen {
                     job.snapshot = job.progress.snapshot();
+                }
+            }
+            Message::TogglePause => {
+                if let Screen::Scanning(job) = &self.screen {
+                    job.cancel.set_paused(!job.cancel.is_paused());
                 }
             }
             Message::CancelScan => {
