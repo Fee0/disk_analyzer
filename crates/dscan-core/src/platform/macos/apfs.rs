@@ -14,16 +14,26 @@ pub(super) fn container_of(mounted_from: &str) -> Option<&str> {
     Some(&dev[..disk_prefix.len() + digits])
 }
 
-pub(super) fn firmlinked_duplicate_paths(firmlinks_file: Option<&[u8]>) -> FxHashSet<Vec<u8>> {
+fn is_same_or_inside(path: &[u8], folder: &[u8]) -> bool {
+    let folder = folder.strip_suffix(b"/").unwrap_or(folder);
+    path.strip_prefix(folder).is_some_and(|rest| rest.is_empty() || rest.starts_with(b"/"))
+}
+
+pub(super) fn firmlinked_duplicate_paths(firmlinks_file: Option<&[u8]>, scan_root: &[u8]) -> FxHashSet<Vec<u8>> {
     let Some(content) = firmlinks_file else {
-        return FxHashSet::from_iter([DATA_VOLUME_MOUNT.to_vec()]);
+        let scan_reaches_the_data_volume_twice = scan_root == b"/";
+        return match scan_reaches_the_data_volume_twice {
+            true => FxHashSet::from_iter([DATA_VOLUME_MOUNT.to_vec()]),
+            false => FxHashSet::default(),
+        };
     };
     content
         .split(|&b| b == b'\n')
         .filter_map(|line| {
             let tab = line.iter().position(|&b| b == FIRMLINK_TARGET_SEPARATOR)?;
-            let target = &line[tab + 1..];
-            (!target.is_empty()).then(|| [DATA_VOLUME_MOUNT, b"/", target].concat())
+            let (source, target) = (&line[..tab], &line[tab + 1..]);
+            let scan_reaches_the_firmlink = is_same_or_inside(source, scan_root);
+            (!target.is_empty() && scan_reaches_the_firmlink).then(|| [DATA_VOLUME_MOUNT, b"/", target].concat())
         })
         .collect()
 }
@@ -40,16 +50,36 @@ mod tests {
         assert_eq!(container_of("com.apple.TimeMachine.x@/dev/disk3s5"), None);
     }
 
+    const FIRMLINKS: &[u8] = b"/Applications\tApplications\n/Users\tUsers\n/usr/local\tusr/local\n";
+
     #[test]
     fn firmlinked_folders_are_skipped_on_the_data_volume_because_the_walk_reaches_them_through_the_firmlink() {
-        let firmlinks = b"/Applications\tApplications\n/Users\tUsers\n/Library\tLibrary\n";
-        let skipped = firmlinked_duplicate_paths(Some(firmlinks));
+        let skipped = firmlinked_duplicate_paths(Some(FIRMLINKS), b"/");
         assert_eq!(skipped.len(), 3);
         assert!(skipped.contains(&b"/System/Volumes/Data/Users"[..]));
+        assert!(skipped.contains(&b"/System/Volumes/Data/usr/local"[..]));
     }
 
     #[test]
-    fn without_a_firmlinks_file_the_whole_data_volume_is_skipped_rather_than_counted_twice() {
-        assert_eq!(firmlinked_duplicate_paths(None), FxHashSet::from_iter([b"/System/Volumes/Data".to_vec()]));
+    fn a_firmlink_target_counts_as_a_duplicate_only_when_the_scan_also_reaches_the_firmlink() {
+        let from_usr = firmlinked_duplicate_paths(Some(FIRMLINKS), b"/usr");
+        assert_eq!(from_usr, FxHashSet::from_iter([b"/System/Volumes/Data/usr/local".to_vec()]));
+        assert!(firmlinked_duplicate_paths(Some(FIRMLINKS), b"/System/Volumes/Data").is_empty());
+        assert!(firmlinked_duplicate_paths(Some(FIRMLINKS), b"/Users/alex").is_empty());
+    }
+
+    #[test]
+    fn inside_compares_whole_components() {
+        assert!(is_same_or_inside(b"/usr/local", b"/usr"));
+        assert!(is_same_or_inside(b"/usr", b"/usr/"));
+        assert!(is_same_or_inside(b"/Users", b"/"));
+        assert!(!is_same_or_inside(b"/usrx", b"/usr"));
+    }
+
+    #[test]
+    fn without_a_firmlinks_file_a_root_scan_skips_the_whole_data_volume_rather_than_counting_it_twice() {
+        let skipped = firmlinked_duplicate_paths(None, b"/");
+        assert_eq!(skipped, FxHashSet::from_iter([b"/System/Volumes/Data".to_vec()]));
+        assert!(firmlinked_duplicate_paths(None, b"/Users").is_empty());
     }
 }

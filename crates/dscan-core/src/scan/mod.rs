@@ -9,7 +9,7 @@ use rustc_hash::FxHashSet;
 
 use crate::hidden;
 use crate::kind::Kind;
-use crate::platform::{Current, DeviceId, DirEntry, EntryType, Platform, WholeDiskBoundaries};
+use crate::platform::{Current, DeviceId, DirEntry, EntryType, Platform, ScanBoundaries, ScanExtent};
 use crate::tree::{self, DirNode, ScanStats, Synthetic, Tree, flags};
 
 #[derive(Clone, Debug)]
@@ -151,7 +151,7 @@ enum Duplicate {
 const MAX_ERROR_SAMPLES: usize = 100;
 
 struct Ctx<'a> {
-    boundaries: WholeDiskBoundaries,
+    boundaries: ScanBoundaries,
     system_top_level_dirs: FxHashSet<&'static [u8]>,
     hard_linked_inodes: ShardedSeenSet,
     shared_data_streams: ShardedSeenSet,
@@ -180,6 +180,10 @@ impl Ctx<'_> {
 
     fn is_duplicate_view(&self, path: &[u8]) -> bool {
         self.boundaries.duplicate_views.contains(path)
+    }
+
+    fn device_inside(&self, path: &[u8], as_listed: DeviceId) -> DeviceId {
+        self.boundaries.devices_mounted_on.get(path).copied().unwrap_or(as_listed)
     }
 
     fn record_error(&self, path: &[u8]) {
@@ -224,7 +228,8 @@ pub fn scan(opts: &ScanOptions, progress: &Progress, cancel: &CancelToken) -> Re
     if let Some(space) = &space {
         progress.expected_bytes_or_zero.store(space.used, Relaxed);
     }
-    let boundaries = if opts.whole_disk { Current::whole_disk_boundaries(&root) } else { Default::default() };
+    let extent = if opts.whole_disk { ScanExtent::WholeDisk } else { ScanExtent::Folder };
+    let boundaries = Current::scan_boundaries(&root, extent);
     let system_top_level_dirs = if opts.whole_disk && Current::is_system_root(&root) {
         Current::SYSTEM_FOLDERS_AT_SYSTEM_ROOT.iter().map(|name| name.as_bytes()).collect()
     } else {
@@ -367,8 +372,12 @@ fn subdirs_to_descend(
 ) -> Vec<(Vec<u8>, Box<[u8]>, DeviceId)> {
     subdirs
         .into_iter()
-        .filter(|&(_, child_dev)| ctx.may_enter_device(dev, child_dev))
-        .map(|(child, child_dev)| (join(path, &child), child, child_dev))
+        .map(|(child, listed_dev)| {
+            let child_path = join(path, &child);
+            let child_dev = ctx.device_inside(&child_path, listed_dev);
+            (child_path, child, child_dev)
+        })
+        .filter(|&(_, _, child_dev)| ctx.may_enter_device(dev, child_dev))
         .filter(|(child_path, _, _)| !ctx.is_duplicate_view(child_path))
         .collect()
 }

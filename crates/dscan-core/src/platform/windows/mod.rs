@@ -24,7 +24,7 @@ mod system {
     use super::handle::{Handle, wide_path};
     use super::{dir_reader, drives, paths, protected, volumes};
     use crate::hidden::SpaceInfo;
-    use crate::platform::{DeviceId, DirEntry, Platform, WholeDiskBoundaries};
+    use crate::platform::{DeviceId, DirEntry, Platform, ScanBoundaries, ScanExtent};
     use crate::protection::ProtectedLocations;
     use crate::volumes::Volume;
 
@@ -54,8 +54,8 @@ mod system {
             path == Path::new(&drives::root_of(volumes::system_drive_letter()))
         }
 
-        fn whole_disk_boundaries(_root: &Path) -> WholeDiskBoundaries {
-            WholeDiskBoundaries::default()
+        fn scan_boundaries(_root: &Path, _extent: ScanExtent) -> ScanBoundaries {
+            ScanBoundaries::default()
         }
 
         fn space_info(path: &Path) -> io::Result<SpaceInfo> {

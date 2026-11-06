@@ -14,7 +14,7 @@ use std::ffi::OsStr;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::hidden::SpaceInfo;
 use crate::protection::ProtectedLocations;
@@ -48,10 +48,17 @@ pub(crate) struct DirEntry<'a> {
     pub shared_data_stream_id: Option<u64>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ScanExtent {
+    Folder,
+    WholeDisk,
+}
+
 #[derive(Debug, Default)]
-pub(crate) struct WholeDiskBoundaries {
+pub(crate) struct ScanBoundaries {
     pub other_devices_of_the_disk: FxHashSet<DeviceId>,
     pub duplicate_views: FxHashSet<Vec<u8>>,
+    pub devices_mounted_on: FxHashMap<Vec<u8>, DeviceId>,
 }
 
 pub(crate) trait Platform {
@@ -64,7 +71,7 @@ pub(crate) trait Platform {
     fn device_of(path: &Path) -> io::Result<DeviceId>;
     fn canonical_root(path: &Path) -> io::Result<PathBuf>;
     fn is_system_root(path: &Path) -> bool;
-    fn whole_disk_boundaries(root: &Path) -> WholeDiskBoundaries;
+    fn scan_boundaries(root: &Path, extent: ScanExtent) -> ScanBoundaries;
     fn space_info(path: &Path) -> io::Result<SpaceInfo>;
     fn mounted_volumes() -> Vec<Volume>;
     fn has_full_disk_access() -> bool;

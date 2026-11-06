@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use rustc_hash::FxHashSet;
 
 use super::{mountinfo, space};
-use crate::platform::{DeviceId, WholeDiskBoundaries, unix};
+use crate::platform::{DeviceId, ScanBoundaries, ScanExtent, unix};
 use crate::volumes::Volume;
 
 const MOUNTINFO: &str = "/proc/self/mountinfo";
@@ -14,11 +14,15 @@ fn mounts() -> Vec<mountinfo::Mount> {
     std::fs::read(MOUNTINFO).map(|text| mountinfo::parse(&text)).unwrap_or_default()
 }
 
-pub(super) fn whole_disk_boundaries(root: &Path) -> WholeDiskBoundaries {
+pub(super) fn scan_boundaries(root: &Path, extent: ScanExtent) -> ScanBoundaries {
     let found = mountinfo::same_file_system_mounts_below(&mounts(), root);
-    WholeDiskBoundaries {
-        other_devices_of_the_disk: found.entered.iter().filter_map(|m| unix::device_of(m).ok()).collect(),
+    ScanBoundaries {
+        other_devices_of_the_disk: match extent {
+            ScanExtent::WholeDisk => found.entered.iter().filter_map(|m| unix::device_of(m).ok()).collect(),
+            ScanExtent::Folder => Default::default(),
+        },
         duplicate_views: found.duplicate_views.iter().map(|m| unix::path_bytes(m).into_owned()).collect(),
+        devices_mounted_on: Default::default(),
     }
 }
 
@@ -62,7 +66,7 @@ mod tests {
 
     #[test]
     fn a_whole_disk_scan_of_root_never_crosses_into_proc_or_sys() {
-        let boundaries = whole_disk_boundaries(Path::new("/"));
+        let boundaries = scan_boundaries(Path::new("/"), ScanExtent::WholeDisk);
         for pseudo in ["/proc", "/sys"] {
             let device = unix::device_of(Path::new(pseudo)).unwrap();
             assert!(!boundaries.other_devices_of_the_disk.contains(&device), "{pseudo}");

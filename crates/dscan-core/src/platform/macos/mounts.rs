@@ -1,7 +1,7 @@
 use std::ffi::CStr;
 use std::path::{Path, PathBuf};
 
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::{apfs, space};
 use crate::platform::{DeviceId, unix};
@@ -66,6 +66,14 @@ pub(super) fn other_volumes_of_the_same_container(root: &Path) -> FxHashSet<Devi
         .collect()
 }
 
+pub(super) fn devices_mounted_on() -> FxHashMap<Vec<u8>, DeviceId> {
+    use std::os::unix::ffi::OsStrExt;
+    mounts_via_getfsstat_into_own_buffer()
+        .into_iter()
+        .filter_map(|m| Some((m.on.as_os_str().as_bytes().to_vec(), unix::device_of(&m.on).ok()?)))
+        .collect()
+}
+
 pub(super) fn mounted_volumes() -> Vec<Volume> {
     mounts_via_getfsstat_into_own_buffer()
         .into_iter()
@@ -123,6 +131,19 @@ mod tests {
                 });
             }
         });
+    }
+
+    #[test]
+    fn mount_points_map_to_the_device_mounted_there_not_the_one_they_cover() {
+        let mounted = devices_mounted_on();
+        let root = unix::device_of(Path::new("/")).unwrap();
+        assert_eq!(mounted.get(&b"/"[..]), Some(&root));
+        let preboot =
+            mounted.get(&b"/System/Volumes/Preboot"[..]).expect("Preboot is mounted on every Apple silicon Mac");
+        assert_ne!(
+            *preboot, root,
+            "a separate volume, although getattrlistbulk lists its folder with the root's device"
+        );
     }
 
     #[test]

@@ -19,7 +19,7 @@ mod system {
 
     use super::{dir_reader, protected, space, volumes};
     use crate::hidden::SpaceInfo;
-    use crate::platform::{DeviceId, DirEntry, Platform, WholeDiskBoundaries, unix};
+    use crate::platform::{DeviceId, DirEntry, Platform, ScanBoundaries, ScanExtent, unix};
     use crate::protection::ProtectedLocations;
     use crate::volumes::Volume;
 
@@ -48,8 +48,8 @@ mod system {
             path == Path::new("/")
         }
 
-        fn whole_disk_boundaries(root: &Path) -> WholeDiskBoundaries {
-            volumes::whole_disk_boundaries(root)
+        fn scan_boundaries(root: &Path, extent: ScanExtent) -> ScanBoundaries {
+            volumes::scan_boundaries(root, extent)
         }
 
         fn space_info(path: &Path) -> io::Result<SpaceInfo> {

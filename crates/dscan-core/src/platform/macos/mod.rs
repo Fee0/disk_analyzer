@@ -19,7 +19,7 @@ mod system {
 
     use super::{apfs, bulk, mounts, protected, space};
     use crate::hidden::SpaceInfo;
-    use crate::platform::{DeviceId, DirEntry, Platform, WholeDiskBoundaries, unix};
+    use crate::platform::{DeviceId, DirEntry, Platform, ScanBoundaries, ScanExtent, unix};
     use crate::protection::ProtectedLocations;
     use crate::volumes::Volume;
 
@@ -50,10 +50,17 @@ mod system {
             path == Path::new("/")
         }
 
-        fn whole_disk_boundaries(root: &Path) -> WholeDiskBoundaries {
-            WholeDiskBoundaries {
-                other_devices_of_the_disk: mounts::other_volumes_of_the_same_container(root),
-                duplicate_views: apfs::firmlinked_duplicate_paths(std::fs::read(FIRMLINKS_FILE).ok().as_deref()),
+        fn scan_boundaries(root: &Path, extent: ScanExtent) -> ScanBoundaries {
+            ScanBoundaries {
+                other_devices_of_the_disk: match extent {
+                    ScanExtent::WholeDisk => mounts::other_volumes_of_the_same_container(root),
+                    ScanExtent::Folder => Default::default(),
+                },
+                duplicate_views: apfs::firmlinked_duplicate_paths(
+                    std::fs::read(FIRMLINKS_FILE).ok().as_deref(),
+                    &unix::path_bytes(root),
+                ),
+                devices_mounted_on: mounts::devices_mounted_on(),
             }
         }
 
