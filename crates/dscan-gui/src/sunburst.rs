@@ -1,0 +1,269 @@
+//! The interactive sunburst chart (an iced `canvas::Program`).
+//!
+//! All geometry comes from `dscan_core::layout`; this module only maps
+//! fractions of a turn to screen angles, paints, and turns mouse input into
+//! application messages.
+
+use std::f32::consts::{FRAC_PI_2, TAU};
+use std::time::{Duration, Instant};
+
+use dscan_core::{Arc, Layout, MAX_DEPTH, NodeId, Segment, Tree, format_size};
+use iced::widget::canvas::{self, Cache, Event, Frame, Geometry, Path, Stroke, Text};
+use iced::{Color, Pixels, Point, Rectangle, Renderer, Size, Theme, Vector, alignment, mouse};
+
+use crate::app::Message;
+use crate::fmt::truncate;
+use crate::theme;
+
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+
+pub struct Sunburst<'a> {
+    pub tree: &'a Tree,
+    pub layout: &'a Layout,
+    /// Static chart geometry.
+    pub cache: &'a Cache,
+    /// Selection outline and hover highlight.
+    pub highlight: &'a Cache,
+    pub hovered: Option<Segment>,
+    pub selected: Option<NodeId>,
+}
+
+#[derive(Default)]
+pub struct State {
+    hover: Option<Segment>,
+    last_click: Option<(Instant, Segment)>,
+}
+
+#[derive(Clone, Copy)]
+struct Geo {
+    center: Point,
+    r0: f32,
+    ring_w: f32,
+}
+
+impl Geo {
+    fn new(size: Size) -> Self {
+        let r = (size.width.min(size.height) / 2.0 - 16.0).max(60.0);
+        let r0 = r * 0.22;
+        Geo { center: Point::new(size.width / 2.0, size.height / 2.0), r0, ring_w: (r - r0) / MAX_DEPTH as f32 }
+    }
+
+    fn angle(frac: f64) -> f32 {
+        frac as f32 * TAU - FRAC_PI_2
+    }
+
+    /// Filled shape of `arc` drawn in `ring`.
+    fn arc_path(&self, ring: usize, arc: &Arc) -> Path {
+        let r_in = self.r0 + ring as f32 * self.ring_w;
+        sector(self.center, r_in, r_in + self.ring_w, Self::angle(arc.start), Self::angle(arc.end))
+    }
+}
+
+enum Hit<'a> {
+    Center,
+    Arc(&'a Arc),
+    Nothing,
+}
+
+/// An annular sector as a closed polygon (iced's arc builder starts a new
+/// sub-path for every arc, so we tessellate ourselves).
+fn sector(c: Point, r_in: f32, r_out: f32, a0: f32, a1: f32) -> Path {
+    let sweep = a1 - a0;
+    let steps = ((sweep.abs() * r_out) / 3.0).ceil().clamp(1.0, 720.0) as usize;
+    let dirs: Vec<(f32, f32)> =
+        (0..=steps).map(|i| (a0 + sweep * i as f32 / steps as f32).sin_cos()).map(|(s, c)| (c, s)).collect();
+    Path::new(|b| {
+        b.move_to(Point::new(c.x + dirs[0].0 * r_out, c.y + dirs[0].1 * r_out));
+        for &(dx, dy) in &dirs[1..] {
+            b.line_to(Point::new(c.x + dx * r_out, c.y + dy * r_out));
+        }
+        for &(dx, dy) in dirs.iter().rev() {
+            b.line_to(Point::new(c.x + dx * r_in, c.y + dy * r_in));
+        }
+        b.close();
+    })
+}
+
+impl Sunburst<'_> {
+    fn locate(&self, geo: &Geo, p: Point) -> Hit<'_> {
+        let dist = p.distance(geo.center);
+        if dist < geo.r0 {
+            return Hit::Center;
+        }
+        let d = p - geo.center;
+        let ring = ((dist - geo.r0) / geo.ring_w) as usize;
+        let frac = ((d.y.atan2(d.x) + FRAC_PI_2) / TAU).rem_euclid(1.0) as f64;
+        self.layout.hit(ring, frac).map_or(Hit::Nothing, Hit::Arc)
+    }
+
+    fn can_go_up(&self) -> bool {
+        self.layout.focus != self.tree.root()
+    }
+
+    fn draw_chart(&self, frame: &mut Frame, geo: &Geo) {
+        let gap = Stroke::default().with_color(theme::BG).with_width(1.0);
+        for (ring, arcs) in self.layout.rings.iter().enumerate() {
+            let r_in = geo.r0 + ring as f32 * geo.ring_w;
+            for a in arcs {
+                let mut color = theme::segment_color(a.kind, ring, a.branch);
+                if !a.relevant {
+                    color = theme::mix(theme::BG, color, 0.22);
+                }
+                let path = geo.arc_path(ring, a);
+                frame.fill(&path, color);
+                // Skip separators on slivers; they would hide the color.
+                if (a.span() as f32) * TAU * r_in > 3.0 {
+                    frame.stroke(&path, gap);
+                }
+            }
+        }
+        // Center disc with the focus size.
+        frame.fill(&Path::circle(geo.center, geo.r0 - 2.0), theme::PANEL);
+        let focus = self.layout.focus;
+        frame.fill_text(Text {
+            content: format_size(self.layout.total),
+            position: geo.center - Vector::new(0.0, 6.0),
+            color: theme::kind_color(self.tree.node(focus).kind()),
+            size: Pixels((geo.r0 * 0.28).clamp(13.0, 26.0)),
+            align_x: alignment::Horizontal::Center.into(),
+            align_y: alignment::Vertical::Center,
+            ..Text::default()
+        });
+        frame.fill_text(Text {
+            content: truncate(&self.tree.name(focus), 18),
+            position: geo.center + Vector::new(0.0, geo.r0 * 0.30),
+            color: theme::TEXT_DIM,
+            size: Pixels((geo.r0 * 0.15).clamp(10.0, 14.0)),
+            align_x: alignment::Horizontal::Center.into(),
+            align_y: alignment::Vertical::Center,
+            ..Text::default()
+        });
+    }
+
+    fn draw_highlight(&self, frame: &mut Frame, geo: &Geo) {
+        if let Some((ring, a)) = self.selected.and_then(|s| self.layout.find(Segment::Node(s))) {
+            let path = geo.arc_path(ring, a);
+            frame.fill(&path, Color::WHITE.scale_alpha(0.18));
+            frame.stroke(&path, Stroke::default().with_color(Color::WHITE).with_width(2.0));
+        }
+        // Hover: the arc itself plus its visible descendants.
+        if let Some((ring, a)) = self.hovered.and_then(|h| self.layout.find(h)) {
+            frame.fill(&geo.arc_path(ring, a), Color::WHITE.scale_alpha(0.28));
+            for (r, d) in self.layout.descendants(ring, a) {
+                frame.fill(&geo.arc_path(r, d), Color::WHITE.scale_alpha(0.14));
+            }
+        }
+    }
+
+    fn draw_tooltip(&self, frame: &mut Frame, bounds: Rectangle, p: Point, arc: &Arc) {
+        let name = match arc.segment {
+            Segment::Node(n) => self.tree.name(n).into_owned(),
+            Segment::Small { count, .. } => format!("{count} smaller items"),
+        };
+        let pct = if self.layout.total > 0 { arc.size as f64 * 100.0 / self.layout.total as f64 } else { 0.0 };
+        let line1 = truncate(&name, 48);
+        let line2 = format!("{} · {:.1}%", format_size(arc.size), pct);
+        let w = (line1.chars().count().max(line2.len()) as f32 * 7.4 + 20.0).max(80.0);
+        let h = 44.0;
+        let mut pos = p + Vector::new(14.0, 14.0);
+        if pos.x + w > bounds.width {
+            pos.x = p.x - w - 8.0;
+        }
+        if pos.y + h > bounds.height {
+            pos.y = p.y - h - 8.0;
+        }
+        frame.fill(&Path::rounded_rectangle(pos, Size::new(w, h), 6.0.into()), theme::PANEL_HI.scale_alpha(0.96));
+        for (content, dy, color, size) in [(line1, 7.0, theme::TEXT, 13.0), (line2, 24.0, theme::TEXT_DIM, 12.0)] {
+            frame.fill_text(Text {
+                content,
+                position: pos + Vector::new(10.0, dy),
+                color,
+                size: Pixels(size),
+                ..Text::default()
+            });
+        }
+    }
+}
+
+impl canvas::Program<Message> for Sunburst<'_> {
+    type State = State;
+
+    fn update(
+        &self,
+        state: &mut State,
+        event: &Event,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+    ) -> Option<canvas::Action<Message>> {
+        let geo = Geo::new(bounds.size());
+        match event {
+            Event::Mouse(mouse::Event::CursorMoved { .. } | mouse::Event::CursorLeft) => {
+                let hit = match cursor.position_in(bounds).map(|p| self.locate(&geo, p)) {
+                    Some(Hit::Arc(a)) => Some(a.segment),
+                    _ => None,
+                };
+                if hit != state.hover {
+                    state.hover = hit;
+                    return Some(canvas::Action::publish(Message::Hover(hit)));
+                }
+                // Keep the tooltip following the cursor.
+                hit.map(|_| canvas::Action::request_redraw())
+            }
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                let p = cursor.position_in(bounds)?;
+                let msg = match self.locate(&geo, p) {
+                    Hit::Center => Message::GoUp,
+                    Hit::Arc(a) => {
+                        let (seg, now) = (a.segment, Instant::now());
+                        if matches!(state.last_click, Some((t, s)) if s == seg && now - t < DOUBLE_CLICK) {
+                            state.last_click = None;
+                            Message::Activate(seg)
+                        } else {
+                            state.last_click = Some((now, seg));
+                            Message::Press(seg)
+                        }
+                    }
+                    Hit::Nothing => Message::Deselect,
+                };
+                Some(canvas::Action::publish(msg).and_capture())
+            }
+            _ => None,
+        }
+    }
+
+    fn draw(
+        &self,
+        _state: &State,
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let geo = Geo::new(bounds.size());
+        let chart = self.cache.draw(renderer, bounds.size(), |f| self.draw_chart(f, &geo));
+        let highlight = self.highlight.draw(renderer, bounds.size(), |f| self.draw_highlight(f, &geo));
+
+        // Only the cursor-dependent bits are redrawn every frame.
+        let mut overlay = Frame::new(renderer, bounds.size());
+        if let Some(p) = cursor.position_in(bounds) {
+            match self.locate(&geo, p) {
+                Hit::Center if self.can_go_up() => overlay.stroke(
+                    &Path::circle(geo.center, geo.r0 - 2.0),
+                    Stroke::default().with_color(Color::WHITE.scale_alpha(0.5)).with_width(2.0),
+                ),
+                Hit::Arc(a) => self.draw_tooltip(&mut overlay, bounds, p, a),
+                _ => {}
+            }
+        }
+        vec![chart, highlight, overlay.into_geometry()]
+    }
+
+    fn mouse_interaction(&self, _state: &State, bounds: Rectangle, cursor: mouse::Cursor) -> mouse::Interaction {
+        let geo = Geo::new(bounds.size());
+        match cursor.position_in(bounds).map(|p| self.locate(&geo, p)) {
+            Some(Hit::Arc(_)) => mouse::Interaction::Pointer,
+            Some(Hit::Center) if self.can_go_up() => mouse::Interaction::Pointer,
+            _ => mouse::Interaction::default(),
+        }
+    }
+}
