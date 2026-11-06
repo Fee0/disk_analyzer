@@ -15,7 +15,10 @@ pub const MAX_DEPTH: usize = 7;
 pub enum Segment {
     Node(NodeId),
     /// `count` children of `parent` too small to draw individually.
-    Small { parent: NodeId, count: u32 },
+    Small {
+        parent: NodeId,
+        count: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -86,10 +89,7 @@ impl Layout {
 
     /// Ring index and arc of a segment, if visible.
     pub fn find(&self, seg: Segment) -> Option<(usize, &Arc)> {
-        self.rings
-            .iter()
-            .enumerate()
-            .find_map(|(r, arcs)| arcs.iter().find(|a| a.segment == seg).map(|a| (r, a)))
+        self.rings.iter().enumerate().find_map(|(r, arcs)| arcs.iter().find(|a| a.segment == seg).map(|a| (r, a)))
     }
 
     /// Visible descendants of the arc at `ring`: the outer-ring arcs inside

@@ -12,8 +12,8 @@ pub mod scan;
 pub mod search;
 pub mod tree;
 
-pub use kind::Kind;
 pub use actions::Collection;
+pub use kind::Kind;
 pub use layout::{Arc, Layout, LayoutParams, MAX_DEPTH, Segment, sunburst};
 pub use scan::volumes::{Volume, has_full_disk_access, list_volumes};
 pub use scan::{CancelToken, Progress, ProgressSnapshot, ScanError, ScanOptions, scan};

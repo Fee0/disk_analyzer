@@ -5,15 +5,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dscan_core::{
-    CancelToken, Collection, Layout, LayoutParams, Metric, NodeId, Progress, ProgressSnapshot, ScanError,
-    ScanOptions, SearchResult, Segment, Tree, Volume, actions, format_size,
+    CancelToken, Collection, Layout, LayoutParams, Metric, NodeId, Progress, ProgressSnapshot, ScanError, ScanOptions,
+    SearchResult, Segment, Tree, Volume, actions, format_size,
 };
 use iced::keyboard::{self, Key, key::Named};
 use iced::widget::canvas::Cache;
 use iced::{Point, Subscription, Task, event, mouse};
 
 use crate::fmt::{thousands, truncate};
-use crate::quicklook::QuickLook;
 
 pub const SEARCH_ID: &str = "search";
 /// Rows rendered in the file list before collapsing the rest.
@@ -33,15 +32,22 @@ async fn off_thread<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -
     })
 }
 
+/// Free results off the UI thread: dropping a tree can take a while.
+fn drop_off_thread(results: Vec<Browser>) {
+    if !results.is_empty() {
+        std::thread::spawn(move || drop(results));
+    }
+}
+
 pub struct App {
     pub screen: Screen,
     /// `None` while the volume list is loading.
     pub volumes: Option<Vec<Volume>>,
     pub full_disk_access: bool,
     pub error: Option<String>,
-    /// The last results, kept while on the start page so they can be
-    /// resumed; dropped when the next scan starts.
-    pub parked: Option<Box<Browser>>,
+    /// Results not on screen, most recently viewed first. They stay in
+    /// memory until closed.
+    pub parked: Vec<Browser>,
     next_job: u64,
 }
 
@@ -60,7 +66,7 @@ pub struct ScanJob {
     pub progress: Arc<Progress>,
     pub cancel: CancelToken,
     pub snapshot: ProgressSnapshot,
-    slot: ScanSlot,
+    pub(crate) slot: ScanSlot,
 }
 
 /// Pointer pressed on an item: may turn into a drag.
@@ -125,7 +131,6 @@ pub struct Browser {
     trash_pending: Option<Vec<NodeId>>,
     pub drag: Option<PendingDrag>,
     pub status: Option<String>,
-    quicklook: QuickLook,
 }
 
 #[derive(Debug, Clone)]
@@ -177,18 +182,26 @@ pub enum Message {
     CancelTrash,
     ConfirmTrash,
     // Misc
-    QuickLook,
     Rescan,
     /// Go to the start page, keeping the current results resumable.
     GoHome,
-    ResumeBrowse,
+    /// Show the parked result at this index.
+    ResumeBrowse(usize),
+    /// Close the parked result at this index, freeing its memory.
+    CloseResult(usize),
     DismissStatus,
 }
 
 impl App {
     pub fn new(initial: Option<PathBuf>) -> (Self, Task<Message>) {
-        let mut app =
-            App { screen: Screen::Start, volumes: None, full_disk_access: true, error: None, parked: None, next_job: 1 };
+        let mut app = App {
+            screen: Screen::Start,
+            volumes: None,
+            full_disk_access: true,
+            error: None,
+            parked: Vec::new(),
+            next_job: 1,
+        };
         let load = Self::load_volumes();
         let task = match initial {
             Some(path) => Task::batch([load, app.start_scan(ScanOptions::folder(path))]),
@@ -227,16 +240,10 @@ impl App {
         }
     }
 
-    /// Leave the browser and drop it and any parked results, freeing the
-    /// trees off the UI thread (they can be gigabytes).
+    /// Leave and drop the result on screen (a rescan replaces it).
     fn leave_browser(&mut self) {
-        let current = match std::mem::replace(&mut self.screen, Screen::Start) {
-            Screen::Browse(b) => Some(b),
-            _ => None,
-        };
-        let parked = self.parked.take();
-        if current.is_some() || parked.is_some() {
-            std::thread::spawn(move || drop((current, parked)));
+        if let Screen::Browse(b) = std::mem::replace(&mut self.screen, Screen::Start) {
+            drop_off_thread(vec![*b]);
         }
     }
 
@@ -252,14 +259,8 @@ impl App {
             off_thread(move || *slot.lock() = Some(dscan_core::scan(&opts, &progress, &cancel)))
         };
         self.error = None;
-        self.screen = Screen::Scanning(ScanJob {
-            id,
-            opts,
-            progress,
-            cancel,
-            snapshot: ProgressSnapshot::default(),
-            slot,
-        });
+        self.screen =
+            Screen::Scanning(ScanJob { id, opts, progress, cancel, snapshot: ProgressSnapshot::default(), slot });
         Task::perform(work, move |r| Message::ScanFinished(id, r.err()))
     }
 
@@ -317,7 +318,16 @@ impl App {
                 let opts = job.opts.clone();
                 self.screen = Screen::Start;
                 match result {
-                    Some(Ok(tree)) => self.screen = Screen::Browse(Box::new(Browser::new(tree, opts))),
+                    Some(Ok(tree)) => {
+                        // A fresh scan of the same place supersedes an open result.
+                        let same = |b: &Browser| {
+                            b.tree.root_path() == tree.root_path() && b.tree.is_whole_disk() == tree.is_whole_disk()
+                        };
+                        let (stale, keep) = std::mem::take(&mut self.parked).into_iter().partition(same);
+                        self.parked = keep;
+                        drop_off_thread(stale);
+                        self.screen = Screen::Browse(Box::new(Browser::new(tree, opts)));
+                    }
                     Some(Err(ScanError::Cancelled)) => {}
                     Some(Err(e)) => self.error = Some(e.to_string()),
                     None => {
@@ -328,16 +338,20 @@ impl App {
             }
             Message::GoHome => {
                 if let Screen::Browse(mut b) = std::mem::replace(&mut self.screen, Screen::Start) {
-                    b.quicklook.close();
                     b.drag = None;
-                    self.parked = Some(b);
+                    self.parked.insert(0, *b);
                 }
                 self.error = None;
                 return Self::load_volumes();
             }
-            Message::ResumeBrowse => {
-                if let Some(b) = self.parked.take() {
-                    self.screen = Screen::Browse(b);
+            Message::ResumeBrowse(i) => {
+                if matches!(self.screen, Screen::Start) && i < self.parked.len() {
+                    self.screen = Screen::Browse(Box::new(self.parked.remove(i)));
+                }
+            }
+            Message::CloseResult(i) => {
+                if i < self.parked.len() {
+                    drop_off_thread(vec![self.parked.remove(i)]);
                 }
             }
             Message::Rescan => {
@@ -365,6 +379,9 @@ fn global_event(event: iced::Event, status: event::Status, _window: iced::window
             (status == event::Status::Ignored || app_shortcut).then_some(Message::Key(key, modifiers))
         }
         iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => Some(Message::MouseReleased),
+        // The mouse's side buttons walk the folder history.
+        iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Back)) => Some(Message::Back),
+        iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Forward)) => Some(Message::Forward),
         _ => None,
     }
 }
@@ -381,11 +398,12 @@ fn shortcut(key: Key<&str>, cmd: bool) -> Option<Message> {
     Some(match key {
         Key::Named(Named::ArrowUp) if cmd => Message::GoUp,
         Key::Named(Named::Backspace) if !cmd => Message::Back,
+        Key::Named(Named::BrowserBack) => Message::Back,
+        Key::Named(Named::BrowserForward) => Message::Forward,
         Key::Character("[") if cmd => Message::Back,
         Key::Character("]") if cmd => Message::Forward,
         Key::Character("f") if cmd => Message::FocusSearch,
         Key::Character("c") if !cmd => Message::CollectSelected,
-        Key::Named(Named::Space) => Message::QuickLook,
         _ => return None,
     })
 }
@@ -417,7 +435,6 @@ impl Browser {
             trash_pending: None,
             drag: None,
             status: None,
-            quicklook: QuickLook::default(),
         };
         b.relayout();
         b.sync_list();
@@ -510,12 +527,12 @@ impl Browser {
         }
     }
 
+    /// Open a folder; a file is just selected.
     fn activate(&mut self, id: NodeId) {
         if self.tree.node(id).is_dir() {
             self.set_focus(id, true);
-        } else if self.tree.is_actionable(id) {
+        } else {
             self.selected = Some(id);
-            self.quicklook.toggle(Some(&self.tree.path(id)));
         }
     }
 
@@ -605,7 +622,6 @@ impl Browser {
         self.search_cancel.cancel();
         let Some(tree) = Arc::get_mut(&mut self.tree) else { return Task::none() };
         let Some(items) = self.trash_pending.take() else { return Task::none() };
-        self.quicklook.close();
         let report = actions::move_to_trash(tree, &items);
         self.collector.prune(&self.tree);
         let mut msg = format!(
@@ -639,10 +655,9 @@ impl Browser {
     fn handle(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Hover(h) => self.hovered = h,
-            Message::RowExit(id)
-                if self.hovered == Some(Segment::Node(id)) => {
-                    self.hovered = None;
-                }
+            Message::RowExit(id) if self.hovered == Some(Segment::Node(id)) => {
+                self.hovered = None;
+            }
             Message::Press(Segment::Node(id)) => {
                 self.selected = Some(id);
                 self.drag = Some(PendingDrag::new(id));
@@ -654,11 +669,10 @@ impl Browser {
             Message::Navigate(id) => self.set_focus(id, true),
             Message::Back => self.back(),
             Message::Forward => self.forward(),
-            Message::SetMetric(m)
-                if m != self.metric => {
-                    self.metric = m;
-                    self.relayout();
-                }
+            Message::SetMetric(m) if m != self.metric => {
+                self.metric = m;
+                self.relayout();
+            }
             Message::SearchChanged(s) => {
                 self.search_text = s;
                 self.search_gen += 1;
@@ -748,10 +762,6 @@ impl Browser {
                 self.trash_pending = Some(self.collector.items().to_vec());
                 return self.trash_collected();
             }
-            Message::QuickLook => {
-                let path = self.selected.filter(|&s| self.tree.is_actionable(s)).map(|s| self.tree.path(s));
-                self.quicklook.toggle(path.as_deref());
-            }
             Message::DismissStatus => self.status = None,
             _ => {}
         }
@@ -815,6 +825,23 @@ mod tests {
         // Don't let the test move anything to the real Trash.
         b.trash_pending = None;
         drop(running_search);
+    }
+
+    #[test]
+    fn mouse_side_buttons_walk_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut b = browser(dir.path());
+        let root = b.tree.root();
+        let movies = child(&b, root, "Movies");
+        let _ = b.update(Message::Navigate(movies));
+        let press = |button| {
+            let event = iced::Event::Mouse(mouse::Event::ButtonPressed(button));
+            global_event(event, event::Status::Ignored, iced::window::Id::unique()).unwrap()
+        };
+        let _ = b.update(press(mouse::Button::Back));
+        assert_eq!(b.focus, root);
+        let _ = b.update(press(mouse::Button::Forward));
+        assert_eq!(b.focus, movies);
     }
 
     #[test]

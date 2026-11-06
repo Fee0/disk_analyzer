@@ -192,7 +192,8 @@ pub fn scan(opts: &ScanOptions, progress: &Progress, cancel: &CancelToken) -> Re
     let started = Instant::now();
     // Resolve symlinks (e.g. /tmp -> /private/tmp): the walk never follows
     // them, so the root must be the real directory.
-    let root = std::fs::canonicalize(&opts.root).map_err(|source| ScanError::Root { path: opts.root.clone(), source })?;
+    let root =
+        std::fs::canonicalize(&opts.root).map_err(|source| ScanError::Root { path: opts.root.clone(), source })?;
     let root_dev = dev_of(&root).map_err(|source| ScanError::Root { path: root.clone(), source })?;
     // Fail early if the root itself is unreadable.
     if let Err(source) = std::fs::read_dir(&root) {
@@ -278,7 +279,8 @@ fn join(parent: &[u8], name: &[u8]) -> Vec<u8> {
 }
 
 fn scan_dir(ctx: &Ctx<'_>, path: Vec<u8>, name: Box<[u8]>, dev: i32, depth: u32) -> DirNode {
-    let forced = if depth == 1 && ctx.system_top.contains(&name[..]) { Some(Kind::System) } else { Kind::of_dir(&name) };
+    let forced =
+        if depth == 1 && ctx.system_top.contains(&name[..]) { Some(Kind::System) } else { Kind::of_dir(&name) };
     let mut node = DirNode::new(name);
     ctx.cancel.checkpoint();
     if ctx.cancel.is_cancelled() {
@@ -360,7 +362,10 @@ mod tests {
     fn find(t: &Tree, path: &str) -> crate::NodeId {
         let mut cur = t.root();
         for part in path.split('/') {
-            cur = t.children(cur, Metric::Allocated).find(|&c| t.name(c) == part).unwrap_or_else(|| panic!("{part} missing"));
+            cur = t
+                .children(cur, Metric::Allocated)
+                .find(|&c| t.name(c) == part)
+                .unwrap_or_else(|| panic!("{part} missing"));
         }
         cur
     }

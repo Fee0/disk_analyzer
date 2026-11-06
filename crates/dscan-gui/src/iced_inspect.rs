@@ -53,9 +53,7 @@ pub struct Node {
 }
 
 /// Collects every node the selector API can see, in depth-first order.
-pub fn nodes<'a, Message, Theme, Renderer>(
-    ui: &mut Simulator<'a, Message, Theme, Renderer>,
-) -> Vec<Node>
+pub fn nodes<'a, Message, Theme, Renderer>(ui: &mut Simulator<'a, Message, Theme, Renderer>) -> Vec<Node>
 where
     Message: 'a,
     Theme: theme::Base + 'a,
@@ -118,11 +116,7 @@ where
                 Some(parent) => parent.clip,
                 None => None,
             };
-            stack.push(Frame {
-                bounds: node.bounds,
-                clip,
-                scroll: node.kind == "scrollable",
-            });
+            stack.push(Frame { bounds: node.bounds, clip, scroll: node.kind == "scrollable" });
         }
     }
 
@@ -132,9 +126,7 @@ where
 fn to_node(candidate: &Candidate<'_>) -> Node {
     let (kind, text, focused, scroll) = match candidate {
         Candidate::Container { .. } => ("container", None, None, None),
-        Candidate::Scrollable { translation, .. } => {
-            ("scrollable", None, None, Some((translation.x, translation.y)))
-        }
+        Candidate::Scrollable { translation, .. } => ("scrollable", None, None, Some((translation.x, translation.y))),
         Candidate::Focusable { state, .. } => ("focusable", None, Some(state.is_focused()), None),
         Candidate::TextInput { state, .. } => ("text_input", Some(state.text().to_string()), None, None),
         Candidate::Text { content, .. } => ("text", Some(content.to_string()), None, None),
@@ -244,12 +236,7 @@ pub fn lint(nodes: &[Node], viewport: impl Into<iced_test::core::Size>) -> Vec<S
             match &n.visible {
                 None => issues.push(format!("hidden: {} is fully clipped", label(n))),
                 Some(v) if v.width + 0.5 < n.bounds.width || v.height + 0.5 < n.bounds.height => {
-                    issues.push(format!(
-                        "clipped: {} shows only {} of {}",
-                        label(n),
-                        rect(v),
-                        rect(&n.bounds)
-                    ))
+                    issues.push(format!("clipped: {} shows only {} of {}", label(n), rect(v), rect(&n.bounds)))
                 }
                 _ => {}
             }
@@ -339,15 +326,10 @@ pub fn gaps(nodes: &[Node]) -> Vec<(Rectangle, String)> {
 
         // A row if every child overlaps the first one vertically, else a column.
         let first = children[0];
-        let is_row = children
-            .iter()
-            .all(|c| c.y < first.y + first.height && first.y < c.y + c.height);
+        let is_row = children.iter().all(|c| c.y < first.y + first.height && first.y < c.y + c.height);
 
-        let (start, end): (fn(&Rectangle) -> f32, fn(&Rectangle) -> f32) = if is_row {
-            (|r| r.x, |r| r.x + r.width)
-        } else {
-            (|r| r.y, |r| r.y + r.height)
-        };
+        let (start, end): (fn(&Rectangle) -> f32, fn(&Rectangle) -> f32) =
+            if is_row { (|r| r.x, |r| r.x + r.width) } else { (|r| r.y, |r| r.y + r.height) };
 
         children.sort_by(|a, b| start(a).total_cmp(&start(b)));
 
@@ -404,12 +386,8 @@ where
     let nodes = nodes(ui);
     let issues = lint(&nodes, viewport);
 
-    let mut out = format!(
-        "== widget tree ({} nodes, viewport {:.0}x{:.0}) ==\n",
-        nodes.len(),
-        viewport.width,
-        viewport.height
-    );
+    let mut out =
+        format!("== widget tree ({} nodes, viewport {:.0}x{:.0}) ==\n", nodes.len(), viewport.width, viewport.height);
     out.push_str(&tree(&nodes));
     out.push_str(&format!("== lint ({} issues) ==\n", issues.len()));
     for issue in &issues {
@@ -464,9 +442,7 @@ where
         }
     }
 
-    Err(Error::IOFailed(std::sync::Arc::new(std::io::Error::other(
-        "snapshot was not written",
-    ))))
+    Err(Error::IOFailed(std::sync::Arc::new(std::io::Error::other("snapshot was not written"))))
 }
 
 /// Left-clicks at a raw position (logical pixels).
@@ -519,10 +495,8 @@ pub fn drag<'a, Message, Theme, Renderer>(
 }
 
 /// Moves the pointer without clicking, so hover styles show up in [`shot`].
-pub fn hover<'a, Message, Theme, Renderer>(
-    ui: &mut Simulator<'a, Message, Theme, Renderer>,
-    position: impl Into<Point>,
-) where
+pub fn hover<'a, Message, Theme, Renderer>(ui: &mut Simulator<'a, Message, Theme, Renderer>, position: impl Into<Point>)
+where
     Message: 'a,
     Theme: theme::Base + 'a,
     Renderer: iced_test::core::Renderer + iced_test::core::renderer::Headless + 'a,

@@ -23,10 +23,9 @@ Without it, protected folders show as "no access" and their bytes end up in
 | Hover | highlight a segment and its contents, with a tooltip showing size and % |
 | Click / ←→ | select a segment, or a sibling with the arrow keys |
 | ↑ / ↓ | select the parent / the first child |
-| Double-click / Enter / ⌘↓ | open a folder (Quick Look for a file) |
+| Double-click / Enter / ⌘↓ | open a folder |
 | Click the center / ⌘↑ | go up one level |
-| Backspace or ⌘[ / ⌘] | back / forward |
-| Space | Quick Look the selection |
+| Mouse back/forward buttons, Backspace or ⌘[ / ⌘] | back / forward through visited folders |
 | ⌘F | search (matching items stay lit; everything else dims) |
 | Esc | clear the search, then the selection |
 | C, or drag onto the collector | collect items, then use **Move to Trash…** |
@@ -55,7 +54,6 @@ crates/dscan-gui    iced application
   view.rs           start / scanning / browse screens
   sunburst.rs       canvas::Program for the chart
   theme.rs          colors by file kind
-  quicklook.rs      qlmanage-based Quick Look
 ```
 
 ## Tests

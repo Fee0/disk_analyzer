@@ -32,13 +32,28 @@ fn cstr(buf: &[libc::c_char]) -> String {
     unsafe { CStr::from_ptr(buf.as_ptr()) }.to_string_lossy().into_owned()
 }
 
+/// All mounted file systems. Uses `getfsstat` with our own buffer:
+/// `getmntinfo` hands out a shared buffer that concurrent calls overwrite.
 fn mounts() -> Vec<Mount> {
-    let mut ptr: *mut libc::statfs = std::ptr::null_mut();
-    let n = unsafe { libc::getmntinfo(&mut ptr, libc::MNT_NOWAIT) };
-    if n <= 0 || ptr.is_null() {
-        return Vec::new();
-    }
-    let list = unsafe { std::slice::from_raw_parts(ptr, n as usize) };
+    let list = loop {
+        let n = unsafe { libc::getfsstat(std::ptr::null_mut(), 0, libc::MNT_NOWAIT) };
+        if n <= 0 {
+            return Vec::new();
+        }
+        // Room for a few mounts appearing between the two calls.
+        let cap = n as usize + 4;
+        let mut buf: Vec<libc::statfs> = Vec::with_capacity(cap);
+        let bytes = (cap * std::mem::size_of::<libc::statfs>()) as libc::c_int;
+        let got = unsafe { libc::getfsstat(buf.as_mut_ptr(), bytes, libc::MNT_NOWAIT) };
+        if got < 0 {
+            return Vec::new();
+        }
+        // A full buffer may mean it was too small: ask again.
+        if (got as usize) < cap {
+            unsafe { buf.set_len(got as usize) };
+            break buf;
+        }
+    };
     list.iter()
         .map(|s| Mount {
             on: PathBuf::from(cstr(&s.f_mntonname)),
@@ -159,6 +174,19 @@ mod tests {
     fn root_volume_listed() {
         let v = list_volumes();
         assert!(v.iter().any(|v| v.is_root && v.total > 0 && v.used > 0));
+    }
+
+    #[test]
+    fn mount_listing_is_thread_safe() {
+        std::thread::scope(|s| {
+            for _ in 0..8 {
+                s.spawn(|| {
+                    for _ in 0..200 {
+                        assert!(mounts().iter().any(|m| m.on == Path::new("/")), "root mount missing");
+                    }
+                });
+            }
+        });
     }
 
     #[test]

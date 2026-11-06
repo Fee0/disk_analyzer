@@ -7,6 +7,49 @@ edition = "2024"
 version = "0.1.0"
 license = "MIT"
 
+# Every dependency is declared here, without default features; member crates
+# only write `name.workspace = true`. Enable just the features the code needs.
+[workspace.dependencies]
+dscan-core = { path = "crates/dscan-core", default-features = false }
+
+# core
+libc = { version = "0.2", default-features = false }
+rayon = { version = "1", default-features = false }
+memchr = { version = "2", default-features = false, features = ["std"] }
+rustc-hash = { version = "2", default-features = false, features = ["std"] }
+parking_lot = { version = "0.12", default-features = false }
+thiserror = { version = "2", default-features = false, features = ["std"] }
+humansize = { version = "2", default-features = false }
+trash = { version = "5", default-features = false }
+objc2 = { version = "0.6", default-features = false, features = ["std"] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSURL",
+    "NSString",
+    "NSValue",
+    "NSDictionary",
+    "NSArray",
+    "NSError",
+] }
+
+# gui
+iced = { version = "0.14", default-features = false, features = [
+    "wgpu",      # GPU renderer
+    "tiny-skia", # software fallback when no GPU adapter is available
+    "crisp",
+    "canvas",
+    "svg",
+    "tokio",
+    "advanced",
+] }
+rfd = { version = "0.17", default-features = false }
+mimalloc = { version = "0.1", default-features = false }
+tokio = { version = "1", default-features = false, features = ["rt", "time"] }
+
+# tests
+tempfile = { version = "3", default-features = false }
+iced_test = { version = "0.14", default-features = false }
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

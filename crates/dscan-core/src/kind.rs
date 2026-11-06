@@ -74,27 +74,26 @@ impl Kind {
 
     fn of_ext(ext: &[u8]) -> Kind {
         match ext {
-            b"mov" | b"mp4" | b"m4v" | b"mkv" | b"avi" | b"webm" | b"wmv" | b"flv" | b"mpg"
-            | b"mpeg" | b"mts" | b"m2ts" | b"3gp" | b"braw" | b"r3d" | b"prproj" => Kind::Video,
-            b"jpg" | b"jpeg" | b"png" | b"gif" | b"heic" | b"heif" | b"tif" | b"tiff" | b"bmp"
-            | b"webp" | b"raw" | b"cr2" | b"cr3" | b"nef" | b"arw" | b"dng" | b"psd" | b"svg"
-            | b"ico" | b"icns" | b"avif" | b"exr" => Kind::Image,
-            b"mp3" | b"m4a" | b"aac" | b"wav" | b"aif" | b"aiff" | b"flac" | b"ogg" | b"opus"
-            | b"alac" | b"caf" | b"mid" | b"logicx" => Kind::Audio,
-            b"zip" | b"gz" | b"tgz" | b"bz2" | b"xz" | b"zst" | b"7z" | b"rar" | b"tar" | b"lz4"
-            | b"xip" | b"pkg" | b"jar" | b"whl" | b"crate" | b"apk" | b"ipa" | b"aab" => {
-                Kind::Archive
+            b"mov" | b"mp4" | b"m4v" | b"mkv" | b"avi" | b"webm" | b"wmv" | b"flv" | b"mpg" | b"mpeg" | b"mts"
+            | b"m2ts" | b"3gp" | b"braw" | b"r3d" | b"prproj" => Kind::Video,
+            b"jpg" | b"jpeg" | b"png" | b"gif" | b"heic" | b"heif" | b"tif" | b"tiff" | b"bmp" | b"webp" | b"raw"
+            | b"cr2" | b"cr3" | b"nef" | b"arw" | b"dng" | b"psd" | b"svg" | b"ico" | b"icns" | b"avif" | b"exr" => {
+                Kind::Image
             }
-            b"dmg" | b"iso" | b"img" | b"vmdk" | b"vdi" | b"qcow2" | b"sparseimage"
-            | b"sparsebundle" | b"hdd" | b"vhd" | b"vhdx" | b"utm" | b"band" => Kind::DiskImage,
-            b"pdf" | b"doc" | b"docx" | b"xls" | b"xlsx" | b"ppt" | b"pptx" | b"key"
-            | b"pages" | b"numbers" | b"txt" | b"md" | b"rtf" | b"csv" | b"epub" | b"odt"
-            | b"ods" | b"odp" | b"eml" | b"emlx" => Kind::Document,
-            b"rs" | b"c" | b"h" | b"cc" | b"cpp" | b"hpp" | b"m" | b"mm" | b"swift" | b"py"
-            | b"js" | b"ts" | b"tsx" | b"jsx" | b"java" | b"kt" | b"go" | b"rb" | b"php"
-            | b"cs" | b"json" | b"toml" | b"yaml" | b"yml" | b"xml" | b"html" | b"css"
-            | b"sh" | b"lua" | b"zig" | b"o" | b"rlib" | b"rmeta" | b"d" | b"pyc" | b"class"
-            | b"wasm" | b"pdb" | b"ll" | b"bc" => Kind::Code,
+            b"mp3" | b"m4a" | b"aac" | b"wav" | b"aif" | b"aiff" | b"flac" | b"ogg" | b"opus" | b"alac" | b"caf"
+            | b"mid" | b"logicx" => Kind::Audio,
+            b"zip" | b"gz" | b"tgz" | b"bz2" | b"xz" | b"zst" | b"7z" | b"rar" | b"tar" | b"lz4" | b"xip" | b"pkg"
+            | b"jar" | b"whl" | b"crate" | b"apk" | b"ipa" | b"aab" => Kind::Archive,
+            b"dmg" | b"iso" | b"img" | b"vmdk" | b"vdi" | b"qcow2" | b"sparseimage" | b"sparsebundle" | b"hdd"
+            | b"vhd" | b"vhdx" | b"utm" | b"band" => Kind::DiskImage,
+            b"pdf" | b"doc" | b"docx" | b"xls" | b"xlsx" | b"ppt" | b"pptx" | b"key" | b"pages" | b"numbers"
+            | b"txt" | b"md" | b"rtf" | b"csv" | b"epub" | b"odt" | b"ods" | b"odp" | b"eml" | b"emlx" => {
+                Kind::Document
+            }
+            b"rs" | b"c" | b"h" | b"cc" | b"cpp" | b"hpp" | b"m" | b"mm" | b"swift" | b"py" | b"js" | b"ts"
+            | b"tsx" | b"jsx" | b"java" | b"kt" | b"go" | b"rb" | b"php" | b"cs" | b"json" | b"toml" | b"yaml"
+            | b"yml" | b"xml" | b"html" | b"css" | b"sh" | b"lua" | b"zig" | b"o" | b"rlib" | b"rmeta" | b"d"
+            | b"pyc" | b"class" | b"wasm" | b"pdb" | b"ll" | b"bc" => Kind::Code,
             b"dylib" | b"so" | b"a" | b"framework" | b"bundle" | b"dll" | b"tbd" => Kind::Library,
             b"cache" | b"tmp" | b"log" => Kind::Cache,
             _ => Kind::Other,
@@ -107,9 +106,7 @@ impl Kind {
             return Some(Kind::App);
         }
         match name {
-            b"Caches" | b".cache" | b"DerivedData" | b"CachedData" | b"Cache" | b"cache" => {
-                Some(Kind::Cache)
-            }
+            b"Caches" | b".cache" | b"DerivedData" | b"CachedData" | b"Cache" | b"cache" => Some(Kind::Cache),
             _ => {
                 let lower_ext = name.iter().rposition(|&b| b == b'.').map(|d| &name[d + 1..]);
                 match lower_ext {

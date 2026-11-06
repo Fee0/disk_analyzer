@@ -10,6 +10,8 @@ pub const TEXT: Color = Color::from_rgb8(0xe8, 0xea, 0xee);
 pub const TEXT_DIM: Color = Color::from_rgb8(0x9a, 0x9f, 0xab);
 pub const ACCENT: Color = Color::from_rgb8(0x4f, 0x8c, 0xf7);
 pub const DANGER: Color = Color::from_rgb8(0xe5, 0x5b, 0x5b);
+/// Background of neutral filled buttons (dark enough for white text).
+pub const NEUTRAL: Color = Color::from_rgb8(0x4a, 0x4f, 0x5a);
 
 /// (hue degrees, saturation, lightness) per kind.
 fn hsl_of(kind: Kind) -> (f32, f32, f32) {
@@ -63,12 +65,7 @@ pub fn segment_color(kind: Kind, ring: usize, branch: u32) -> Color {
 }
 
 pub fn mix(a: Color, b: Color, t: f32) -> Color {
-    Color {
-        r: a.r + (b.r - a.r) * t,
-        g: a.g + (b.g - a.g) * t,
-        b: a.b + (b.b - a.b) * t,
-        a: a.a + (b.a - a.a) * t,
-    }
+    Color { r: a.r + (b.r - a.r) * t, g: a.g + (b.g - a.g) * t, b: a.b + (b.b - a.b) * t, a: a.a + (b.a - a.a) * t }
 }
 
 pub fn app_theme() -> iced::Theme {

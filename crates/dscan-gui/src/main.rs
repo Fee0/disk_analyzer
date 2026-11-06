@@ -2,15 +2,14 @@
 
 mod app;
 mod fmt;
+#[cfg(test)]
+mod iced_inspect;
 mod icon;
-mod quicklook;
+#[cfg(test)]
+mod inspect_tests;
 mod sunburst;
 mod theme;
 mod view;
-#[cfg(test)]
-mod iced_inspect;
-#[cfg(test)]
-mod inspect_tests;
 
 use std::path::PathBuf;
 
@@ -19,11 +18,8 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() -> iced::Result {
     // `disk-analyzer <folder>` scans that folder right away.
-    let initial: Option<PathBuf> = std::env::args_os()
-        .nth(1)
-        .map(PathBuf::from)
-        .filter(|p| p.is_dir())
-        .map(|p| p.canonicalize().unwrap_or(p));
+    let initial: Option<PathBuf> =
+        std::env::args_os().nth(1).map(PathBuf::from).filter(|p| p.is_dir()).map(|p| p.canonicalize().unwrap_or(p));
 
     iced::application(move || app::App::new(initial.clone()), app::App::update, view::view)
         .title(app::App::title)

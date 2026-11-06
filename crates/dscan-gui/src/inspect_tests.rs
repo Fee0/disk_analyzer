@@ -196,9 +196,20 @@ fn drag_to_collector() {
 fn metric_toggle_relayouts() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = browser_app(dir.path());
-    let _ = app.update(Message::SetMetric(dscan_core::Metric::Logical));
+    // The toggle emits the metric it shows.
+    let msgs: Vec<Message> = {
+        let mut ui = sim(&app);
+        ui.click("Logical").unwrap();
+        ui.into_messages().collect()
+    };
+    assert!(matches!(msgs[..], [Message::SetMetric(dscan_core::Metric::Logical)]), "{msgs:?}");
+    for m in msgs {
+        let _ = app.update(m);
+    }
     let b = browser(&app);
     assert_eq!(b.layout.total, b.tree.size(b.tree.root(), dscan_core::Metric::Logical));
+    let mut ui = sim(&app);
+    println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, "logical").unwrap().display());
 }
 
 #[test]
@@ -208,7 +219,8 @@ fn inspect_scanning() -> Result<(), Error> {
     // The returned task (the actual scan) is never run here.
     let _ = app.update(Message::FolderPicked(Some(dir.path().to_path_buf())));
     let Screen::Scanning(job) = &mut app.screen else { panic!("not scanning") };
-    job.snapshot = dscan_core::ProgressSnapshot { files: 673_862, dirs: 163_187, bytes: 86_624_714_752, expected: None };
+    job.snapshot =
+        dscan_core::ProgressSnapshot { files: 673_862, dirs: 163_187, bytes: 86_624_714_752, expected: None };
     let mut ui = sim(&app);
     let report = ui_inspect::report(&mut ui, VIEW);
     println!("{report}");
@@ -233,36 +245,102 @@ fn inspect_scanning() -> Result<(), Error> {
 }
 
 #[test]
-fn inspect_home_and_resume() -> Result<(), Error> {
-    let dir = tempfile::tempdir().unwrap();
-    let mut app = browser_app(dir.path());
-    let focus = browser(&app).tree.children(browser(&app).tree.root(), browser(&app).metric).next().unwrap();
-    let _ = app.update(Message::Navigate(focus));
-
-    let _ = app.update(Message::GoHome);
-    assert!(matches!(app.screen, Screen::Start) && app.parked.is_some());
+fn inspect_open_results() -> Result<(), Error> {
+    use dscan_core::Tree;
+    let scan = |p: &Path| -> (Tree, ScanOptions) {
+        let opts = ScanOptions::folder(p);
+        (dscan_core::scan(&opts, &Progress::default(), &CancelToken::default()).unwrap(), opts)
+    };
+    let open = |app: &mut App, (tree, opts): (Tree, ScanOptions)| {
+        app.screen = Screen::Browse(Box::new(Browser::new(tree, opts)));
+        let _ = app.update(Message::GoHome);
+    };
+    let dirs: Vec<_> = (0..6).map(|_| tempfile::tempdir().unwrap()).collect();
+    for d in &dirs {
+        fixture(d.path());
+    }
+    let (mut app, _) = App::new(None);
     app.volumes = Some(dscan_core::list_volumes());
+    for d in &dirs {
+        open(&mut app, scan(d.path()));
+    }
+    assert_eq!(app.parked.len(), 6, "every result stays open");
     {
         let mut ui = sim(&app);
-        let report = ui_inspect::report(&mut ui, VIEW);
-        println!("{report}");
-        println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, "home-parked")?.display());
+        println!("{}", ui_inspect::report(&mut ui, VIEW));
+        println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, "home-results")?.display());
     }
+
+    // Most recent first; clicking a row resumes exactly that result.
+    let newest = dirs[5].path().canonicalize().unwrap();
+    assert_eq!(app.parked[0].tree.root_path(), newest);
+    let name = app.parked[0].tree.name(app.parked[0].tree.root()).into_owned();
     let msgs: Vec<Message> = {
         let mut ui = sim(&app);
-        ui.click(format!("‹  Back to {}", browser_name(&app)).as_str())?;
+        ui.click(name.as_str())?;
         ui.into_messages().collect()
     };
-    assert!(matches!(msgs[..], [Message::ResumeBrowse]), "{msgs:?}");
+    assert!(matches!(msgs[..], [Message::ResumeBrowse(0)]), "{msgs:?}");
     for m in msgs {
         let _ = app.update(m);
     }
-    assert_eq!(browser(&app).focus, focus, "results and position are restored");
-    assert!(app.parked.is_none());
+    assert_eq!(browser(&app).tree.root_path(), newest);
+    assert_eq!(app.parked.len(), 5);
+    let _ = app.update(Message::GoHome);
+
+    // The × inside a row closes that result instead of opening it.
+    let msgs: Vec<Message> = {
+        let mut ui = sim(&app);
+        ui_inspect::click_at(&mut ui, (900.0, 518.0));
+        ui.into_messages().collect()
+    };
+    assert!(matches!(msgs[..], [Message::CloseResult(0)]), "{msgs:?}");
+
+    // Close removes just that one.
+    let _ = app.update(Message::CloseResult(1));
+    assert_eq!(app.parked.len(), 5);
+    assert!(app.parked.iter().all(|b| b.tree.root_path() != dirs[4].path().canonicalize().unwrap()));
+
+    // A fresh scan of an open folder replaces the old result.
+    let _ = app.update(Message::FolderPicked(Some(dirs[0].path().to_path_buf())));
+    let Screen::Scanning(job) = &app.screen else { panic!("not scanning") };
+    let id = job.id;
+    *job.slot.lock() = Some(Ok(scan(dirs[0].path()).0));
+    let _ = app.update(Message::ScanFinished(id, None));
+    assert!(matches!(app.screen, Screen::Browse(_)));
+    assert_eq!(app.parked.len(), 4, "the stale result of the same folder is dropped");
     Ok(())
 }
 
-fn browser_name(app: &App) -> String {
-    let b = app.parked.as_ref().unwrap();
-    b.tree.name(b.tree.root()).into_owned()
+#[test]
+fn collector_has_a_fixed_height() -> Result<(), Error> {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = browser_app(dir.path());
+    let root = browser(&app).tree.root();
+    let movies = browser(&app).tree.children(root, browser(&app).metric).next().unwrap();
+    let _ = app.update(Message::Press(dscan_core::Segment::Node(movies)));
+    let _ = app.update(Message::MouseReleased);
+
+    let shot = |app: &App, name: &str| -> Result<(), Error> {
+        let mut ui = sim(app);
+        let report = ui_inspect::report(&mut ui, VIEW);
+        assert!(!report.contains("clipped:"), "{name}: collector content is clipped\n{report}");
+        println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, name)?.display());
+        Ok(())
+    };
+    shot(&app, "collector-empty")?;
+    let _ = app.update(Message::CollectSelected);
+    shot(&app, "collector-one")?;
+    let kids: Vec<_> = browser(&app).tree.children(root, browser(&app).metric).skip(1).collect();
+    for id in kids {
+        if let Screen::Browse(b) = &mut app.screen {
+            b.collector.add(&b.tree, id);
+        }
+    }
+    assert!(browser(&app).collector.len() > 4);
+    shot(&app, "collector-many")?;
+    let _ = app.update(Message::AskTrash);
+    shot(&app, "collector-confirm")?;
+    let _ = app.update(Message::CancelTrash);
+    Ok(())
 }

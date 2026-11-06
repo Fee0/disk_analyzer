@@ -151,10 +151,7 @@ pub struct Tree {
 
 impl std::fmt::Debug for Tree {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Tree")
-            .field("root_path", &self.root_path)
-            .field("nodes", &self.nodes.len())
-            .finish()
+        f.debug_struct("Tree").field("root_path", &self.root_path).field("nodes", &self.nodes.len()).finish()
     }
 }
 
@@ -203,10 +200,7 @@ impl Tree {
         let n = &self.nodes[id.idx()];
         let start = n.first_child as usize;
         let end = start + n.child_count as usize;
-        self.order[m.slot()][start..end]
-            .iter()
-            .map(|&c| NodeId(c))
-            .filter(|c| !self.nodes[c.idx()].is_removed())
+        self.order[m.slot()][start..end].iter().map(|&c| NodeId(c)).filter(|c| !self.nodes[c.idx()].is_removed())
     }
 
     /// All children of `id`, including removed ones, in arena order.

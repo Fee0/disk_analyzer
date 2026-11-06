@@ -42,12 +42,8 @@ impl Drop for Fd {
 
 /// Open a directory (without following a trailing symlink).
 fn open_dir(path: &CStr) -> io::Result<Fd> {
-    let fd = unsafe {
-        libc::open(
-            path.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        )
-    };
+    let fd =
+        unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
     if fd < 0 { Err(io::Error::last_os_error()) } else { Ok(Fd(fd)) }
 }
 
@@ -75,8 +71,7 @@ pub fn read_dir(path: &CStr, mut f: impl FnMut(RawEntry<'_>)) -> io::Result<()> 
         | libc::ATTR_CMN_DEVID
         | libc::ATTR_CMN_OBJTYPE
         | libc::ATTR_CMN_FILEID;
-    attrs.fileattr =
-        libc::ATTR_FILE_LINKCOUNT | libc::ATTR_FILE_TOTALSIZE | libc::ATTR_FILE_ALLOCSIZE;
+    attrs.fileattr = libc::ATTR_FILE_LINKCOUNT | libc::ATTR_FILE_TOTALSIZE | libc::ATTR_FILE_ALLOCSIZE;
 
     BUF.with_borrow_mut(|buf| {
         loop {
@@ -118,16 +113,7 @@ fn parse_entry(rec: &[u8], f: &mut impl FnMut(RawEntry<'_>)) {
     let common = rd_u32(rec, 4);
     let fileattr = rd_u32(rec, 4 + 12);
     let mut q = 4 + 20;
-    let mut e = RawEntry {
-        name: &[],
-        error: 0,
-        dev: 0,
-        objtype: 0,
-        ino: 0,
-        links: 1,
-        alloc: 0,
-        logical: 0,
-    };
+    let mut e = RawEntry { name: &[], error: 0, dev: 0, objtype: 0, ino: 0, links: 1, alloc: 0, logical: 0 };
     if common & ATTR_CMN_ERROR != 0 {
         // Entries with errors still carry a name.
         e.error = rd_u32(rec, q);

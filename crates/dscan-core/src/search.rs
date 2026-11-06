@@ -81,12 +81,8 @@ pub fn search(tree: &Tree, query: &str, cancel: &CancelToken) -> Option<SearchRe
     if cancel.is_cancelled() {
         return None;
     }
-    let matched: Vec<u32> = flags
-        .par_iter()
-        .enumerate()
-        .filter(|(_, f)| **f & MATCH != 0)
-        .map(|(i, _)| i as u32)
-        .collect();
+    let matched: Vec<u32> =
+        flags.par_iter().enumerate().filter(|(_, f)| **f & MATCH != 0).map(|(i, _)| i as u32).collect();
     // Mark ancestors, stopping at ones already marked.
     for &i in &matched {
         let mut cur = tree.parent(NodeId(i));
