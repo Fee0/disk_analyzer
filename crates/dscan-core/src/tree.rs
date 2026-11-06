@@ -97,7 +97,8 @@ impl Node {
     pub fn is_dir(&self) -> bool {
         self.flags & flags::DIR != 0
     }
-    /// The node itself was removed (see [`Tree::is_live`] for subtrees).
+    /// The node or one of its ancestors was removed ([`Tree::remove`]
+    /// marks the whole subtree).
     #[inline]
     pub fn is_removed(&self) -> bool {
         self.flags & flags::REMOVED != 0
@@ -208,6 +209,13 @@ impl Tree {
             .filter(|c| !self.nodes[c.idx()].is_removed())
     }
 
+    /// All children of `id`, including removed ones, in arena order.
+    fn all_children(&self, id: NodeId) -> impl Iterator<Item = NodeId> + '_ {
+        let n = &self.nodes[id.idx()];
+        let start = n.first_child as usize;
+        self.order[Metric::Allocated.slot()][start..start + n.child_count as usize].iter().map(|&c| NodeId(c))
+    }
+
     /// Iterator over `id` and all its ancestors up to the root.
     pub fn ancestors(&self, id: NodeId) -> impl Iterator<Item = NodeId> + '_ {
         std::iter::successors(Some(id), |&c| self.parent(c))
@@ -225,8 +233,9 @@ impl Tree {
     }
 
     /// Neither the node nor any ancestor has been removed.
+    #[inline]
     pub fn is_live(&self, id: NodeId) -> bool {
-        !self.ancestors(id).any(|a| self.nodes[a.idx()].is_removed())
+        !self.nodes[id.idx()].is_removed()
     }
 
     /// `id` if live, otherwise its closest live ancestor.
@@ -256,14 +265,18 @@ impl Tree {
         p
     }
 
-    /// Mark `id` (and thereby its subtree) removed and subtract its sizes
-    /// from all ancestors. Returns false if it was already removed or is root.
+    /// Mark `id` and its whole subtree removed and subtract its sizes from
+    /// all ancestors. Returns false if it was already removed or is root.
     pub fn remove(&mut self, id: NodeId) -> bool {
         if id == NodeId::ROOT || !self.is_live(id) {
             return false;
         }
-        let n = &mut self.nodes[id.idx()];
-        n.flags |= flags::REMOVED;
+        let mut stack = vec![id];
+        while let Some(cur) = stack.pop() {
+            self.nodes[cur.idx()].flags |= flags::REMOVED;
+            stack.extend(self.all_children(cur));
+        }
+        let n = &self.nodes[id.idx()];
         let (alloc, logical, items) = (n.alloc, n.logical, n.items);
         let ancestors: Vec<NodeId> = self.ancestors(id).skip(1).collect();
         for &a in &ancestors {

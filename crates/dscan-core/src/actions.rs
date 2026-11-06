@@ -44,6 +44,11 @@ impl Collection {
         self.items.clear();
     }
 
+    /// Drop items that were removed from the tree (e.g. trashed).
+    pub fn prune(&mut self, tree: &Tree) {
+        self.items.retain(|&c| tree.is_actionable(c));
+    }
+
     /// Bytes on disk the collected items occupy.
     pub fn size(&self, tree: &Tree) -> u64 {
         self.items.iter().map(|&c| tree.size(c, Metric::Allocated)).sum()
@@ -54,35 +59,33 @@ impl Collection {
 #[derive(Debug, Default)]
 pub struct TrashReport {
     pub trashed: usize,
-    /// Bytes (allocated) freed in the tree.
-    pub freed: u64,
+    /// Allocated bytes of the trashed items. They stay on disk until the
+    /// Trash is emptied.
+    pub bytes: u64,
     pub failed: Vec<(PathBuf, String)>,
 }
 
-/// Move every collected item to the Trash and remove it from the tree.
-/// Items that fail stay in the collection.
-pub fn move_to_trash(tree: &mut Tree, collection: &mut Collection) -> TrashReport {
+/// Move `items` to the Trash and remove them from the tree. Items that
+/// are no longer actionable are skipped; failures are reported and stay
+/// in the tree.
+pub fn move_to_trash(tree: &mut Tree, items: &[NodeId]) -> TrashReport {
     let mut report = TrashReport::default();
     let ctx = trash_ctx();
-    collection.items.retain(|&id| {
+    for &id in items {
         if !tree.is_actionable(id) {
-            return false;
+            continue;
         }
         let path = tree.path(id);
         let size = tree.size(id, Metric::Allocated);
         match ctx.delete(&path) {
             Ok(()) => {
                 tree.remove(id);
-                report.freed += size;
+                report.bytes += size;
                 report.trashed += 1;
-                false
             }
-            Err(e) => {
-                report.failed.push((path, e.to_string()));
-                true
-            }
+            Err(e) => report.failed.push((path, e.to_string())),
         }
-    });
+    }
     report
 }
 
@@ -111,5 +114,17 @@ mod tests {
         assert_eq!(c.items(), &[a]);
         assert!(!c.add(&t, x), "child of collected folder is covered");
         assert_eq!(c.size(&t), 8);
+    }
+
+    #[test]
+    fn prune_drops_removed_items() {
+        let mut t = tree(vec![D("a", vec![F("x", 5)]), F("z", 1)]);
+        let [a, z] = [0, 1].map(|i| t.children(t.root(), Metric::Allocated).nth(i).unwrap());
+        let mut c = Collection::default();
+        c.add(&t, a);
+        c.add(&t, z);
+        t.remove(a);
+        c.prune(&t);
+        assert_eq!(c.items(), &[z]);
     }
 }

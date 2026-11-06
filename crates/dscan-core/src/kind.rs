@@ -62,10 +62,10 @@ impl Kind {
             return Kind::Other;
         };
         let ext = &name[dot + 1..];
-        if ext.is_empty() || ext.len() > 10 {
+        let mut lower = [0u8; 12]; // fits the longest known extension
+        if ext.is_empty() || ext.len() > lower.len() {
             return Kind::Other;
         }
-        let mut lower = [0u8; 10];
         for (d, s) in lower.iter_mut().zip(ext) {
             *d = s.to_ascii_lowercase();
         }
@@ -134,6 +134,8 @@ mod tests {
         assert_eq!(Kind::of_file(b"photo.HEIC"), Kind::Image);
         assert_eq!(Kind::of_file(b"Makefile"), Kind::Other);
         assert_eq!(Kind::of_file(b"lib.rs"), Kind::Code);
+        assert_eq!(Kind::of_file(b"Backup.sparseimage"), Kind::DiskImage);
+        assert_eq!(Kind::of_file(b"Old.SparseBundle"), Kind::DiskImage);
         assert_eq!(Kind::of_dir(b"Safari.app"), Some(Kind::App));
         assert_eq!(Kind::of_dir(b"Caches"), Some(Kind::Cache));
         assert_eq!(Kind::of_dir(b"Documents"), None);

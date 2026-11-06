@@ -20,13 +20,17 @@ pub const SEARCH_ID: &str = "search";
 pub const MAX_ROWS: usize = 400;
 const DRAG_THRESHOLD: f32 = 4.0;
 
-/// Run blocking work on its own thread and await the result.
-fn off_thread<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> impl Future<Output = Option<T>> {
-    let (tx, rx) = iced::futures::channel::oneshot::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(f());
-    });
-    async move { rx.await.ok() }
+/// Run blocking work on tokio's blocking pool. A panic comes back as
+/// `Err` with its message.
+async fn off_thread<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Result<T, String> {
+    tokio::task::spawn_blocking(f).await.map_err(|e| match e.try_into_panic() {
+        Ok(p) => p
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| p.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "unknown panic".into()),
+        Err(e) => e.to_string(),
+    })
 }
 
 pub struct App {
@@ -114,8 +118,9 @@ pub struct Browser {
     pub collector: Collection,
     pub over_collector: bool,
     pub confirm_trash: bool,
-    /// Trash confirmed while a search still held the tree.
-    trash_pending: bool,
+    /// Items confirmed for the Trash, kept until a running search releases
+    /// the tree. Later collector changes don't affect this batch.
+    trash_pending: Option<Vec<NodeId>>,
     pub drag: Option<PendingDrag>,
     pub status: Option<String>,
     quicklook: QuickLook,
@@ -133,7 +138,8 @@ pub enum Message {
     // Scanning
     Tick,
     CancelScan,
-    ScanFinished(u64),
+    /// Scan job finished; carries the panic message if the scan crashed.
+    ScanFinished(u64, Option<String>),
     // Browsing: chart and list share these
     Hover(Option<Segment>),
     Press(Segment),
@@ -241,7 +247,7 @@ impl App {
             snapshot: ProgressSnapshot::default(),
             slot,
         });
-        Task::perform(work, move |_| Message::ScanFinished(id))
+        Task::perform(work, move |r| Message::ScanFinished(id, r.err()))
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -284,7 +290,7 @@ impl App {
                     job.cancel.cancel();
                 }
             }
-            Message::ScanFinished(id) => {
+            Message::ScanFinished(id, crash) => {
                 let Screen::Scanning(job) = &mut self.screen else { return Task::none() };
                 if job.id != id {
                     return Task::none();
@@ -294,8 +300,12 @@ impl App {
                 self.screen = Screen::Start;
                 match result {
                     Some(Ok(tree)) => self.screen = Screen::Browse(Box::new(Browser::new(tree, opts))),
-                    Some(Err(ScanError::Cancelled)) | None => {}
+                    Some(Err(ScanError::Cancelled)) => {}
                     Some(Err(e)) => self.error = Some(e.to_string()),
+                    None => {
+                        let why = crash.unwrap_or_else(|| "no result".into());
+                        self.error = Some(format!("The scan failed unexpectedly: {why}"));
+                    }
                 }
             }
             Message::NewScan => {
@@ -322,8 +332,9 @@ fn global_event(event: iced::Event, status: event::Status, _window: iced::window
     match event {
         iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
             // Let focused widgets (the search field) keep their keys, but
-            // allow Cmd shortcuts through.
-            (status == event::Status::Ignored || modifiers.command()).then_some(Message::Key(key, modifiers))
+            // allow the Cmd shortcuts a text field has no use for.
+            let app_shortcut = modifiers.command() && matches!(key.as_ref(), Key::Character("f" | "[" | "]"));
+            (status == event::Status::Ignored || app_shortcut).then_some(Message::Key(key, modifiers))
         }
         iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => Some(Message::MouseReleased),
         _ => None,
@@ -375,7 +386,7 @@ impl Browser {
             collector: Collection::default(),
             over_collector: false,
             confirm_trash: false,
-            trash_pending: false,
+            trash_pending: None,
             drag: None,
             status: None,
             quicklook: QuickLook::default(),
@@ -490,7 +501,8 @@ impl Browser {
 
     fn back(&mut self) {
         while let Some(prev) = self.history.pop() {
-            if self.tree.is_live(prev) {
+            // Skip entries made stale by trashing (gone, or already focused).
+            if self.tree.is_live(prev) && prev != self.focus {
                 self.forward.push(self.focus);
                 let old = self.focus;
                 self.set_focus(prev, false);
@@ -504,7 +516,7 @@ impl Browser {
 
     fn forward(&mut self) {
         while let Some(next) = self.forward.pop() {
-            if self.tree.is_live(next) {
+            if self.tree.is_live(next) && next != self.focus {
                 self.history.push(self.focus);
                 self.set_focus(next, false);
                 return;
@@ -555,7 +567,7 @@ impl Browser {
         let (tree, query, cancel) = (Arc::clone(&self.tree), self.search_text.clone(), self.search_cancel.clone());
         let generation = self.search_gen;
         Task::perform(off_thread(move || dscan_core::search(&tree, &query, &cancel).map(Arc::new)), move |r| {
-            Message::SearchDone(generation, r.flatten())
+            Message::SearchDone(generation, r.ok().flatten())
         })
     }
 
@@ -563,18 +575,16 @@ impl Browser {
         // A running search holds the tree: cancel it and finish once it
         // reports back (`SearchDone`).
         self.search_cancel.cancel();
-        let Some(tree) = Arc::get_mut(&mut self.tree) else {
-            self.trash_pending = true;
-            return Task::none();
-        };
-        self.trash_pending = false;
+        let Some(tree) = Arc::get_mut(&mut self.tree) else { return Task::none() };
+        let Some(items) = self.trash_pending.take() else { return Task::none() };
         self.quicklook.close();
-        let report = actions::move_to_trash(tree, &mut self.collector);
+        let report = actions::move_to_trash(tree, &items);
+        self.collector.prune(&self.tree);
         let mut msg = format!(
-            "Moved {} item{} to the Trash, freeing {}.",
+            "Moved {} item{} ({}) to the Trash. Empty the Trash to free the space.",
             report.trashed,
             if report.trashed == 1 { "" } else { "s" },
-            format_size(report.freed)
+            format_size(report.bytes)
         );
         if let Some((_, err)) = report.failed.first() {
             msg.push_str(&format!(" {} failed: {err}", report.failed.len()));
@@ -635,7 +645,7 @@ impl Browser {
                     self.search = result;
                     self.relayout();
                 }
-                if self.trash_pending {
+                if self.trash_pending.is_some() {
                     return self.trash_collected();
                 }
             }
@@ -707,6 +717,7 @@ impl Browser {
             Message::CancelTrash => self.confirm_trash = false,
             Message::ConfirmTrash => {
                 self.confirm_trash = false;
+                self.trash_pending = Some(self.collector.items().to_vec());
                 return self.trash_collected();
             }
             Message::QuickLook => {
@@ -717,5 +728,85 @@ impl Browser {
             _ => {}
         }
         Task::none()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn browser(dir: &std::path::Path) -> Browser {
+        for (p, size) in [("Movies/a.mov", 3000), ("Movies/b.mov", 2000), ("Music/c.mp3", 1000)] {
+            let path = dir.join(p);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, vec![1u8; size]).unwrap();
+        }
+        let opts = ScanOptions::folder(dir);
+        let tree = dscan_core::scan(&opts, &Progress::default(), &CancelToken::default()).unwrap();
+        Browser::new(tree, opts)
+    }
+
+    fn child(b: &Browser, parent: NodeId, name: &str) -> NodeId {
+        b.tree.children(parent, b.metric).find(|&c| b.tree.name(c) == name).unwrap()
+    }
+
+    #[test]
+    fn back_skips_history_made_stale_by_removal() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut b = browser(dir.path());
+        let root = b.tree.root();
+        let movies = child(&b, root, "Movies");
+        let _ = b.update(Message::Navigate(movies));
+        // What `trash_collected` does after trashing the focused folder.
+        Arc::get_mut(&mut b.tree).unwrap().remove(movies);
+        b.focus = b.tree.nearest_live(b.focus);
+        assert_eq!(b.focus, root);
+
+        let _ = b.update(Message::Back);
+        assert_eq!(b.focus, root);
+        assert!(!b.can_back() && !b.can_forward(), "no phantom history entries");
+    }
+
+    #[test]
+    fn deferred_trash_keeps_the_confirmed_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut b = browser(dir.path());
+        let root = b.tree.root();
+        let (movies, music) = (child(&b, root, "Movies"), child(&b, root, "Music"));
+        b.collector.add(&b.tree, movies);
+        let running_search = Arc::clone(&b.tree);
+
+        let _ = b.update(Message::ConfirmTrash);
+        assert_eq!(b.trash_pending.as_deref(), Some(&[movies][..]), "deferred while the search holds the tree");
+        let _ = b.update(Message::Navigate(root));
+        let _ = b.update(Message::Press(Segment::Node(music)));
+        let _ = b.update(Message::CollectSelected);
+        assert_eq!(b.collector.items(), &[movies, music]);
+        assert_eq!(b.trash_pending.as_deref(), Some(&[movies][..]), "later additions are not trashed");
+
+        // Don't let the test move anything to the real Trash.
+        b.trash_pending = None;
+        drop(running_search);
+    }
+
+    #[test]
+    fn search_field_keeps_cmd_arrows() {
+        let press = |key: Key, status| {
+            let event = iced::Event::Keyboard(keyboard::Event::KeyPressed {
+                key: key.clone(),
+                modified_key: key,
+                physical_key: keyboard::key::Physical::Unidentified(keyboard::key::NativeCode::Unidentified),
+                location: keyboard::Location::Standard,
+                modifiers: keyboard::Modifiers::COMMAND,
+                text: None,
+                repeat: false,
+            });
+            global_event(event, status, iced::window::Id::unique()).is_some()
+        };
+        assert!(!press(Key::Named(Named::ArrowUp), event::Status::Captured));
+        assert!(!press(Key::Named(Named::ArrowDown), event::Status::Captured));
+        assert!(press(Key::Character("[".into()), event::Status::Captured));
+        assert!(press(Key::Character("f".into()), event::Status::Captured));
+        assert!(press(Key::Named(Named::ArrowUp), event::Status::Ignored));
     }
 }

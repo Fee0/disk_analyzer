@@ -141,7 +141,9 @@ fn dev_of(path: &Path) -> std::io::Result<i32> {
 /// Scan `opts.root` and build a [`Tree`].
 pub fn scan(opts: &ScanOptions, progress: &Progress, cancel: &CancelToken) -> Result<Tree, ScanError> {
     let started = Instant::now();
-    let root = opts.root.clone();
+    // Resolve symlinks (e.g. /tmp -> /private/tmp): the walk never follows
+    // them, so the root must be the real directory.
+    let root = std::fs::canonicalize(&opts.root).map_err(|source| ScanError::Root { path: opts.root.clone(), source })?;
     let root_dev = dev_of(&root).map_err(|source| ScanError::Root { path: root.clone(), source })?;
     // Fail early if the root itself is unreadable.
     if let Err(source) = std::fs::read_dir(&root) {
@@ -241,6 +243,12 @@ fn scan_dir(ctx: &Ctx<'_>, path: Vec<u8>, name: Box<[u8]>, dev: i32, depth: u32)
     let mut subdirs: Vec<(Box<[u8]>, i32)> = Vec::new();
     let mut file_bytes = 0u64;
     let res = bulk::read_dir(&cpath, |e| match e.objtype {
+        // The kernel could not fetch this entry's attributes: keep it
+        // visible as unreadable and count it like an unreadable folder.
+        _ if e.error != 0 => {
+            ctx.record_error(&join(path, e.name));
+            node.push_file(e.name, Kind::Other, flags::UNREADABLE, 0, 0);
+        }
         bulk::VDIR => subdirs.push((e.name.into(), e.dev)),
         _ => {
             let (mut alloc, mut logical, mut fl) = (e.alloc, e.logical, 0u8);
@@ -351,8 +359,21 @@ mod tests {
         let a = find(&t, "a");
         let sum: u64 = t.children(a, Metric::Allocated).map(|c| t.size(c, Metric::Allocated)).sum();
         assert_eq!(sum, t.size(a, Metric::Allocated));
-        assert_eq!(t.path(find(&t, "a/b/two.bin")), r.join("a/b/two.bin"));
+        // The root is canonicalized (the temp dir lives under the /var symlink).
+        assert_eq!(t.path(find(&t, "a/b/two.bin")), r.canonicalize().unwrap().join("a/b/two.bin"));
         assert_eq!(progress.snapshot().files, t.node(t.root()).items() as u64);
+    }
+
+    #[test]
+    fn follows_symlinked_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        std::fs::create_dir(r.join("real")).unwrap();
+        std::fs::write(r.join("real/f.bin"), vec![1u8; 10_000]).unwrap();
+        std::os::unix::fs::symlink(r.join("real"), r.join("link")).unwrap();
+        let t = scan(&ScanOptions::folder(r.join("link")), &Progress::default(), &CancelToken::default()).unwrap();
+        assert_eq!(t.stats.errors, 0);
+        assert_eq!(t.size(find(&t, "f.bin"), Metric::Logical), 10_000);
     }
 
     #[test]

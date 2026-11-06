@@ -19,6 +19,8 @@ pub const VLNK: u32 = 5;
 #[derive(Debug, Clone, Copy)]
 pub struct RawEntry<'a> {
     pub name: &'a [u8],
+    /// Per-entry errno; when non-zero the other attributes may be missing.
+    pub error: u32,
     pub dev: i32,
     pub objtype: u32,
     pub ino: u64,
@@ -118,6 +120,7 @@ fn parse_entry(rec: &[u8], f: &mut impl FnMut(RawEntry<'_>)) {
     let mut q = 4 + 20;
     let mut e = RawEntry {
         name: &[],
+        error: 0,
         dev: 0,
         objtype: 0,
         ino: 0,
@@ -126,7 +129,9 @@ fn parse_entry(rec: &[u8], f: &mut impl FnMut(RawEntry<'_>)) {
         logical: 0,
     };
     if common & ATTR_CMN_ERROR != 0 {
-        q += 4; // per-entry error code; entries with errors still carry a name
+        // Entries with errors still carry a name.
+        e.error = rd_u32(rec, q);
+        q += 4;
     }
     if common & libc::ATTR_CMN_NAME != 0 {
         let off = rd_i32(rec, q);

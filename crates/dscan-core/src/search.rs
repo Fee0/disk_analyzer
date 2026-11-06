@@ -127,4 +127,14 @@ mod tests {
         c.cancel();
         assert!(search(&t, "img", &c).is_none());
     }
+
+    #[test]
+    fn skips_contents_of_removed_folders() {
+        let mut t = tree(vec![D("Movies", vec![D("2015", vec![F("IMG_1.MOV", 10)])]), F("img.txt", 1)]);
+        let movies = t.children(t.root(), Metric::Allocated).find(|&c| t.name(c) == "Movies").unwrap();
+        assert!(t.remove(movies));
+        let r = search(&t, "img", &CancelToken::default()).unwrap();
+        assert_eq!(r.matches, 1, "only the live img.txt matches");
+        assert!(!r.is_relevant(movies));
+    }
 }
