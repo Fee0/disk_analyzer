@@ -1,11 +1,11 @@
 use std::any::Any;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use dscan_core::{
-    CancelToken, Collection, Layout, LayoutParams, Metric, NodeId, Progress, ProgressSnapshot, Refusal, ScanError,
-    ScanOptions, SearchResult, Segment, Tree, Volume, actions, format_size,
+    CancelToken, Collection, Layout, LayoutParams, Metric, NodeId, Progress, ProgressSnapshot, Refusal, Removal,
+    ScanError, ScanOptions, SearchResult, Segment, Tree, Volume, actions, format_size,
 };
 use iced::keyboard::{self, Key, key::Named};
 use iced::widget::canvas::Cache;
@@ -16,6 +16,13 @@ use crate::fmt::{thousands, truncate};
 pub const SEARCH_ID: &str = "search";
 pub const MAX_LIST_ROWS: usize = 400;
 const DRAG_THRESHOLD: f32 = 4.0;
+pub const HOLD_TO_DELETE: Duration = Duration::from_secs(3);
+const HOLD_PROGRESS_REFRESH: Duration = Duration::from_millis(33);
+
+struct PendingRemoval {
+    removal: Removal,
+    items: Vec<NodeId>,
+}
 
 pub type PanicMessage = String;
 
@@ -120,7 +127,8 @@ pub struct Browser {
     pub collector: Collection,
     pub over_collector: bool,
     pub confirm_trash: bool,
-    trash_batch_waiting_for_tree: Option<Vec<NodeId>>,
+    removal_waiting_for_tree: Option<PendingRemoval>,
+    pub(crate) delete_hold_started: Option<Instant>,
     pub drag: Option<PendingDrag>,
     pub status: Option<String>,
 }
@@ -163,6 +171,9 @@ pub enum Message {
     AskTrash,
     CancelTrash,
     ConfirmTrash,
+    DeleteHoldStart,
+    DeleteHoldCancel,
+    DeleteHoldTick,
     Rescan,
     GoHome,
     ResumeParked(usize),
@@ -209,8 +220,14 @@ impl App {
             Screen::Scanning(job) if job.cancel.is_paused() => Subscription::none(),
             Screen::Scanning(_) => iced::time::every(Duration::from_millis(100)).map(|_| Message::Tick),
             Screen::Browse(b) => {
-                let base = event::listen_with(global_event);
-                if b.drag.is_some() { Subscription::batch([base, event::listen_with(drag_event)]) } else { base }
+                let mut subscriptions = vec![event::listen_with(global_event)];
+                if b.drag.is_some() {
+                    subscriptions.push(event::listen_with(drag_event));
+                }
+                if b.delete_hold_started.is_some() {
+                    subscriptions.push(iced::time::every(HOLD_PROGRESS_REFRESH).map(|_| Message::DeleteHoldTick));
+                }
+                Subscription::batch(subscriptions)
             }
         }
     }
@@ -415,7 +432,8 @@ impl Browser {
             collector: Collection::default(),
             over_collector: false,
             confirm_trash: false,
-            trash_batch_waiting_for_tree: None,
+            removal_waiting_for_tree: None,
+            delete_hold_started: None,
             drag: None,
             status: None,
         };
@@ -612,20 +630,36 @@ impl Browser {
         Task::none()
     }
 
-    fn trash_confirmed_batch(&mut self) -> Task<Message> {
+    pub fn delete_hold_progress(&self) -> Option<f32> {
+        self.delete_hold_started
+            .map(|started| (started.elapsed().as_secs_f32() / HOLD_TO_DELETE.as_secs_f32()).min(1.0))
+    }
+
+    fn remove_collected(&mut self, removal: Removal) -> Task<Message> {
+        self.removal_waiting_for_tree = Some(PendingRemoval { removal, items: self.collector.items().to_vec() });
+        self.remove_waiting_batch()
+    }
+
+    fn remove_waiting_batch(&mut self) -> Task<Message> {
         self.search_cancel.cancel();
         let Some(tree) = Arc::get_mut(&mut self.tree) else {
             return Self::wait_for_the_cancelled_search_to_report_done();
         };
-        let Some(items) = self.trash_batch_waiting_for_tree.take() else { return Task::none() };
-        let report = actions::move_to_trash(tree, &items);
+        let Some(PendingRemoval { removal, items }) = self.removal_waiting_for_tree.take() else {
+            return Task::none();
+        };
+        let report = actions::remove_from_disk(tree, &items, removal);
         self.collector.prune(&self.tree);
-        let mut msg = format!(
-            "Moved {} item{} ({}) to the Trash. Empty the Trash to free the space.",
-            report.trashed,
-            if report.trashed == 1 { "" } else { "s" },
-            format_size(report.bytes)
-        );
+        let items_phrase = format!("{} item{}", report.removed, if report.removed == 1 { "" } else { "s" });
+        let mut msg = match removal {
+            Removal::MoveToTrash => format!(
+                "Moved {items_phrase} ({}) to the Trash. Empty the Trash to free the space.",
+                format_size(report.bytes)
+            ),
+            Removal::DeletePermanently => {
+                format!("Deleted {items_phrase} permanently, freeing {}.", format_size(report.bytes))
+            }
+        };
         if let Some((_, err)) = report.failed.first() {
             msg.push_str(&format!(" {} failed: {err}", report.failed.len()));
         }
@@ -683,8 +717,8 @@ impl Browser {
                     self.search = result;
                     self.relayout();
                 }
-                if self.trash_batch_waiting_for_tree.is_some() {
-                    return self.trash_confirmed_batch();
+                if self.removal_waiting_for_tree.is_some() {
+                    return self.remove_waiting_batch();
                 }
             }
             Message::ClearSearch => {
@@ -732,6 +766,7 @@ impl Browser {
                 }
             }
             Message::MouseReleased => {
+                self.delete_hold_started = None;
                 if let Some(d) = self.drag.take()
                     && d.dragging
                     && self.over_collector
@@ -755,8 +790,15 @@ impl Browser {
             Message::CancelTrash => self.confirm_trash = false,
             Message::ConfirmTrash => {
                 self.confirm_trash = false;
-                self.trash_batch_waiting_for_tree = Some(self.collector.items().to_vec());
-                return self.trash_confirmed_batch();
+                return self.remove_collected(Removal::MoveToTrash);
+            }
+            Message::DeleteHoldStart if !self.collector.is_empty() => self.delete_hold_started = Some(Instant::now()),
+            Message::DeleteHoldCancel => self.delete_hold_started = None,
+            Message::DeleteHoldTick
+                if self.delete_hold_started.is_some_and(|started| started.elapsed() >= HOLD_TO_DELETE) =>
+            {
+                self.delete_hold_started = None;
+                return self.remove_collected(Removal::DeletePermanently);
             }
             Message::DismissStatus => self.status = None,
             _ => {}
@@ -790,7 +832,11 @@ mod tests {
     }
 
     fn abandon_waiting_trash_batch_so_the_real_trash_is_never_touched(b: &mut Browser) {
-        b.trash_batch_waiting_for_tree = None;
+        b.removal_waiting_for_tree = None;
+    }
+
+    fn waiting_items(b: &Browser) -> Option<&[NodeId]> {
+        b.removal_waiting_for_tree.as_ref().map(|pending| &pending.items[..])
     }
 
     #[test]
@@ -808,6 +854,55 @@ mod tests {
         assert!(!b.can_back() && !b.can_forward(), "no phantom history entries");
     }
 
+    fn pretend_held_for(b: &mut Browser, held: Duration) {
+        b.delete_hold_started = Some(Instant::now() - held);
+    }
+
+    #[test]
+    fn holding_delete_for_three_seconds_deletes_the_collected_items_permanently() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut b = browser(dir.path());
+        let movies = child(&b, b.tree.root(), "Movies");
+        b.collector.add(&b.tree, movies).unwrap();
+
+        let _ = b.update(Message::DeleteHoldStart);
+        pretend_held_for(&mut b, Duration::from_secs(1));
+        let _ = b.update(Message::DeleteHoldTick);
+        assert!(dir.path().join("Movies").exists(), "nothing is deleted before three seconds");
+        let progress = b.delete_hold_progress().unwrap();
+        assert!((0.3..0.4).contains(&progress), "one of three seconds held: {progress}");
+
+        pretend_held_for(&mut b, HOLD_TO_DELETE);
+        let _ = b.update(Message::DeleteHoldTick);
+        assert!(!dir.path().join("Movies").exists());
+        assert!(!b.tree.is_live(movies) && b.collector.is_empty());
+        assert!(b.delete_hold_started.is_none());
+        assert!(b.status.as_deref().is_some_and(|s| s.starts_with("Deleted 1 item permanently")), "{:?}", b.status);
+    }
+
+    #[test]
+    fn releasing_or_leaving_the_button_early_cancels_the_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut b = browser(dir.path());
+        let movies = child(&b, b.tree.root(), "Movies");
+        b.collector.add(&b.tree, movies).unwrap();
+        for early_end in [Message::DeleteHoldCancel, Message::MouseReleased] {
+            let _ = b.update(Message::DeleteHoldStart);
+            let _ = b.update(early_end);
+            assert!(b.delete_hold_progress().is_none());
+            let _ = b.update(Message::DeleteHoldTick);
+            assert!(dir.path().join("Movies").exists());
+        }
+    }
+
+    #[test]
+    fn delete_hold_needs_something_collected() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut b = browser(dir.path());
+        let _ = b.update(Message::DeleteHoldStart);
+        assert!(b.delete_hold_progress().is_none());
+    }
+
     #[test]
     fn deferred_trash_keeps_the_confirmed_batch() {
         let dir = tempfile::tempdir().unwrap();
@@ -818,16 +913,12 @@ mod tests {
         let running_search = Arc::clone(&b.tree);
 
         let _ = b.update(Message::ConfirmTrash);
-        assert_eq!(
-            b.trash_batch_waiting_for_tree.as_deref(),
-            Some(&[movies][..]),
-            "deferred while the search holds the tree"
-        );
+        assert_eq!(waiting_items(&b), Some(&[movies][..]), "deferred while the search holds the tree");
         let _ = b.update(Message::Navigate(root));
         let _ = b.update(Message::Press(Segment::Node(music)));
         let _ = b.update(Message::CollectSelected);
         assert_eq!(b.collector.items(), &[movies, music]);
-        assert_eq!(b.trash_batch_waiting_for_tree.as_deref(), Some(&[movies][..]), "later additions are not trashed");
+        assert_eq!(waiting_items(&b), Some(&[movies][..]), "later additions are not trashed");
 
         abandon_waiting_trash_batch_so_the_real_trash_is_never_touched(&mut b);
         drop(running_search);

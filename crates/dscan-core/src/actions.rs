@@ -137,16 +137,22 @@ impl Collection {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Removal {
+    MoveToTrash,
+    DeletePermanently,
+}
+
 #[derive(Debug, Default)]
-pub struct TrashReport {
-    pub trashed: usize,
+pub struct RemovalReport {
+    pub removed: usize,
     pub bytes: u64,
     pub failed: Vec<(PathBuf, String)>,
 }
 
-pub fn move_to_trash(tree: &mut Tree, items: &[NodeId]) -> TrashReport {
-    let mut report = TrashReport::default();
-    let ctx = trash_context_needing_no_finder_automation_permission();
+pub fn remove_from_disk(tree: &mut Tree, items: &[NodeId], removal: Removal) -> RemovalReport {
+    let mut report = RemovalReport::default();
+    let trash = trash_context_needing_no_finder_automation_permission();
     for &id in items {
         if !tree.is_actionable(id) {
             continue;
@@ -157,16 +163,25 @@ pub fn move_to_trash(tree: &mut Tree, items: &[NodeId]) -> TrashReport {
             continue;
         }
         let size = tree.size(id, Metric::Allocated);
-        match ctx.delete(&path) {
+        let outcome = match removal {
+            Removal::MoveToTrash => trash.delete(&path).map_err(|e| e.to_string()),
+            Removal::DeletePermanently => delete_permanently(&path).map_err(|e| e.to_string()),
+        };
+        match outcome {
             Ok(()) => {
                 tree.remove(id);
                 report.bytes += size;
-                report.trashed += 1;
+                report.removed += 1;
             }
-            Err(e) => report.failed.push((path, e.to_string())),
+            Err(e) => report.failed.push((path, e)),
         }
     }
     report
+}
+
+fn delete_permanently(path: &Path) -> std::io::Result<()> {
+    let is_real_directory = std::fs::symlink_metadata(path)?.is_dir();
+    if is_real_directory { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) }
 }
 
 fn trash_context_needing_no_finder_automation_permission() -> trash::TrashContext {
@@ -193,6 +208,31 @@ mod tests {
         assert_eq!(c.items(), &[a]);
         assert_eq!(c.add(&t, x), Err(Refusal::AlreadyCoveredByCollectedFolder));
         assert_eq!(c.size(&t), 8, "size counts allocated bytes");
+    }
+
+    #[test]
+    fn delete_permanently_removes_files_and_folders_and_updates_the_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("old/nested")).unwrap();
+        std::fs::write(root.join("old/nested/a.bin"), vec![1u8; 50_000]).unwrap();
+        std::fs::write(root.join("big.bin"), vec![1u8; 80_000]).unwrap();
+        std::fs::write(root.join("keep.txt"), b"keep").unwrap();
+        std::os::unix::fs::symlink(root.join("keep.txt"), root.join("link-to-keep")).unwrap();
+        let mut t = crate::scan(&crate::ScanOptions::folder(root), &Default::default(), &Default::default()).unwrap();
+        let child =
+            |t: &Tree, name: &str| t.children(t.root(), Metric::Allocated).find(|&c| t.name(c) == name).unwrap();
+        let items = [child(&t, "old"), child(&t, "big.bin"), child(&t, "link-to-keep")];
+        let total_before = t.size(t.root(), Metric::Allocated);
+
+        let report = remove_from_disk(&mut t, &items, Removal::DeletePermanently);
+
+        assert_eq!(report.removed, 3, "{:?}", report.failed);
+        assert!(!root.join("old").exists() && !root.join("big.bin").exists());
+        assert!(root.join("link-to-keep").symlink_metadata().is_err(), "the symlink itself is deleted");
+        assert!(root.join("keep.txt").exists(), "a symlink's target is never followed");
+        assert_eq!(t.size(t.root(), Metric::Allocated), total_before - report.bytes);
+        assert!(items.iter().all(|&id| !t.is_live(id)));
     }
 
     #[test]

@@ -7,7 +7,7 @@ use iced::widget::{
 };
 use iced::{Alignment, Color, Element, Fill, Length, Shrink, Theme};
 
-use crate::app::{App, Browser, ListRow, Message, SEARCH_ID, ScanJob, Screen};
+use crate::app::{App, Browser, HOLD_TO_DELETE, ListRow, Message, SEARCH_ID, ScanJob, Screen};
 use crate::fmt::{thousands, truncate};
 use crate::icon;
 use crate::sunburst::Sunburst;
@@ -369,6 +369,39 @@ fn chart_panel(b: &Browser) -> Element<'_, Message> {
 }
 
 const COLLECTOR_FIXED_HEIGHT: f32 = 72.0;
+const COLLECTED_CHIPS_SHOWN: usize = 2;
+const COLLECTED_CHIP_NAME_CHARS: usize = 16;
+const HOLD_BUTTON_WIDTH: f32 = 228.0;
+const HOLD_BUTTON_HEIGHT: f32 = 29.0;
+
+fn hold_to_delete_label(progress: Option<f32>) -> String {
+    match progress {
+        None => format!("Hold {} s to delete permanently", HOLD_TO_DELETE.as_secs()),
+        Some(done) => format!("Keep holding… {:.1} s", HOLD_TO_DELETE.as_secs_f32() * (1.0 - done)),
+    }
+}
+
+fn hold_to_delete_button(b: &Browser) -> Element<'_, Message> {
+    let progress = b.delete_hold_progress();
+    let held_part = container(Space::new())
+        .width(HOLD_BUTTON_WIDTH * progress.unwrap_or(0.0))
+        .height(Fill)
+        .style(|_| rounded_box(theme::DANGER, 6.0));
+    let label = center(text(hold_to_delete_label(progress)).size(13).color(Color::WHITE));
+    let face = container(stack![held_part, label].width(Fill).height(Fill))
+        .width(HOLD_BUTTON_WIDTH)
+        .height(HOLD_BUTTON_HEIGHT)
+        .style(|_| {
+            rounded_box(theme::mix(theme::DANGER, theme::PANEL, 0.65), 6.0)
+                .border(border::rounded(6).width(1).color(theme::DANGER))
+        });
+    mouse_area(face)
+        .on_press(Message::DeleteHoldStart)
+        .on_release(Message::DeleteHoldCancel)
+        .on_exit(Message::DeleteHoldCancel)
+        .interaction(iced::mouse::Interaction::Pointer)
+        .into()
+}
 
 fn collector(b: &Browser) -> Element<'_, Message> {
     let dragging = b.drag.as_ref().is_some_and(|d| d.dragging);
@@ -404,12 +437,12 @@ fn collector(b: &Browser) -> Element<'_, Message> {
             .into()
     } else {
         let mut items = row![].spacing(6).align_y(Alignment::Center);
-        for &id in collected.items().iter().take(4) {
+        for &id in collected.items().iter().take(COLLECTED_CHIPS_SHOWN) {
             items = items.push(
                 container(
                     row![
                         dot(theme::kind_color(b.tree.node(id).kind()), 8.0),
-                        text(truncate(&b.tree.name(id), 18)).size(12),
+                        text(truncate(&b.tree.name(id), COLLECTED_CHIP_NAME_CHARS)).size(12),
                         button(text("×").size(12)).padding([0, 4]).style(button::text).on_press(Message::Uncollect(id)),
                     ]
                     .spacing(5)
@@ -419,22 +452,27 @@ fn collector(b: &Browser) -> Element<'_, Message> {
                 .style(|_| rounded_box(theme::PANEL_HI, 10.0)),
             );
         }
-        if collected.len() > 4 {
-            items = items.push(text(format!("+{} more", collected.len() - 4)).size(12).color(theme::TEXT_DIM));
+        if collected.len() > COLLECTED_CHIPS_SHOWN {
+            let hidden = collected.len() - COLLECTED_CHIPS_SHOWN;
+            items = items.push(text(format!("+{hidden} more")).size(12).color(theme::TEXT_DIM));
         }
         row![
-            column![
-                text(format!("{} collected · {}", collected.len(), format_size(collected.size(&b.tree)))).size(14),
-                items
-            ]
-            .spacing(4),
-            Space::new().width(Fill),
+            container(
+                column![
+                    text(format!("{} collected · {}", collected.len(), format_size(collected.size(&b.tree)))).size(14),
+                    items
+                ]
+                .spacing(4)
+            )
+            .width(Fill)
+            .clip(true),
             button(text("Clear").size(13))
                 .style(filled_white_text_button(theme::NEUTRAL_BUTTON))
                 .on_press(Message::ClearCollector),
             button(text("Move to Trash…").size(13))
                 .style(filled_white_text_button(theme::DANGER))
                 .on_press(Message::AskTrash),
+            hold_to_delete_button(b),
         ]
         .spacing(8)
         .align_y(Alignment::Center)

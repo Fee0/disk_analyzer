@@ -28,7 +28,7 @@ Without it, protected folders show as "no access" and their bytes end up in
 | Mouse back/forward buttons, Backspace or ⌘[ / ⌘] | back / forward through visited folders |
 | ⌘F | search (matching items stay lit; everything else dims) |
 | Esc | clear the search, then the selection |
-| C, or drag onto the collector | collect items, then use **Move to Trash…** |
+| C, or drag onto the collector | collect items, then **Move to Trash…**, or hold **Hold 3 s to delete permanently** for 3 seconds to delete them right away |
 
 *On disk* shows allocated bytes, which is what deleting actually frees; hard
 links count once. *Logical* shows file lengths, as Finder does. In a
@@ -47,7 +47,7 @@ crates/dscan-core   library, no GUI dependencies
   hidden.rs         container used / purgeable / hidden space
   layout.rs         sunburst geometry + O(log n) hit-testing
   search.rs         parallel case-insensitive name search
-  actions.rs        Move to Trash + tree update
+  actions.rs        collector, Move to Trash / delete permanently + tree update
   examples/scan.rs  CLI for benchmarking: `cargo run -p dscan-core --release --example scan -- / --disk`
 crates/dscan-gui    iced application
   app.rs            state, messages, update, subscriptions

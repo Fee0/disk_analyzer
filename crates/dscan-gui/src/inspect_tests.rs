@@ -338,6 +338,23 @@ fn collector_fixed_height_fits_every_state_without_clipping() -> Result<(), Erro
     }
     assert!(browser(&app).collector.len() > 4);
     shot(&app, "collector-many")?;
+    {
+        let mut ui = sim(&app);
+        let report = ui_inspect::report(&mut ui, VIEW);
+        assert!(report.contains("\"Hold 3 s to delete permanently\""), "the hold button says how long to hold");
+    }
+    if let Screen::Browse(b) = &mut app.screen {
+        b.delete_hold_started = Some(std::time::Instant::now() - std::time::Duration::from_millis(1500));
+    }
+    {
+        let mut ui = sim(&app);
+        let report = ui_inspect::report(&mut ui, VIEW);
+        assert!(report.contains("Keep holding… 1.5 s"), "the label counts down while held\n{report}");
+    }
+    shot(&app, "collector-holding")?;
+    if let Screen::Browse(b) = &mut app.screen {
+        b.delete_hold_started = None;
+    }
     let _ = app.update(Message::AskTrash);
     shot(&app, "collector-confirm")?;
     let _ = app.update(Message::CancelTrash);

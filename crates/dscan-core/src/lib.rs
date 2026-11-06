@@ -6,7 +6,7 @@ pub mod scan;
 pub mod search;
 pub mod tree;
 
-pub use actions::{Collection, Refusal, is_protected};
+pub use actions::{Collection, Refusal, Removal, is_protected};
 pub use kind::Kind;
 pub use layout::{Arc, Layout, LayoutParams, MAX_DEPTH, Segment, sunburst};
 pub use scan::volumes::{Volume, has_full_disk_access, list_volumes};
