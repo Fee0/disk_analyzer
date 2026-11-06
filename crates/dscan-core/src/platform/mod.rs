@@ -6,6 +6,8 @@ pub(crate) mod macos;
 mod unix;
 #[cfg(any(unix, test))]
 pub(crate) mod unix_syntax;
+#[cfg(any(windows, test))]
+pub(crate) mod windows;
 
 use std::borrow::Cow;
 use std::ffi::OsStr;
@@ -22,6 +24,8 @@ use crate::volumes::Volume;
 pub(crate) type Current = linux::Linux;
 #[cfg(target_os = "macos")]
 pub(crate) type Current = macos::MacOs;
+#[cfg(windows)]
+pub(crate) type Current = windows::Windows;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct DeviceId(pub u64);

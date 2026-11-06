@@ -1,6 +1,6 @@
 # Disk Analyzer
 
-A DaisyDisk-style disk usage explorer for macOS (APFS) and Linux:
+A DaisyDisk-style disk usage explorer for macOS (APFS), Linux and Windows:
 Rust, with an iced 0.14 GUI. It is a personal tool: no licensing, no network, no caching (every launch
 scans fresh). Performance and UX both matter.
 
@@ -49,7 +49,8 @@ GUI (how it looks and is driven), and put each part in its crate.
 
 Everything that differs between operating systems lives in
 `crates/dscan-core/src/platform/`, one folder per OS, behind the `Platform`
-trait in `platform/mod.rs`. Each OS implements it once (`MacOs`, `Linux`), and `platform::Current` picks the one for the build target.
+trait in `platform/mod.rs`. Each OS implements it once (`MacOs`, `Linux`,
+`Windows`), and `platform::Current` picks the one for the build target.
 
 Rules:
 
@@ -58,14 +59,14 @@ Rules:
    or `cfg(unix)`/`cfg(windows)`/`cfg(target_os …)` (unit-test modules may,
    for fixtures). Shared code calls `Current::…` through the trait.
 2. **Every OS implements the whole trait.** Adding a capability means adding
-   a trait item and implementing it for every OS. Never stub one OS silently;
+   a trait item and implementing it for all three. Never stub one OS silently;
    if an OS has no equivalent (e.g. purgeable space off macOS), return the
    honest neutral value.
 3. **Pure logic is tested on every host.** Parsing and rules that need no
-   syscalls (mountinfo, APFS container names, path syntax,
+   syscalls (mountinfo, Windows directory records, drive names, path syntax,
    protected-folder tables) go in their own modules that compile under
    `cfg(any(target_os = "<os>", test))`, so `cargo test` on any machine
-   checks every platform. Only the modules that make syscalls are gated
+   checks all three platforms. Only the modules that make syscalls are gated
    to their OS.
 4. **Shared Unix helpers** (fds, `CString` paths, devices) go in
    `platform/unix.rs`, not copied into `macos/` and `linux/`.
@@ -88,6 +89,7 @@ crates/dscan-core/src/
   platform/unix.rs             helpers shared by macOS and Linux
   platform/macos/              getattrlistbulk reader, APFS container/firmlinks, NSURL space
   platform/linux/              readdir+fstatat reader, /proc/self/mountinfo, statvfs
+  platform/windows/            FileIdExtdDirectoryInfo reader, drive letters, verbatim paths
   platform/*/protected.rs      per-OS protected folders (matched by protection.rs)
   tree.rs                      arena tree (NodeId), sizes, remove(), sort orders
   layout.rs                    sunburst geometry + hit-testing
@@ -121,6 +123,7 @@ cargo test --workspace                                  # unit, layering and hea
 
   ```sh
   cargo clippy -p dscan-core --all-targets --target x86_64-unknown-linux-gnu -- -D warnings
+  cargo clippy -p dscan-core --all-targets --target x86_64-pc-windows-msvc -- -D warnings
   ```
 
   and run the Linux tests for real in Docker (as a normal user, so that
@@ -131,6 +134,18 @@ cargo test --workspace                                  # unit, layering and hea
     -e CARGO_HOME=/work/target/docker-cargo -e CARGO_TARGET_DIR=/work/target/docker-linux \
     rust:1-bookworm cargo test --workspace
   ```
+  Windows code can run its core tests under Wine 10 (x86 emulated, slow):
+
+  ```sh
+  docker build --platform linux/amd64 -t dscan-wine -f ci/windows-wine.Dockerfile ci
+  docker run --rm --platform linux/amd64 -v "$PWD":/work -w /work \
+    -e CARGO_HOME=/work/target/docker-cargo-wine -e CARGO_TARGET_DIR=/work/target/docker-wine \
+    dscan-wine sh -c 'wineboot -i; cargo test -p dscan-core --target x86_64-pc-windows-gnu'
+  ```
+
+  Wine is not Windows: it lacks `FileIdExtdDirectoryInfo`, so the reader
+  takes its fallback and the two hard-link tests fail there. Every other test
+  must pass; real NTFS behaviour still needs a Windows machine.
 - If you touched `Cargo.toml` or features, also build each crate alone
   (`cargo test -p dscan-core`, `cargo test -p dscan-gui`): the workspace build
   can hide a missing feature that another crate happens to enable.

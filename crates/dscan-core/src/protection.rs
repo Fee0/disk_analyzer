@@ -44,6 +44,7 @@ pub fn is_protected(path: &Path) -> bool {
 mod tests {
     use super::*;
     use crate::platform::unix_syntax::UNIX_PATHS;
+    use crate::platform::windows::paths::WINDOWS_PATHS;
 
     const SAMPLE: ProtectedLocations = ProtectedLocations {
         syntax: UNIX_PATHS,
@@ -70,5 +71,22 @@ mod tests {
         assert!(!SAMPLE.protects("/usr/local"));
         assert!(!SAMPLE.protects("/usr/local/bin/tool"));
         assert!(!SAMPLE.protects("/usrx"), "components are compared whole, not as string prefixes");
+    }
+
+    #[test]
+    fn windows_paths_match_case_insensitively_with_either_separator_and_verbatim_prefixes() {
+        let windows = ProtectedLocations {
+            syntax: WINDOWS_PATHS,
+            exact: &["*", "*/Users/*"],
+            trees: &["*/Windows"],
+            user_trees_inside_system_trees: &[],
+        };
+        assert!(windows.protects(r"C:\"));
+        assert!(windows.protects(r"D:"));
+        assert!(windows.protects(r"c:\users\alex"));
+        assert!(windows.protects(r"\\?\C:\WINDOWS\System32\kernel32.dll"));
+        assert!(windows.protects("C:/Windows"));
+        assert!(!windows.protects(r"C:\Users\alex\Downloads"));
+        assert!(!windows.protects(r"C:\Games"));
     }
 }

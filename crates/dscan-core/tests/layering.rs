@@ -120,7 +120,7 @@ fn os_specific_code_lives_only_in_the_platform_layer() {
 #[test]
 fn every_platform_folder_implements_the_platform_trait() {
     let platform = Path::new(CORE).join("src").join(PLATFORM_LAYER);
-    for os in ["macos", "linux"] {
+    for os in ["macos", "linux", "windows"] {
         let sources: String =
             rust_files_below(&platform.join(os)).iter().map(|f| std::fs::read_to_string(f).unwrap()).collect();
         assert!(sources.contains("impl Platform for"), "platform/{os} must implement the Platform trait");
