@@ -1,24 +1,17 @@
-//! Sunburst geometry (pure math, renderer independent) and hit-testing.
-//!
-//! Angles are expressed as fractions of a full turn in `[0, 1)`, starting at
-//! 12 o'clock and running clockwise. Ring 0 holds the focus node's children.
-
 use crate::kind::Kind;
 use crate::search::SearchResult;
 use crate::tree::{Metric, NodeId, Tree};
 
-/// Default number of rings.
 pub const MAX_DEPTH: usize = 7;
 
-/// What a segment stands for.
+const DEGREES_PER_TURN: f64 = 360.0;
+const NARROWEST_DRAWN_ARC_DEGREES: f64 = 0.6;
+const TURN_FRACTION_EPSILON: f64 = 1e-12;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Segment {
     Node(NodeId),
-    /// `count` children of `parent` too small to draw individually.
-    Small {
-        parent: NodeId,
-        count: u32,
-    },
+    Small { parent: NodeId, count: u32 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -28,9 +21,7 @@ pub struct Arc {
     pub end: f64,
     pub size: u64,
     pub kind: Kind,
-    /// Index of the top-level (ring 0) ancestor's arc, for shading.
     pub branch: u32,
-    /// Contains a search match (always true without a search).
     pub relevant: bool,
 }
 
@@ -51,15 +42,13 @@ impl Arc {
 
 #[derive(Clone, Copy, Debug)]
 pub struct LayoutParams {
-    /// Number of rings to draw.
     pub max_depth: usize,
-    /// Children narrower than this fraction of a turn are merged.
     pub min_span: f64,
 }
 
 impl Default for LayoutParams {
     fn default() -> Self {
-        LayoutParams { max_depth: MAX_DEPTH, min_span: 0.6 / 360.0 }
+        LayoutParams { max_depth: MAX_DEPTH, min_span: NARROWEST_DRAWN_ARC_DEGREES / DEGREES_PER_TURN }
     }
 }
 
@@ -71,7 +60,6 @@ pub struct Layout {
 }
 
 impl Layout {
-    /// Number of arcs over all rings.
     pub fn len(&self) -> usize {
         self.rings.iter().map(Vec::len).sum()
     }
@@ -79,32 +67,26 @@ impl Layout {
         self.len() == 0
     }
 
-    /// The arc at `ring` covering angle `frac`.
-    pub fn hit(&self, ring: usize, frac: f64) -> Option<&Arc> {
+    pub fn hit(&self, ring: usize, turn_fraction: f64) -> Option<&Arc> {
         let arcs = self.rings.get(ring)?;
-        let frac = frac.rem_euclid(1.0);
-        let i = arcs.partition_point(|a| a.end <= frac);
-        arcs.get(i).filter(|a| a.start <= frac && frac < a.end)
+        let turn_fraction = turn_fraction.rem_euclid(1.0);
+        let i = arcs.partition_point(|a| a.end <= turn_fraction);
+        arcs.get(i).filter(|a| a.start <= turn_fraction && turn_fraction < a.end)
     }
 
-    /// Ring index and arc of a segment, if visible.
     pub fn find(&self, seg: Segment) -> Option<(usize, &Arc)> {
         self.rings.iter().enumerate().find_map(|(r, arcs)| arcs.iter().find(|a| a.segment == seg).map(|a| (r, a)))
     }
 
-    /// Visible descendants of the arc at `ring`: the outer-ring arcs inside
-    /// its angular span.
     pub fn descendants<'a>(&'a self, ring: usize, arc: &Arc) -> impl Iterator<Item = (usize, &'a Arc)> + 'a {
         let (start, end) = (arc.start, arc.end);
         self.rings.iter().enumerate().skip(ring + 1).flat_map(move |(r, arcs)| {
-            let first = arcs.partition_point(|x| x.end <= start + 1e-12);
-            arcs[first..].iter().take_while(move |x| x.start < end - 1e-12).map(move |x| (r, x))
+            let first = arcs.partition_point(|x| x.end <= start + TURN_FRACTION_EPSILON);
+            arcs[first..].iter().take_while(move |x| x.start < end - TURN_FRACTION_EPSILON).map(move |x| (r, x))
         })
     }
 }
 
-/// Compute the sunburst for `focus`; arcs without a match of `search`
-/// are marked irrelevant.
 pub fn sunburst(
     tree: &Tree,
     focus: NodeId,
@@ -115,8 +97,8 @@ pub fn sunburst(
     let total = tree.size(focus, metric);
     let mut layout = Layout { focus, total, rings: vec![Vec::new(); params.max_depth] };
     if total > 0 {
-        let mut ctx = Placer { tree, metric, params, search, rings: &mut layout.rings };
-        ctx.place(focus, 0.0, 1.0, 0, 0);
+        let mut placer = Placer { tree, metric, params, search, rings: &mut layout.rings };
+        placer.place(focus, 0.0, 1.0, 0, 0);
     }
     while layout.rings.last().is_some_and(Vec::is_empty) {
         layout.rings.pop();
@@ -133,14 +115,13 @@ struct Placer<'a> {
 }
 
 impl Placer<'_> {
-    fn relevant(&self, id: NodeId) -> bool {
+    fn is_relevant(&self, id: NodeId) -> bool {
         self.search.is_none_or(|s| s.is_relevant(id))
     }
 
-    /// Add `arc` to ring `depth`; ring-0 arcs start a new branch. Returns
-    /// the arc's branch.
-    fn push(&mut self, depth: usize, mut arc: Arc) -> u32 {
-        if depth == 0 {
+    fn push_returning_branch(&mut self, depth: usize, mut arc: Arc) -> u32 {
+        let starts_a_new_branch = depth == 0;
+        if starts_a_new_branch {
             arc.branch = self.rings[0].len() as u32;
         }
         self.rings[depth].push(arc);
@@ -169,7 +150,7 @@ impl Placer<'_> {
             if s < self.params.min_span {
                 small_size += cs;
                 small_count += 1;
-                small_relevant |= self.relevant(child);
+                small_relevant |= self.is_relevant(child);
                 last_small = Some(child);
                 continue;
             }
@@ -180,9 +161,9 @@ impl Placer<'_> {
                 size: cs,
                 kind: tree.node(child).kind(),
                 branch,
-                relevant: self.relevant(child),
+                relevant: self.is_relevant(child),
             };
-            let b = self.push(depth, arc);
+            let b = self.push_returning_branch(depth, arc);
             if tree.node(child).is_dir() {
                 self.place(child, cursor, s, depth + 1, b);
             }
@@ -195,7 +176,7 @@ impl Placer<'_> {
                 _ => (Segment::Small { parent: node, count: small_count }, Kind::SmallItems),
             };
             let arc = Arc { segment, start: cursor, end, size: small_size, kind, branch, relevant: small_relevant };
-            self.push(depth, arc);
+            self.push_returning_branch(depth, arc);
         }
     }
 }
@@ -216,25 +197,25 @@ mod tests {
         let l = sunburst(&t, t.root(), Metric::Allocated, LayoutParams { max_depth: 4, min_span: 0.01 }, None);
         assert_eq!(l.total, 1001);
         assert_eq!(l.rings.len(), 2);
-        // ring 0: a, b, small(2)
-        assert_eq!(l.rings[0].len(), 3);
+        assert_eq!(l.rings[0].len(), 3, "ring 0 holds the focus's children: a, b and one bucket of small items");
         assert!(matches!(l.rings[0][2].segment, Segment::Small { count: 2, .. }));
-        assert!((l.rings[0].last().unwrap().end - 1.0).abs() < 1e-9);
-        // Every arc's midpoint hits that arc.
+        assert!((l.rings[0].last().unwrap().end - 1.0).abs() < 1e-9, "ring 0 covers the full turn");
+        assert!(l.rings.iter().flatten().all(|a| a.relevant), "without a search every arc is relevant");
         for (r, ring) in l.rings.iter().enumerate() {
             for a in ring {
-                assert_eq!(l.hit(r, a.mid()).unwrap().segment, a.segment);
+                assert_eq!(l.hit(r, a.mid()).unwrap().segment, a.segment, "an arc's midpoint hits that arc");
             }
-            // Arcs are sorted and non-overlapping.
             for w in ring.windows(2) {
-                assert!(w[0].end <= w[1].start + 1e-12);
+                assert!(w[0].end <= w[1].start + TURN_FRACTION_EPSILON, "arcs are sorted and non-overlapping");
             }
         }
-        // Children lie within their parent's span.
         let a = &l.rings[0][0];
         for c in &l.rings[1] {
             if c.branch == 0 {
-                assert!(c.start >= a.start - 1e-12 && c.end <= a.end + 1e-12);
+                assert!(
+                    c.start >= a.start - TURN_FRACTION_EPSILON && c.end <= a.end + TURN_FRACTION_EPSILON,
+                    "children lie within their parent's span"
+                );
             }
         }
         assert!(l.hit(5, 0.5).is_none());

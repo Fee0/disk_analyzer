@@ -1,9 +1,3 @@
-//! The interactive sunburst chart (an iced `canvas::Program`).
-//!
-//! All geometry comes from `dscan_core::layout`; this module only maps
-//! fractions of a turn to screen angles, paints, and turns mouse input into
-//! application messages.
-
 use std::f32::consts::{FRAC_PI_2, TAU};
 use std::time::{Duration, Instant};
 
@@ -16,14 +10,13 @@ use crate::fmt::truncate;
 use crate::theme;
 
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+const SLIVER_MAX_ARC_LENGTH: f32 = 3.0;
 
 pub struct Sunburst<'a> {
     pub tree: &'a Tree,
     pub layout: &'a Layout,
-    /// Static chart geometry.
-    pub cache: &'a Cache,
-    /// Selection outline and hover highlight.
-    pub highlight: &'a Cache,
+    pub chart_cache: &'a Cache,
+    pub highlight_cache: &'a Cache,
     pub hovered: Option<Segment>,
     pub selected: Option<NodeId>,
 }
@@ -52,10 +45,15 @@ impl Geo {
         frac as f32 * TAU - FRAC_PI_2
     }
 
-    /// Filled shape of `arc` drawn in `ring`.
     fn arc_path(&self, ring: usize, arc: &Arc) -> Path {
         let r_in = self.r0 + ring as f32 * self.ring_w;
-        sector(self.center, r_in, r_in + self.ring_w, Self::angle(arc.start), Self::angle(arc.end))
+        annular_sector_as_one_polygon(
+            self.center,
+            r_in,
+            r_in + self.ring_w,
+            Self::angle(arc.start),
+            Self::angle(arc.end),
+        )
     }
 }
 
@@ -65,9 +63,7 @@ enum Hit<'a> {
     Nothing,
 }
 
-/// An annular sector as a closed polygon (iced's arc builder starts a new
-/// sub-path for every arc, so we tessellate ourselves).
-fn sector(c: Point, r_in: f32, r_out: f32, a0: f32, a1: f32) -> Path {
+fn annular_sector_as_one_polygon(c: Point, r_in: f32, r_out: f32, a0: f32, a1: f32) -> Path {
     let sweep = a1 - a0;
     let steps = ((sweep.abs() * r_out) / 3.0).ceil().clamp(1.0, 720.0) as usize;
     let dirs: Vec<(f32, f32)> =
@@ -101,7 +97,7 @@ impl Sunburst<'_> {
     }
 
     fn draw_chart(&self, frame: &mut Frame, geo: &Geo) {
-        let gap = Stroke::default().with_color(theme::BG).with_width(1.0);
+        let separator = Stroke::default().with_color(theme::BG).with_width(1.0);
         for (ring, arcs) in self.layout.rings.iter().enumerate() {
             let r_in = geo.r0 + ring as f32 * geo.ring_w;
             for a in arcs {
@@ -111,13 +107,17 @@ impl Sunburst<'_> {
                 }
                 let path = geo.arc_path(ring, a);
                 frame.fill(&path, color);
-                // Skip separators on slivers; they would hide the color.
-                if (a.span() as f32) * TAU * r_in > 3.0 {
-                    frame.stroke(&path, gap);
+                let inner_arc_length = a.span() as f32 * TAU * r_in;
+                let separator_would_hide_the_color = inner_arc_length <= SLIVER_MAX_ARC_LENGTH;
+                if !separator_would_hide_the_color {
+                    frame.stroke(&path, separator);
                 }
             }
         }
-        // Center disc with the focus size.
+        self.draw_center_disc_with_focus_size(frame, geo);
+    }
+
+    fn draw_center_disc_with_focus_size(&self, frame: &mut Frame, geo: &Geo) {
         frame.fill(&Path::circle(geo.center, geo.r0 - 2.0), theme::PANEL);
         let focus = self.layout.focus;
         frame.fill_text(Text {
@@ -141,12 +141,19 @@ impl Sunburst<'_> {
     }
 
     fn draw_highlight(&self, frame: &mut Frame, geo: &Geo) {
+        self.draw_selection_outline(frame, geo);
+        self.draw_hovered_arc_and_visible_descendants(frame, geo);
+    }
+
+    fn draw_selection_outline(&self, frame: &mut Frame, geo: &Geo) {
         if let Some((ring, a)) = self.selected.and_then(|s| self.layout.find(Segment::Node(s))) {
             let path = geo.arc_path(ring, a);
             frame.fill(&path, Color::WHITE.scale_alpha(0.18));
             frame.stroke(&path, Stroke::default().with_color(Color::WHITE).with_width(2.0));
         }
-        // Hover: the arc itself plus its visible descendants.
+    }
+
+    fn draw_hovered_arc_and_visible_descendants(&self, frame: &mut Frame, geo: &Geo) {
         if let Some((ring, a)) = self.hovered.and_then(|h| self.layout.find(h)) {
             frame.fill(&geo.arc_path(ring, a), Color::WHITE.scale_alpha(0.28));
             for (r, d) in self.layout.descendants(ring, a) {
@@ -183,6 +190,31 @@ impl Sunburst<'_> {
             });
         }
     }
+
+    fn draw_cursor_overlay(
+        &self,
+        renderer: &Renderer,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+        geo: &Geo,
+    ) -> Geometry {
+        let mut overlay = Frame::new(renderer, bounds.size());
+        if let Some(p) = cursor.position_in(bounds) {
+            match self.locate(geo, p) {
+                Hit::Center if self.can_go_up() => overlay.stroke(
+                    &Path::circle(geo.center, geo.r0 - 2.0),
+                    Stroke::default().with_color(Color::WHITE.scale_alpha(0.5)).with_width(2.0),
+                ),
+                Hit::Arc(a) => self.draw_tooltip(&mut overlay, bounds, p, a),
+                _ => {}
+            }
+        }
+        overlay.into_geometry()
+    }
+}
+
+fn redraw_so_the_tooltip_follows_the_cursor() -> canvas::Action<Message> {
+    canvas::Action::request_redraw()
 }
 
 impl canvas::Program<Message> for Sunburst<'_> {
@@ -206,8 +238,7 @@ impl canvas::Program<Message> for Sunburst<'_> {
                     state.hover = hit;
                     return Some(canvas::Action::publish(Message::Hover(hit)));
                 }
-                // Keep the tooltip following the cursor.
-                hit.map(|_| canvas::Action::request_redraw())
+                hit.map(|_| redraw_so_the_tooltip_follows_the_cursor())
             }
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 let p = cursor.position_in(bounds)?;
@@ -240,22 +271,10 @@ impl canvas::Program<Message> for Sunburst<'_> {
         cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
         let geo = Geo::new(bounds.size());
-        let chart = self.cache.draw(renderer, bounds.size(), |f| self.draw_chart(f, &geo));
-        let highlight = self.highlight.draw(renderer, bounds.size(), |f| self.draw_highlight(f, &geo));
-
-        // Only the cursor-dependent bits are redrawn every frame.
-        let mut overlay = Frame::new(renderer, bounds.size());
-        if let Some(p) = cursor.position_in(bounds) {
-            match self.locate(&geo, p) {
-                Hit::Center if self.can_go_up() => overlay.stroke(
-                    &Path::circle(geo.center, geo.r0 - 2.0),
-                    Stroke::default().with_color(Color::WHITE.scale_alpha(0.5)).with_width(2.0),
-                ),
-                Hit::Arc(a) => self.draw_tooltip(&mut overlay, bounds, p, a),
-                _ => {}
-            }
-        }
-        vec![chart, highlight, overlay.into_geometry()]
+        let chart = self.chart_cache.draw(renderer, bounds.size(), |f| self.draw_chart(f, &geo));
+        let highlight = self.highlight_cache.draw(renderer, bounds.size(), |f| self.draw_highlight(f, &geo));
+        let uncached_cursor_overlay = self.draw_cursor_overlay(renderer, bounds, cursor, &geo);
+        vec![chart, highlight, uncached_cursor_overlay]
     }
 
     fn mouse_interaction(&self, _state: &State, bounds: Rectangle, cursor: mouse::Cursor) -> mouse::Interaction {
@@ -265,5 +284,32 @@ impl canvas::Program<Message> for Sunburst<'_> {
             Some(Hit::Center) if self.can_go_up() => mouse::Interaction::Pointer,
             _ => mouse::Interaction::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use iced::widget::canvas::path::{self, lyon_path::Event};
+
+    use super::*;
+
+    fn subpath_count(path: &Path) -> usize {
+        path.raw().iter().filter(|event| matches!(event, Event::Begin { .. })).count()
+    }
+
+    #[test]
+    fn iced_arc_builder_starts_a_subpath_per_arc_so_sectors_are_tessellated_as_one_polygon() {
+        let (center, r_in, r_out, a0, a1) = (Point::new(100.0, 100.0), 40.0, 60.0, 0.0, 1.0);
+        let with_iced_arcs = Path::new(|b| {
+            b.arc(path::Arc { center, radius: r_out, start_angle: a0.into(), end_angle: a1.into() });
+            b.arc(path::Arc { center, radius: r_in, start_angle: a1.into(), end_angle: a0.into() });
+            b.close();
+        });
+        assert!(subpath_count(&with_iced_arcs) > 1, "iced's arc builder splits a sector into several sub-paths");
+        assert_eq!(
+            subpath_count(&annular_sector_as_one_polygon(center, r_in, r_out, a0, a1)),
+            1,
+            "a hand-tessellated sector is one closed polygon"
+        );
     }
 }

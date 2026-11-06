@@ -1,5 +1,3 @@
-//! Parallel file system scanner.
-
 pub mod bulk;
 pub mod volumes;
 
@@ -19,16 +17,11 @@ use crate::hidden;
 use crate::kind::Kind;
 use crate::tree::{self, DirNode, ScanStats, Synthetic, Tree, flags};
 
-/// What to scan.
 #[derive(Clone, Debug)]
 pub struct ScanOptions {
     pub root: PathBuf,
-    /// Whole-volume mode: follow APFS firmlinks into the sibling volumes of
-    /// the same container and add hidden/purgeable space segments.
     pub whole_disk: bool,
-    /// Display name for the root (e.g. the volume name).
     pub root_name: Option<String>,
-    /// Worker threads; `None` picks a default suited to I/O-bound scanning.
     pub threads: Option<usize>,
 }
 
@@ -40,7 +33,6 @@ impl ScanOptions {
         ScanOptions { root: mount.into(), whole_disk: true, root_name: Some(name.into()), threads: None }
     }
 
-    /// Name shown for the scan root: the volume name or the folder name.
     pub fn display_name(&self) -> String {
         self.root_name.clone().unwrap_or_else(|| match self.root.file_name() {
             Some(n) => n.to_string_lossy().into_owned(),
@@ -49,14 +41,12 @@ impl ScanOptions {
     }
 }
 
-/// Live progress counters, readable from another thread while scanning.
 #[derive(Debug, Default)]
 pub struct Progress {
     files: AtomicU64,
     dirs: AtomicU64,
     bytes: AtomicU64,
-    /// Bytes the scan is expected to find (whole-disk mode), 0 if unknown.
-    expected: AtomicU64,
+    expected_bytes_or_zero: AtomicU64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -73,20 +63,17 @@ impl Progress {
             files: self.files.load(Relaxed),
             dirs: self.dirs.load(Relaxed),
             bytes: self.bytes.load(Relaxed),
-            expected: Some(self.expected.load(Relaxed)).filter(|&e| e > 0),
+            expected: Some(self.expected_bytes_or_zero.load(Relaxed)).filter(|&bytes| bytes > 0),
         }
     }
 }
 
-/// Cooperative cancellation and pausing of long-running work (scans
-/// pause before each folder; search only honors cancellation).
 #[derive(Clone, Debug, Default)]
 pub struct CancelToken(Arc<Control>);
 
 #[derive(Debug, Default)]
 struct Control {
     cancelled: AtomicBool,
-    /// Fast-path flag; changed only while holding `clock`.
     paused: AtomicBool,
     clock: Mutex<PauseClock>,
     wake: Condvar,
@@ -125,14 +112,12 @@ impl CancelToken {
         self.0.paused.load(Relaxed)
     }
 
-    /// Total time spent paused so far.
     pub fn paused_for(&self) -> Duration {
         let clock = self.0.clock.lock();
         clock.total + clock.since.map_or(Duration::ZERO, |t| t.elapsed())
     }
 
-    /// Block while paused; returns at once when cancelled.
-    fn checkpoint(&self) {
+    fn wait_while_paused(&self) {
         if !self.is_paused() {
             return;
         }
@@ -151,17 +136,31 @@ pub enum ScanError {
     Root { path: PathBuf, source: std::io::Error },
 }
 
-const HARDLINK_SHARDS: usize = 64;
+const SEEN_SHARDS: usize = 64;
+
+struct ShardedSeenSet(Vec<Mutex<FxHashSet<(i32, u64)>>>);
+
+impl ShardedSeenSet {
+    fn new() -> Self {
+        ShardedSeenSet((0..SEEN_SHARDS).map(|_| Mutex::new(FxHashSet::default())).collect())
+    }
+    fn first_sight(&self, dev: i32, id: u64) -> bool {
+        self.0[(id as usize) % SEEN_SHARDS].lock().insert((dev, id))
+    }
+}
+
+enum Duplicate {
+    HardLink,
+    PureClone,
+}
 const MAX_ERROR_SAMPLES: usize = 100;
 
 struct Ctx<'a> {
-    /// Devices we may cross into (sibling volumes of the APFS container in
-    /// whole-disk mode; empty otherwise).
-    allowed_devs: FxHashSet<i32>,
-    /// Paths reachable twice through APFS firmlinks (whole-disk mode only).
-    skip_paths: FxHashSet<Vec<u8>>,
-    system_top: FxHashSet<&'static [u8]>,
-    hardlinks: Vec<Mutex<FxHashSet<(i32, u64)>>>,
+    sibling_volume_devices: FxHashSet<i32>,
+    firmlinked_duplicate_paths: FxHashSet<Vec<u8>>,
+    system_top_level_dirs: FxHashSet<&'static [u8]>,
+    hard_linked_inodes: ShardedSeenSet,
+    shared_data_streams: ShardedSeenSet,
     errors: AtomicU64,
     error_samples: Mutex<Vec<PathBuf>>,
     progress: &'a Progress,
@@ -169,9 +168,27 @@ struct Ctx<'a> {
 }
 
 impl Ctx<'_> {
-    /// True the first time a hard-linked inode is seen.
-    fn first_sight(&self, dev: i32, ino: u64) -> bool {
-        self.hardlinks[(ino as usize) % HARDLINK_SHARDS].lock().insert((dev, ino))
+    fn already_counted(&self, e: &bulk::RawEntry<'_>) -> Option<Duplicate> {
+        if e.objtype != bulk::VREG {
+            return None;
+        }
+        if e.links > 1 && !self.hard_linked_inodes.first_sight(e.dev, e.ino) {
+            return Some(Duplicate::HardLink);
+        }
+        match e.data_stream {
+            Some(stream) if e.may_share_blocks && !self.shared_data_streams.first_sight(e.dev, stream) => {
+                Some(Duplicate::PureClone)
+            }
+            _ => None,
+        }
+    }
+
+    fn may_enter_device(&self, parent_dev: i32, child_dev: i32) -> bool {
+        child_dev == parent_dev || self.sibling_volume_devices.contains(&child_dev)
+    }
+
+    fn is_firmlinked_duplicate(&self, path: &[u8]) -> bool {
+        self.firmlinked_duplicate_paths.contains(path)
     }
 
     fn record_error(&self, path: &[u8]) {
@@ -183,56 +200,68 @@ impl Ctx<'_> {
     }
 }
 
+const IO_BOUND_THREADS_PER_CORE: usize = 4;
+const FALLBACK_CORE_COUNT: usize = 8;
+const MIN_SCAN_THREADS: usize = 16;
+const MAX_SCAN_THREADS: usize = 64;
+const SCAN_THREAD_STACK_BYTES: usize = 16 << 20;
+
+fn default_scan_threads() -> usize {
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(FALLBACK_CORE_COUNT);
+    (cores * IO_BOUND_THREADS_PER_CORE).clamp(MIN_SCAN_THREADS, MAX_SCAN_THREADS)
+}
+
 fn dev_of(path: &Path) -> std::io::Result<i32> {
     std::fs::symlink_metadata(path).map(|m| m.dev() as i32)
 }
 
-/// Scan `opts.root` and build a [`Tree`].
+fn canonical_root(root: &Path) -> Result<PathBuf, ScanError> {
+    std::fs::canonicalize(root).map_err(|source| ScanError::Root { path: root.to_path_buf(), source })
+}
+
+fn ensure_readable(root: &Path) -> Result<(), ScanError> {
+    std::fs::read_dir(root).map(drop).map_err(|source| ScanError::Root { path: root.to_path_buf(), source })
+}
+
+fn vanished_while_scanning(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::NotFound
+}
+
 pub fn scan(opts: &ScanOptions, progress: &Progress, cancel: &CancelToken) -> Result<Tree, ScanError> {
     let started = Instant::now();
-    // Resolve symlinks (e.g. /tmp -> /private/tmp): the walk never follows
-    // them, so the root must be the real directory.
-    let root =
-        std::fs::canonicalize(&opts.root).map_err(|source| ScanError::Root { path: opts.root.clone(), source })?;
+    let root = canonical_root(&opts.root)?;
     let root_dev = dev_of(&root).map_err(|source| ScanError::Root { path: root.clone(), source })?;
-    // Fail early if the root itself is unreadable.
-    if let Err(source) = std::fs::read_dir(&root) {
-        return Err(ScanError::Root { path: root, source });
-    }
+    ensure_readable(&root)?;
 
     let space = opts.whole_disk.then(|| hidden::space_info(&root).ok()).flatten();
     if let Some(space) = &space {
-        progress.expected.store(space.used, Relaxed);
+        progress.expected_bytes_or_zero.store(space.used, Relaxed);
     }
-    let (allowed_devs, skip_paths) = if opts.whole_disk {
+    let (sibling_volume_devices, firmlinked_duplicate_paths) = if opts.whole_disk {
         (volumes::container_devices(&root), volumes::firmlink_skip_paths())
     } else {
         (FxHashSet::default(), FxHashSet::default())
     };
-    let mut system_top: FxHashSet<&'static [u8]> = FxHashSet::default();
+    let mut system_top_level_dirs: FxHashSet<&'static [u8]> = FxHashSet::default();
     if opts.whole_disk && root == Path::new("/") {
-        system_top.extend([&b"System"[..], b"usr", b"bin", b"sbin", b"private", b"cores", b"etc", b"var"]);
+        system_top_level_dirs.extend([&b"System"[..], b"usr", b"bin", b"sbin", b"private", b"cores", b"etc", b"var"]);
     }
 
     let ctx = Ctx {
-        allowed_devs,
-        skip_paths,
-        system_top,
-        hardlinks: (0..HARDLINK_SHARDS).map(|_| Mutex::new(FxHashSet::default())).collect(),
+        sibling_volume_devices,
+        firmlinked_duplicate_paths,
+        system_top_level_dirs,
+        hard_linked_inodes: ShardedSeenSet::new(),
+        shared_data_streams: ShardedSeenSet::new(),
         errors: AtomicU64::new(0),
         error_samples: Mutex::new(Vec::new()),
         progress,
         cancel,
     };
 
-    let threads = opts.threads.unwrap_or_else(|| {
-        // Scanning is bound by kernel metadata lookups, not CPU: many more
-        // threads than cores keeps APFS busy (≈40 is best on a 10-core M-series).
-        (std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8) * 4).clamp(16, 64)
-    });
     let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(threads)
-        .stack_size(16 << 20)
+        .num_threads(opts.threads.unwrap_or_else(default_scan_threads))
+        .stack_size(SCAN_THREAD_STACK_BYTES)
         .thread_name(|i| format!("dscan-{i}"))
         .build()
         .expect("failed to build scan thread pool");
@@ -279,10 +308,13 @@ fn join(parent: &[u8], name: &[u8]) -> Vec<u8> {
 }
 
 fn scan_dir(ctx: &Ctx<'_>, path: Vec<u8>, name: Box<[u8]>, dev: i32, depth: u32) -> DirNode {
-    let forced =
-        if depth == 1 && ctx.system_top.contains(&name[..]) { Some(Kind::System) } else { Kind::of_dir(&name) };
+    let forced = if depth == 1 && ctx.system_top_level_dirs.contains(&name[..]) {
+        Some(Kind::System)
+    } else {
+        Kind::of_dir(&name)
+    };
     let mut node = DirNode::new(name);
-    ctx.cancel.checkpoint();
+    ctx.cancel.wait_while_paused();
     if ctx.cancel.is_cancelled() {
         return node;
     }
@@ -295,19 +327,24 @@ fn scan_dir(ctx: &Ctx<'_>, path: Vec<u8>, name: Box<[u8]>, dev: i32, depth: u32)
     let mut subdirs: Vec<(Box<[u8]>, i32)> = Vec::new();
     let mut file_bytes = 0u64;
     let res = bulk::read_dir(&cpath, |e| match e.objtype {
-        // The kernel could not fetch this entry's attributes: keep it
-        // visible as unreadable and count it like an unreadable folder.
-        _ if e.error != 0 => {
+        _ if e.attributes_unavailable() => {
             ctx.record_error(&join(path, e.name));
             node.push_file(e.name, Kind::Other, flags::UNREADABLE, 0, 0);
         }
         bulk::VDIR => subdirs.push((e.name.into(), e.dev)),
         _ => {
             let (mut alloc, mut logical, mut fl) = (e.alloc, e.logical, 0u8);
-            if e.objtype == bulk::VREG && e.links > 1 && !ctx.first_sight(e.dev, e.ino) {
-                alloc = 0;
-                logical = 0;
-                fl |= flags::HARDLINK_DUP;
+            match ctx.already_counted(&e) {
+                Some(Duplicate::HardLink) => {
+                    alloc = 0;
+                    logical = 0;
+                    fl |= flags::HARDLINK_DUP;
+                }
+                Some(Duplicate::PureClone) => {
+                    alloc = 0;
+                    fl |= flags::CLONE_DUP;
+                }
+                None => {}
             }
             let kind = if e.objtype == bulk::VLNK {
                 fl |= flags::SYMLINK;
@@ -321,8 +358,7 @@ fn scan_dir(ctx: &Ctx<'_>, path: Vec<u8>, name: Box<[u8]>, dev: i32, depth: u32)
     });
     match res {
         Ok(()) => {}
-        // Vanished while scanning (temp dirs): not a permission problem.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) if vanished_while_scanning(&e) => {}
         Err(_) => {
             node.flags |= flags::UNREADABLE;
             ctx.record_error(path);
@@ -334,16 +370,7 @@ fn scan_dir(ctx: &Ctx<'_>, path: Vec<u8>, name: Box<[u8]>, dev: i32, depth: u32)
     p.bytes.fetch_add(file_bytes, Relaxed);
     p.dirs.fetch_add(1, Relaxed);
 
-    // Decide what to descend into first, so the parallel collect knows its
-    // exact length.
-    let todo: Vec<(Vec<u8>, Box<[u8]>, i32)> = subdirs
-        .into_iter()
-        // Never cross into another file system (except allowed APFS siblings).
-        .filter(|(_, child_dev)| *child_dev == dev || ctx.allowed_devs.contains(child_dev))
-        .map(|(child, child_dev)| (join(path, &child), child, child_dev))
-        // Skip what is already reachable through an APFS firmlink.
-        .filter(|(child_path, _, _)| !ctx.skip_paths.contains(child_path))
-        .collect();
+    let todo = subdirs_to_descend(ctx, path, dev, subdirs);
     node.dirs = if todo.len() <= 1 {
         todo.into_iter().map(|(cp, n, d)| scan_dir(ctx, cp, n, d, depth + 1)).collect()
     } else {
@@ -351,6 +378,20 @@ fn scan_dir(ctx: &Ctx<'_>, path: Vec<u8>, name: Box<[u8]>, dev: i32, depth: u32)
     };
     node.finish(forced);
     node
+}
+
+fn subdirs_to_descend(
+    ctx: &Ctx<'_>,
+    path: &[u8],
+    dev: i32,
+    subdirs: Vec<(Box<[u8]>, i32)>,
+) -> Vec<(Vec<u8>, Box<[u8]>, i32)> {
+    subdirs
+        .into_iter()
+        .filter(|&(_, child_dev)| ctx.may_enter_device(dev, child_dev))
+        .map(|(child, child_dev)| (join(path, &child), child, child_dev))
+        .filter(|(child_path, _, _)| !ctx.is_firmlinked_duplicate(child_path))
+        .collect()
 }
 
 #[cfg(test)]
@@ -379,10 +420,8 @@ mod tests {
         std::fs::write(r.join("a/b/two.bin"), vec![7u8; 50_000]).unwrap();
         std::fs::hard_link(r.join("a/one.bin"), r.join("link.bin")).unwrap();
         std::os::unix::fs::symlink(r.join("a"), r.join("sym")).unwrap();
-        // Sparse file: large logical size, little allocation.
-        let f = std::fs::File::create(r.join("sparse.img")).unwrap();
-        f.set_len(1 << 30).unwrap();
-        // Unreadable directory.
+        let sparse_file = std::fs::File::create(r.join("sparse.img")).unwrap();
+        sparse_file.set_len(1 << 30).unwrap();
         std::fs::create_dir(r.join("locked")).unwrap();
         std::fs::set_permissions(r.join("locked"), std::fs::Permissions::from_mode(0o000)).unwrap();
 
@@ -392,13 +431,12 @@ mod tests {
 
         let one = find(&t, "a/one.bin");
         let link = find(&t, "link.bin");
-        // Exactly one of the two hard links carries the size.
         let sizes = [t.size(one, Metric::Allocated), t.size(link, Metric::Allocated)];
-        assert!(sizes.contains(&0) && sizes.iter().any(|&s| s >= 100_000));
+        assert!(sizes.contains(&0) && sizes.iter().any(|&s| s >= 100_000), "exactly one hard link carries the size");
 
         let sparse = find(&t, "sparse.img");
         assert_eq!(t.size(sparse, Metric::Logical), 1 << 30);
-        assert!(t.size(sparse, Metric::Allocated) < 1 << 20);
+        assert!(t.size(sparse, Metric::Allocated) < 1 << 20, "a sparse file allocates little");
 
         let sym = find(&t, "sym");
         assert!(!t.node(sym).is_dir());
@@ -406,13 +444,43 @@ mod tests {
         assert_eq!(t.stats.errors, 1);
         assert!(t.node(find(&t, "locked")).flags() & flags::UNREADABLE != 0);
 
-        // Totals are the sum of the parts.
         let a = find(&t, "a");
         let sum: u64 = t.children(a, Metric::Allocated).map(|c| t.size(c, Metric::Allocated)).sum();
-        assert_eq!(sum, t.size(a, Metric::Allocated));
-        // The root is canonicalized (the temp dir lives under the /var symlink).
-        assert_eq!(t.path(find(&t, "a/b/two.bin")), r.canonicalize().unwrap().join("a/b/two.bin"));
+        assert_eq!(sum, t.size(a, Metric::Allocated), "a folder's size is the sum of its children");
+        let temp_dir_behind_var_symlink = r.canonicalize().unwrap();
+        assert_eq!(t.path(find(&t, "a/b/two.bin")), temp_dir_behind_var_symlink.join("a/b/two.bin"));
         assert_eq!(progress.snapshot().files, t.node(t.root()).items() as u64);
+    }
+
+    #[test]
+    fn counts_pure_clones_once() {
+        use std::io::{Seek, Write};
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        let c = |p: &str| CString::new(r.join(p).as_os_str().as_bytes()).unwrap();
+        std::fs::create_dir(r.join("copies")).unwrap();
+        std::fs::write(r.join("orig.bin"), vec![3u8; 1_000_000]).unwrap();
+        for p in ["copies/pure.bin", "copies/edited.bin"] {
+            assert_eq!(unsafe { libc::clonefile(c("orig.bin").as_ptr(), c(p).as_ptr(), 0) }, 0);
+        }
+        let mut fh = std::fs::OpenOptions::new().write(true).open(r.join("copies/edited.bin")).unwrap();
+        fh.seek(std::io::SeekFrom::Start(0)).unwrap();
+        fh.write_all(&[9u8; 4096]).unwrap();
+        fh.sync_all().unwrap();
+        drop(fh);
+
+        let t = scan(&ScanOptions::folder(r), &Progress::default(), &CancelToken::default()).unwrap();
+        let (orig, pure, edited) = (find(&t, "orig.bin"), find(&t, "copies/pure.bin"), find(&t, "copies/edited.bin"));
+        let alloc = |id| t.size(id, Metric::Allocated);
+        assert!(alloc(orig) >= 1_000_000 || alloc(pure) >= 1_000_000);
+        assert_eq!(alloc(orig).min(alloc(pure)), 0, "pure clone counted once");
+        assert!(t.node(orig).is_clone_copy() ^ t.node(pure).is_clone_copy());
+        assert!(alloc(edited) >= 1_000_000, "edited clones count in full");
+        for id in [orig, pure, edited] {
+            assert_eq!(t.size(id, Metric::Logical), 1_000_000, "logical size is the apparent size of every copy");
+        }
+        let total = t.size(t.root(), Metric::Allocated);
+        assert!((2_000_000..2_100_000).contains(&total), "two streams on disk, not three: {total}");
     }
 
     #[test]

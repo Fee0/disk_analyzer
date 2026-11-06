@@ -98,6 +98,26 @@ cargo run --release                                     # the app
 cargo run -p dscan-core --release --example scan -- / --disk   # benchmark a whole-disk scan
 ```
 
+## No comments in code
+
+Do not write comments in code: no `//`, no `///` doc comments, no `/* */`.
+Make the code say it instead:
+
+- Name things for what they mean: variables, functions, types, constants,
+  enum variants (`Refusal::Protected`, `may_share_blocks`), not `flag`, `tmp`.
+- Pull a step that needs explaining into a small, well-named function.
+- Replace magic numbers and offsets with named constants.
+- Use types to carry meaning (`Option` for "may be absent", enums for states)
+  instead of documenting conventions like "0 means unknown".
+- Put the why of a test into its name and its assertion messages.
+
+If a fact truly cannot be expressed in code (e.g. an OS quirk), encode it in
+a test whose name states it, rather than a comment.
+
+The one exception is `crates/dscan-gui/src/iced_inspect.rs`, a helper copied
+verbatim from the iced-ui-inspect skill: keep it as shipped so it can be
+updated from the skill.
+
 ## Conventions
 
 - For UI changes, check the result with the headless Simulator tests in

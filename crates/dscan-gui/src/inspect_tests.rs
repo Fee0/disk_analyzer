@@ -1,5 +1,3 @@
-//! Headless UI inspection of the screens (iced_test Simulator).
-
 use std::path::Path;
 
 use dscan_core::{CancelToken, Progress, ScanOptions};
@@ -12,6 +10,8 @@ use crate::theme;
 
 const VIEW: (f32, f32) = (1280.0, 820.0);
 const OUT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/iced-inspect");
+const A_CHART_SEGMENT: (f32, f32) = (440.0, 320.0);
+const CLOSE_BUTTON_OF_NEWEST_RESULT: (f32, f32) = (900.0, 518.0);
 
 fn fixture(root: &Path) {
     let files: &[(&str, usize)] = &[
@@ -46,6 +46,13 @@ fn browser_app(dir: &Path) -> App {
     app
 }
 
+fn deliver_search_result_without_its_thread(app: &mut App, query: &str) {
+    if let Screen::Browse(b) = &app.screen {
+        let result = dscan_core::search(&b.tree, query, &Default::default()).map(std::sync::Arc::new);
+        let _ = app.update(Message::SearchDone(1, result));
+    }
+}
+
 fn sim(app: &App) -> Simulator<'_, Message> {
     Simulator::with_size(Settings::default(), VIEW, crate::view::view(app))
 }
@@ -68,11 +75,10 @@ fn inspect_browse() -> Result<(), Error> {
         println!("{}", ui_inspect::report(&mut ui, VIEW));
         println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, "browse")?.display());
     }
-    // Hover + press a segment in the chart, click a list row.
     let msgs: Vec<Message> = {
         let mut ui = sim(&app);
-        ui_inspect::hover(&mut ui, (440.0, 320.0));
-        ui_inspect::click_at(&mut ui, (440.0, 320.0));
+        ui_inspect::hover(&mut ui, A_CHART_SEGMENT);
+        ui_inspect::click_at(&mut ui, A_CHART_SEGMENT);
         ui.click("Pictures/")?;
         ui.into_messages().collect()
     };
@@ -81,13 +87,8 @@ fn inspect_browse() -> Result<(), Error> {
         let _ = app.update(m);
     }
     let _ = app.update(Message::MouseReleased);
-    // Search
     let _ = app.update(Message::SearchChanged("img".into()));
-    // The search itself runs on a thread; deliver its result directly.
-    if let Screen::Browse(b) = &app.screen {
-        let r = dscan_core::search(&b.tree, "img", &Default::default()).map(std::sync::Arc::new);
-        let _ = app.update(Message::SearchDone(1, r));
-    }
+    deliver_search_result_without_its_thread(&mut app, "img");
     assert_eq!(browser(&app).search.as_ref().unwrap().matches, 3);
     {
         let mut ui = sim(&app);
@@ -129,7 +130,7 @@ fn keyboard_navigation() {
     key(&mut app, Key::Named(Named::ArrowDown), false);
     let b = browser(&app);
     assert_eq!(b.tree.name(b.selected.unwrap()), "2015");
-    assert_eq!(b.list_subject(), first, "list follows the selection's parent");
+    assert_eq!(b.listed_folder(), first, "list follows the selection's parent");
     key(&mut app, Key::Named(Named::ArrowUp), false);
     assert_eq!(browser(&app).selected, Some(first));
 
@@ -157,52 +158,49 @@ fn drag_to_collector() {
     let b = browser(&app);
     let movies = b.tree.children(b.tree.root(), b.metric).next().unwrap();
 
-    // A click without movement selects but does not collect.
     let _ = app.update(Message::Press(Segment::Node(movies)));
     let _ = app.update(Message::CollectorEnter);
     let _ = app.update(Message::MouseReleased);
-    assert!(browser(&app).collector.is_empty());
+    assert!(browser(&app).collector.is_empty(), "a click without movement selects but does not collect");
     let _ = app.update(Message::CollectorExit);
 
-    // Press, move past the threshold, enter the collector, release.
     let _ = app.update(Message::Press(Segment::Node(movies)));
     let _ = app.update(Message::CursorMoved(Point::new(100.0, 100.0)));
     let _ = app.update(Message::CursorMoved(Point::new(140.0, 160.0)));
-    assert!(browser(&app).drag.as_ref().unwrap().dragging);
+    assert!(browser(&app).drag.as_ref().unwrap().dragging, "moving past the threshold starts a drag");
     let _ = app.update(Message::CollectorEnter);
     let _ = app.update(Message::MouseReleased);
-    assert_eq!(browser(&app).collector.items(), &[movies]);
-    assert!(browser(&app).drag.is_none());
+    assert_eq!(browser(&app).collector.items(), &[movies], "releasing a drag over the collector collects");
+    assert!(browser(&app).drag.is_none(), "releasing ends the drag");
 
-    // Collecting a child of a collected folder is a no-op; collecting the
-    // parent replaces collected children.
     let b = browser(&app);
     let child = b.tree.children(movies, b.metric).next().unwrap();
     let _ = app.update(Message::Press(Segment::Node(child)));
     let _ = app.update(Message::CollectSelected);
-    assert_eq!(browser(&app).collector.items(), &[movies]);
+    assert_eq!(browser(&app).collector.items(), &[movies], "collecting a child of a collected folder is a no-op");
 
-    // Dragging while the drop zone is not hovered collects nothing.
     let _ = app.update(Message::ClearCollector);
     let _ = app.update(Message::CollectorExit);
     let _ = app.update(Message::Press(Segment::Node(movies)));
     let _ = app.update(Message::CursorMoved(Point::new(0.0, 0.0)));
     let _ = app.update(Message::CursorMoved(Point::new(50.0, 0.0)));
     let _ = app.update(Message::MouseReleased);
-    assert!(browser(&app).collector.is_empty());
+    assert!(browser(&app).collector.is_empty(), "a drag released outside the collector collects nothing");
 }
 
 #[test]
 fn metric_toggle_relayouts() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = browser_app(dir.path());
-    // The toggle emits the metric it shows.
     let msgs: Vec<Message> = {
         let mut ui = sim(&app);
         ui.click("Logical").unwrap();
         ui.into_messages().collect()
     };
-    assert!(matches!(msgs[..], [Message::SetMetric(dscan_core::Metric::Logical)]), "{msgs:?}");
+    assert!(
+        matches!(msgs[..], [Message::SetMetric(dscan_core::Metric::Logical)]),
+        "the toggle emits the metric it shows: {msgs:?}"
+    );
     for m in msgs {
         let _ = app.update(m);
     }
@@ -216,8 +214,7 @@ fn metric_toggle_relayouts() {
 fn inspect_scanning() -> Result<(), Error> {
     let dir = tempfile::tempdir().unwrap();
     let (mut app, _) = App::new(None);
-    // The returned task (the actual scan) is never run here.
-    let _ = app.update(Message::FolderPicked(Some(dir.path().to_path_buf())));
+    let _scan_task_never_run = app.update(Message::FolderPicked(Some(dir.path().to_path_buf())));
     let Screen::Scanning(job) = &mut app.screen else { panic!("not scanning") };
     job.snapshot =
         dscan_core::ProgressSnapshot { files: 673_862, dirs: 163_187, bytes: 86_624_714_752, expected: None };
@@ -264,56 +261,58 @@ fn inspect_open_results() -> Result<(), Error> {
     for d in &dirs {
         open(&mut app, scan(d.path()));
     }
-    assert_eq!(app.parked.len(), 6, "every result stays open");
+    assert_eq!(app.parked_newest_first.len(), 6, "every result stays open");
     {
         let mut ui = sim(&app);
         println!("{}", ui_inspect::report(&mut ui, VIEW));
         println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, "home-results")?.display());
     }
 
-    // Most recent first; clicking a row resumes exactly that result.
     let newest = dirs[5].path().canonicalize().unwrap();
-    assert_eq!(app.parked[0].tree.root_path(), newest);
-    let name = app.parked[0].tree.name(app.parked[0].tree.root()).into_owned();
+    assert_eq!(app.parked_newest_first[0].tree.root_path(), newest, "most recently viewed result is listed first");
+    let name = app.parked_newest_first[0].tree.name(app.parked_newest_first[0].tree.root()).into_owned();
     let msgs: Vec<Message> = {
         let mut ui = sim(&app);
         ui.click(name.as_str())?;
         ui.into_messages().collect()
     };
-    assert!(matches!(msgs[..], [Message::ResumeBrowse(0)]), "{msgs:?}");
+    assert!(matches!(msgs[..], [Message::ResumeParked(0)]), "clicking a row resumes that result: {msgs:?}");
     for m in msgs {
         let _ = app.update(m);
     }
-    assert_eq!(browser(&app).tree.root_path(), newest);
-    assert_eq!(app.parked.len(), 5);
+    assert_eq!(browser(&app).tree.root_path(), newest, "exactly the clicked result is resumed");
+    assert_eq!(app.parked_newest_first.len(), 5);
     let _ = app.update(Message::GoHome);
 
-    // The × inside a row closes that result instead of opening it.
     let msgs: Vec<Message> = {
         let mut ui = sim(&app);
-        ui_inspect::click_at(&mut ui, (900.0, 518.0));
+        ui_inspect::click_at(&mut ui, CLOSE_BUTTON_OF_NEWEST_RESULT);
         ui.into_messages().collect()
     };
-    assert!(matches!(msgs[..], [Message::CloseResult(0)]), "{msgs:?}");
+    assert!(
+        matches!(msgs[..], [Message::CloseParked(0)]),
+        "the × inside a row closes that result instead of opening it: {msgs:?}"
+    );
 
-    // Close removes just that one.
-    let _ = app.update(Message::CloseResult(1));
-    assert_eq!(app.parked.len(), 5);
-    assert!(app.parked.iter().all(|b| b.tree.root_path() != dirs[4].path().canonicalize().unwrap()));
+    let _ = app.update(Message::CloseParked(1));
+    assert_eq!(app.parked_newest_first.len(), 5, "closing removes just that one result");
+    assert!(
+        app.parked_newest_first.iter().all(|b| b.tree.root_path() != dirs[4].path().canonicalize().unwrap()),
+        "the closed result is gone"
+    );
 
-    // A fresh scan of an open folder replaces the old result.
     let _ = app.update(Message::FolderPicked(Some(dirs[0].path().to_path_buf())));
     let Screen::Scanning(job) = &app.screen else { panic!("not scanning") };
-    let id = job.id;
-    *job.slot.lock() = Some(Ok(scan(dirs[0].path()).0));
-    let _ = app.update(Message::ScanFinished(id, None));
+    let job_id = job.id;
+    *job.result_slot.lock() = Some(Ok(scan(dirs[0].path()).0));
+    let _ = app.update(Message::ScanFinished { job_id, crash: None });
     assert!(matches!(app.screen, Screen::Browse(_)));
-    assert_eq!(app.parked.len(), 4, "the stale result of the same folder is dropped");
+    assert_eq!(app.parked_newest_first.len(), 4, "a fresh scan of an open folder drops its stale result");
     Ok(())
 }
 
 #[test]
-fn collector_has_a_fixed_height() -> Result<(), Error> {
+fn collector_fixed_height_fits_every_state_without_clipping() -> Result<(), Error> {
     let dir = tempfile::tempdir().unwrap();
     let mut app = browser_app(dir.path());
     let root = browser(&app).tree.root();
@@ -334,7 +333,7 @@ fn collector_has_a_fixed_height() -> Result<(), Error> {
     let kids: Vec<_> = browser(&app).tree.children(root, browser(&app).metric).skip(1).collect();
     for id in kids {
         if let Screen::Browse(b) = &mut app.screen {
-            b.collector.add(&b.tree, id);
+            b.collector.add(&b.tree, id).unwrap();
         }
     }
     assert!(browser(&app).collector.len() > 4);

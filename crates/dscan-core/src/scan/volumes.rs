@@ -1,5 +1,3 @@
-//! Mounted volume discovery and APFS container topology.
-
 use std::ffi::CStr;
 use std::path::{Path, PathBuf};
 
@@ -7,19 +5,18 @@ use rustc_hash::FxHashSet;
 
 use crate::hidden;
 
-/// A mounted, user-visible APFS volume.
 #[derive(Clone, Debug)]
 pub struct Volume {
     pub name: String,
     pub mount: PathBuf,
-    /// Container capacity in bytes.
     pub total: u64,
-    /// Bytes in use in the container (all volumes).
     pub used: u64,
-    /// Bytes available, including purgeable space.
     pub available: u64,
     pub is_root: bool,
 }
+
+const SPARE_SLOTS_FOR_MOUNTS_APPEARING_BETWEEN_CALLS: usize = 4;
+const TCC_PROTECTED_HOME_FOLDERS: [&str; 2] = ["Library/Mail", "Library/Safari"];
 
 struct Mount {
     on: PathBuf,
@@ -32,24 +29,21 @@ fn cstr(buf: &[libc::c_char]) -> String {
     unsafe { CStr::from_ptr(buf.as_ptr()) }.to_string_lossy().into_owned()
 }
 
-/// All mounted file systems. Uses `getfsstat` with our own buffer:
-/// `getmntinfo` hands out a shared buffer that concurrent calls overwrite.
-fn mounts() -> Vec<Mount> {
+fn mounts_via_getfsstat_into_own_buffer() -> Vec<Mount> {
     let list = loop {
         let n = unsafe { libc::getfsstat(std::ptr::null_mut(), 0, libc::MNT_NOWAIT) };
         if n <= 0 {
             return Vec::new();
         }
-        // Room for a few mounts appearing between the two calls.
-        let cap = n as usize + 4;
+        let cap = n as usize + SPARE_SLOTS_FOR_MOUNTS_APPEARING_BETWEEN_CALLS;
         let mut buf: Vec<libc::statfs> = Vec::with_capacity(cap);
         let bytes = (cap * std::mem::size_of::<libc::statfs>()) as libc::c_int;
         let got = unsafe { libc::getfsstat(buf.as_mut_ptr(), bytes, libc::MNT_NOWAIT) };
         if got < 0 {
             return Vec::new();
         }
-        // A full buffer may mean it was too small: ask again.
-        if (got as usize) < cap {
+        let buffer_was_large_enough = (got as usize) < cap;
+        if buffer_was_large_enough {
             unsafe { buf.set_len(got as usize) };
             break buf;
         }
@@ -64,21 +58,19 @@ fn mounts() -> Vec<Mount> {
         .collect()
 }
 
-/// `/dev/disk3s1s1` -> `disk3`
 fn container_of(from: &str) -> Option<&str> {
     let dev = from.strip_prefix("/dev/")?;
-    let rest = dev.strip_prefix("disk")?;
+    let disk_prefix = "disk";
+    let rest = dev.strip_prefix(disk_prefix)?;
     let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
     if digits == 0 {
         return None;
     }
-    Some(&dev[..4 + digits])
+    Some(&dev[..disk_prefix.len() + digits])
 }
 
-/// Device ids of all mounted volumes that share an APFS container with the
-/// volume mounted at `root` (System, Data, Preboot, VM, Update, …).
 pub fn container_devices(root: &Path) -> FxHashSet<i32> {
-    let all = mounts();
+    let all = mounts_via_getfsstat_into_own_buffer();
     let Some(root_from) = all.iter().find(|m| m.on == root).map(|m| m.from.clone()) else {
         return FxHashSet::default();
     };
@@ -91,8 +83,6 @@ pub fn container_devices(root: &Path) -> FxHashSet<i32> {
         .collect()
 }
 
-/// Paths under `/System/Volumes/Data` that are also reachable through an
-/// APFS firmlink from `/`; skipping them avoids counting data twice.
 pub fn firmlink_skip_paths() -> FxHashSet<Vec<u8>> {
     let mut out = FxHashSet::default();
     match std::fs::read("/usr/share/firmlinks") {
@@ -115,15 +105,15 @@ pub fn firmlink_skip_paths() -> FxHashSet<Vec<u8>> {
     out
 }
 
-/// User-visible APFS volumes: the startup volume plus anything under /Volumes.
 pub fn list_volumes() -> Vec<Volume> {
-    let mut out: Vec<Volume> = mounts()
+    let mut out: Vec<Volume> = mounts_via_getfsstat_into_own_buffer()
         .into_iter()
         .filter(|m| m.fstype == "apfs")
         .filter_map(|m| {
             let is_root = m.on == Path::new("/");
-            let visible = m.flags & (libc::MNT_DONTBROWSE as u32) == 0;
-            if !(is_root || (visible && m.on.starts_with("/Volumes"))) {
+            let browsable = m.flags & (libc::MNT_DONTBROWSE as u32) == 0;
+            let user_visible = is_root || (browsable && m.on.starts_with("/Volumes"));
+            if !user_visible {
                 return None;
             }
             let space = hidden::space_info(&m.on).ok()?;
@@ -148,10 +138,9 @@ pub fn list_volumes() -> Vec<Volume> {
     out
 }
 
-/// Can we read a TCC-protected location? (Proxy for Full Disk Access.)
 pub fn has_full_disk_access() -> bool {
     let Some(home) = std::env::var_os("HOME") else { return true };
-    ["Library/Mail", "Library/Safari"]
+    TCC_PROTECTED_HOME_FOLDERS
         .iter()
         .map(|p| Path::new(&home).join(p))
         .find(|p| p.exists())
@@ -163,7 +152,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn container_parsing() {
+    fn container_of_takes_the_whole_disk_from_a_volume_device() {
         assert_eq!(container_of("/dev/disk3s1s1"), Some("disk3"));
         assert_eq!(container_of("/dev/disk12s5"), Some("disk12"));
         assert_eq!(container_of("devfs"), None);
@@ -177,12 +166,15 @@ mod tests {
     }
 
     #[test]
-    fn mount_listing_is_thread_safe() {
+    fn mount_listing_is_thread_safe_unlike_getmntinfo_which_shares_one_buffer() {
         std::thread::scope(|s| {
             for _ in 0..8 {
                 s.spawn(|| {
                     for _ in 0..200 {
-                        assert!(mounts().iter().any(|m| m.on == Path::new("/")), "root mount missing");
+                        assert!(
+                            mounts_via_getfsstat_into_own_buffer().iter().any(|m| m.on == Path::new("/")),
+                            "root mount missing"
+                        );
                     }
                 });
             }

@@ -1,5 +1,3 @@
-//! View functions for the three screens.
-
 use dscan_core::{Kind, Metric, NodeId, Segment, format_size};
 use iced::border;
 use iced::widget::text::Wrapping;
@@ -9,7 +7,7 @@ use iced::widget::{
 };
 use iced::{Alignment, Color, Element, Fill, Length, Shrink, Theme};
 
-use crate::app::{App, Browser, Message, Row, SEARCH_ID, ScanJob, Screen};
+use crate::app::{App, Browser, ListRow, Message, SEARCH_ID, ScanJob, Screen};
 use crate::fmt::{thousands, truncate};
 use crate::icon;
 use crate::sunburst::Sunburst;
@@ -24,22 +22,15 @@ pub fn view(app: &App) -> Element<'_, Message> {
     container(content).width(Fill).height(Fill).style(|_| container::background(theme::BG)).into()
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// A filled, rounded box.
-fn boxed(bg: Color, radius: f32) -> container::Style {
+fn rounded_box(bg: Color, radius: f32) -> container::Style {
     container::Style::default().background(bg).border(border::rounded(radius)).color(theme::TEXT)
 }
 
 fn dot<'a>(color: Color, size: f32) -> Element<'a, Message> {
-    container(Space::new()).width(size).height(size).style(move |_| boxed(color, size / 2.0)).into()
+    container(Space::new()).width(size).height(size).style(move |_| rounded_box(color, size / 2.0)).into()
 }
 
-/// A segmented toggle: options share one rounded track and the selected
-/// one is highlighted.
-fn segmented<'a, T: Copy + PartialEq + 'a>(
+fn segmented_toggle<'a, T: Copy + PartialEq + 'a>(
     options: &[(&'a str, T)],
     selected: T,
     on_select: impl Fn(T) -> Message,
@@ -63,13 +54,11 @@ fn segmented<'a, T: Copy + PartialEq + 'a>(
     });
     container(row(segments).spacing(2))
         .padding(2)
-        .style(|_| boxed(theme::PANEL, 8.0).border(border::rounded(8).width(1).color(theme::PANEL_HI)))
+        .style(|_| rounded_box(theme::PANEL, 8.0).border(border::rounded(8).width(1).color(theme::PANEL_HI)))
         .into()
 }
 
-/// A filled button with white text, in the given background color
-/// (`theme::ACCENT`, `theme::NEUTRAL` or `theme::DANGER`).
-fn filled(bg: Color) -> impl Fn(&Theme, button::Status) -> button::Style {
+fn filled_white_text_button(bg: Color) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |_, status| {
         let bg = match status {
             button::Status::Hovered => theme::mix(bg, Color::WHITE, 0.12),
@@ -102,15 +91,14 @@ fn subtle_button<'a>(content: impl Into<Element<'a, Message>>, msg: Option<Messa
         .on_press_maybe(msg)
 }
 
-/// An icon-only button with a hover label.
-fn icon_button<'a>(icon: impl Into<Element<'a, Message>>, label: &'a str, msg: Message) -> Element<'a, Message> {
-    let tip = container(text(label).size(12)).padding([4, 8]).style(|_| boxed(theme::PANEL_HI, 6.0));
+fn icon_button<'a>(
+    icon: impl Into<Element<'a, Message>>,
+    tooltip_label: &'a str,
+    msg: Message,
+) -> Element<'a, Message> {
+    let tip = container(text(tooltip_label).size(12)).padding([4, 8]).style(|_| rounded_box(theme::PANEL_HI, 6.0));
     tooltip(subtle_button(icon, Some(msg)).padding(6), tip, tooltip::Position::Bottom).gap(4).into()
 }
-
-// ---------------------------------------------------------------------------
-// Start screen
-// ---------------------------------------------------------------------------
 
 fn start(app: &App) -> Element<'_, Message> {
     let cards: Element<'_, Message> = match &app.volumes {
@@ -164,13 +152,13 @@ fn start(app: &App) -> Element<'_, Message> {
         Space::new().height(4),
         button(text("Open folder…").size(14))
             .padding([8, 16])
-            .style(filled(theme::ACCENT))
+            .style(filled_white_text_button(theme::ACCENT))
             .on_press(Message::OpenFolder),
     ]
     .spacing(12)
     .align_x(Alignment::Center);
 
-    if !app.parked.is_empty() {
+    if !app.parked_newest_first.is_empty() {
         col = col.push(Space::new().height(12)).push(open_results(app));
     }
 
@@ -182,13 +170,13 @@ fn start(app: &App) -> Element<'_, Message> {
                     text("Without Full Disk Access some folders can't be read, so some space shows up as hidden. Grant it to your terminal (or this app), then restart it.")
                         .size(13)
                         .width(Length::Fixed(460.0)),
-                    button(text("Open Settings").size(13)).style(filled(theme::ACCENT)).on_press(Message::OpenFdaSettings),
+                    button(text("Open Settings").size(13)).style(filled_white_text_button(theme::ACCENT)).on_press(Message::OpenFdaSettings),
                 ]
                 .spacing(16)
                 .align_y(Alignment::Center),
             )
             .padding(14)
-            .style(move |_| boxed(warn.scale_alpha(0.15), 10.0).border(border::rounded(10).width(1).color(warn.scale_alpha(0.5)))),
+            .style(move |_| rounded_box(warn.scale_alpha(0.15), 10.0).border(border::rounded(10).width(1).color(warn.scale_alpha(0.5)))),
         );
     }
     if let Some(err) = &app.error {
@@ -199,13 +187,11 @@ fn start(app: &App) -> Element<'_, Message> {
 
 const RESULT_ROW_H: f32 = 56.0;
 const RESULT_GAP: f32 = 6.0;
-/// Rows visible before the list scrolls.
-const RESULT_ROWS_VISIBLE: usize = 4;
+const RESULT_ROWS_BEFORE_SCROLLING: usize = 4;
 
-/// Results kept in memory, each resumable or closable.
 fn open_results(app: &App) -> Element<'_, Message> {
     let mut list = Column::new().spacing(RESULT_GAP);
-    for (i, b) in app.parked.iter().enumerate() {
+    for (i, b) in app.parked_newest_first.iter().enumerate() {
         let t = &b.tree;
         let root = t.root();
         let meta = format!("{} files", thousands(t.node(root).items() as u64));
@@ -226,7 +212,7 @@ fn open_results(app: &App) -> Element<'_, Message> {
             ]
             .spacing(2)
             .align_x(Alignment::End),
-            icon_button(icon::close(12.0, theme::TEXT_DIM), "Close", Message::CloseResult(i)),
+            icon_button(icon::close(12.0, theme::TEXT_DIM), "Close", Message::CloseParked(i)),
         ]
         .spacing(12)
         .height(Fill)
@@ -245,18 +231,14 @@ fn open_results(app: &App) -> Element<'_, Message> {
                         ..button::secondary(t, s)
                     }
                 })
-                .on_press(Message::ResumeBrowse(i)),
+                .on_press(Message::ResumeParked(i)),
         );
     }
-    let shown = app.parked.len().min(RESULT_ROWS_VISIBLE) as f32;
+    let shown = app.parked_newest_first.len().min(RESULT_ROWS_BEFORE_SCROLLING) as f32;
     let height = shown * RESULT_ROW_H + (shown - 1.0).max(0.0) * RESULT_GAP;
     let header = row![text("Open results").size(13).color(theme::TEXT_DIM)];
     column![header, scrollable(list).height(height).spacing(6)].spacing(8).width(600).into()
 }
-
-// ---------------------------------------------------------------------------
-// Scanning screen
-// ---------------------------------------------------------------------------
 
 fn scanning(job: &ScanJob) -> Element<'_, Message> {
     let s = &job.snapshot;
@@ -285,18 +267,17 @@ fn scanning(job: &ScanJob) -> Element<'_, Message> {
     let buttons = row![
         button(text(if paused { "Resume" } else { "Pause" }).size(14))
             .padding([8, 18])
-            .style(filled(theme::ACCENT))
+            .style(filled_white_text_button(theme::ACCENT))
             .on_press(Message::TogglePause),
-        button(text("Cancel").size(14)).padding([8, 18]).style(filled(theme::NEUTRAL)).on_press(Message::CancelScan),
+        button(text("Cancel").size(14))
+            .padding([8, 18])
+            .style(filled_white_text_button(theme::NEUTRAL_BUTTON))
+            .on_press(Message::CancelScan),
     ]
     .spacing(10);
     col = col.push(Space::new().height(12)).push(buttons);
     center(col).into()
 }
-
-// ---------------------------------------------------------------------------
-// Browse screen
-// ---------------------------------------------------------------------------
 
 fn browse(b: &Browser) -> Element<'_, Message> {
     let main = column![toolbar(b), row![chart_panel(b), list_panel(b)].spacing(12).height(Fill), status_bar(b)]
@@ -309,7 +290,7 @@ fn browse(b: &Browser) -> Element<'_, Message> {
                 format!("{}  {}", truncate(&b.tree.name(d.item), 40), format_size(b.tree.size(d.item, b.metric)));
             let chip = container(text(label).size(13))
                 .padding([6, 10])
-                .style(|_| boxed(theme::ACCENT.scale_alpha(0.92), 8.0).color(Color::WHITE));
+                .style(|_| rounded_box(theme::ACCENT.scale_alpha(0.92), 8.0).color(Color::WHITE));
             stack![main, pin(chip).x(d.pos.x + 14.0).y(d.pos.y + 10.0)].into()
         }
         _ => main.into(),
@@ -323,29 +304,8 @@ fn toolbar(b: &Browser) -> Element<'_, Message> {
     ]
     .spacing(2);
 
-    // Breadcrumbs: root … last few ancestors.
-    let mut chain: Vec<NodeId> = b.tree.ancestors(b.focus).collect();
-    chain.reverse();
-    let mut crumbs = row![].spacing(2).align_y(Alignment::Center);
-    let skip = chain.len().saturating_sub(5);
-    for (i, &id) in chain.iter().enumerate() {
-        if i > 0 && i < skip {
-            if i == 1 {
-                crumbs = crumbs.push(text("› …").size(13).color(theme::TEXT_DIM));
-            }
-            continue;
-        }
-        if i > 0 {
-            crumbs = crumbs.push(text("›").size(13).color(theme::TEXT_DIM));
-        }
-        let last = id == b.focus;
-        let label =
-            text(truncate(&b.tree.name(id), 28)).size(13).color(if last { theme::TEXT } else { theme::TEXT_DIM });
-        crumbs = crumbs.push(subtle_button(label, (!last).then_some(Message::Navigate(id))));
-    }
-
     let metric =
-        segmented(&[("On disk", Metric::Allocated), ("Logical", Metric::Logical)], b.metric, Message::SetMetric);
+        segmented_toggle(&[("On disk", Metric::Allocated), ("Logical", Metric::Logical)], b.metric, Message::SetMetric);
 
     let search = text_input("Search  ⌘F", &b.search_text)
         .id(SEARCH_ID)
@@ -357,7 +317,7 @@ fn toolbar(b: &Browser) -> Element<'_, Message> {
     row![
         icon_button(icon::home(16.0, theme::TEXT), "Start page", Message::GoHome),
         nav,
-        container(crumbs).width(Fill).clip(true),
+        container(root_and_last_ancestors_breadcrumbs(b)).width(Fill).clip(true),
         metric,
         search,
         icon_button(icon::refresh(16.0, theme::TEXT), "Rescan", Message::Rescan),
@@ -367,12 +327,38 @@ fn toolbar(b: &Browser) -> Element<'_, Message> {
     .into()
 }
 
+const BREADCRUMBS_AFTER_ELLIPSIS: usize = 5;
+
+fn root_and_last_ancestors_breadcrumbs(b: &Browser) -> Element<'_, Message> {
+    let mut root_to_focus: Vec<NodeId> = b.tree.ancestors(b.focus).collect();
+    root_to_focus.reverse();
+    let mut crumbs = row![].spacing(2).align_y(Alignment::Center);
+    let first_after_ellipsis = root_to_focus.len().saturating_sub(BREADCRUMBS_AFTER_ELLIPSIS);
+    for (i, &id) in root_to_focus.iter().enumerate() {
+        let is_root = i == 0;
+        if !is_root && i < first_after_ellipsis {
+            if i == 1 {
+                crumbs = crumbs.push(text("› …").size(13).color(theme::TEXT_DIM));
+            }
+            continue;
+        }
+        if !is_root {
+            crumbs = crumbs.push(text("›").size(13).color(theme::TEXT_DIM));
+        }
+        let last = id == b.focus;
+        let label =
+            text(truncate(&b.tree.name(id), 28)).size(13).color(if last { theme::TEXT } else { theme::TEXT_DIM });
+        crumbs = crumbs.push(subtle_button(label, (!last).then_some(Message::Navigate(id))));
+    }
+    crumbs.into()
+}
+
 fn chart_panel(b: &Browser) -> Element<'_, Message> {
     let chart = canvas(Sunburst {
         tree: &b.tree,
         layout: &b.layout,
-        cache: &b.cache,
-        highlight: &b.highlight,
+        chart_cache: &b.chart_cache,
+        highlight_cache: &b.highlight_cache,
         hovered: b.hovered,
         selected: b.selected,
     })
@@ -382,9 +368,7 @@ fn chart_panel(b: &Browser) -> Element<'_, Message> {
     column![chart, collector(b)].spacing(10).width(Length::FillPortion(3)).into()
 }
 
-/// Fixed height of the collector bar, enough for its tallest state (summary
-/// plus a row of item chips), so collecting never resizes the chart.
-const COLLECTOR_H: f32 = 72.0;
+const COLLECTOR_FIXED_HEIGHT: f32 = 72.0;
 
 fn collector(b: &Browser) -> Element<'_, Message> {
     let dragging = b.drag.as_ref().is_some_and(|d| d.dragging);
@@ -403,8 +387,12 @@ fn collector(b: &Browser) -> Element<'_, Message> {
             text(format!("Move {} item(s), {}, to the Trash?", collected.len(), format_size(collected.size(&b.tree))))
                 .size(14),
             Space::new().width(Fill),
-            button(text("Cancel").size(13)).style(filled(theme::NEUTRAL)).on_press(Message::CancelTrash),
-            button(text("Move to Trash").size(13)).style(filled(theme::DANGER)).on_press(Message::ConfirmTrash),
+            button(text("Cancel").size(13))
+                .style(filled_white_text_button(theme::NEUTRAL_BUTTON))
+                .on_press(Message::CancelTrash),
+            button(text("Move to Trash").size(13))
+                .style(filled_white_text_button(theme::DANGER))
+                .on_press(Message::ConfirmTrash),
         ]
         .spacing(8)
         .align_y(Alignment::Center)
@@ -428,7 +416,7 @@ fn collector(b: &Browser) -> Element<'_, Message> {
                     .align_y(Alignment::Center),
                 )
                 .padding([2, 8])
-                .style(|_| boxed(theme::PANEL_HI, 10.0)),
+                .style(|_| rounded_box(theme::PANEL_HI, 10.0)),
             );
         }
         if collected.len() > 4 {
@@ -441,8 +429,12 @@ fn collector(b: &Browser) -> Element<'_, Message> {
             ]
             .spacing(4),
             Space::new().width(Fill),
-            button(text("Clear").size(13)).style(filled(theme::NEUTRAL)).on_press(Message::ClearCollector),
-            button(text("Move to Trash…").size(13)).style(filled(theme::DANGER)).on_press(Message::AskTrash),
+            button(text("Clear").size(13))
+                .style(filled_white_text_button(theme::NEUTRAL_BUTTON))
+                .on_press(Message::ClearCollector),
+            button(text("Move to Trash…").size(13))
+                .style(filled_white_text_button(theme::DANGER))
+                .on_press(Message::AskTrash),
         ]
         .spacing(8)
         .align_y(Alignment::Center)
@@ -452,18 +444,28 @@ fn collector(b: &Browser) -> Element<'_, Message> {
     let zone = container(row![icon, body].spacing(12).height(Fill).align_y(Alignment::Center))
         .padding(10)
         .width(Fill)
-        .height(COLLECTOR_H)
+        .height(COLLECTOR_FIXED_HEIGHT)
         .style(move |_| {
             let bg = if hot { theme::ACCENT.scale_alpha(0.18) } else { theme::PANEL };
             let edge = if dragging { 1.5 } else { 0.0 };
-            boxed(bg, 12.0).border(border::rounded(12).width(edge).color(theme::ACCENT.scale_alpha(0.8)))
+            rounded_box(bg, 12.0).border(border::rounded(12).width(edge).color(theme::ACCENT.scale_alpha(0.8)))
         });
     mouse_area(zone).on_enter(Message::CollectorEnter).on_exit(Message::CollectorExit).into()
 }
 
 fn list_panel(b: &Browser) -> Element<'_, Message> {
-    let subject = b.list_subject();
+    let subject = b.listed_folder();
     let t = &b.tree;
+
+    let search_summary = text(match &b.search {
+        Some(s) => format!("{} matches for “{}”", thousands(s.matches as u64), s.query),
+        None => String::new(),
+    })
+    .size(12)
+    .color(theme::TEXT_DIM)
+    .wrapping(Wrapping::None);
+    let file_count_under_total =
+        text(format!("{} files", thousands(t.node(subject).items() as u64))).size(12).color(theme::TEXT_DIM);
 
     let header = column![
         row![
@@ -474,18 +476,7 @@ fn list_panel(b: &Browser) -> Element<'_, Message> {
         ]
         .spacing(10)
         .align_y(Alignment::Center),
-        // Search summary on the left, file count right-aligned under the total.
-        row![
-            text(match &b.search {
-                Some(s) => format!("{} matches for “{}”", thousands(s.matches as u64), s.query),
-                None => String::new(),
-            })
-            .size(12)
-            .color(theme::TEXT_DIM)
-            .wrapping(Wrapping::None),
-            Space::new().width(Fill),
-            text(format!("{} files", thousands(t.node(subject).items() as u64))).size(12).color(theme::TEXT_DIM),
-        ],
+        row![search_summary, Space::new().width(Fill), file_count_under_total],
     ]
     .spacing(4);
 
@@ -493,7 +484,7 @@ fn list_panel(b: &Browser) -> Element<'_, Message> {
     for r in &b.list.rows {
         rows = rows.push(list_row(b, r));
     }
-    if let Some(more) = &b.list.more {
+    if let Some(more) = &b.list.cut_off_rows_summary {
         rows = rows.push(container(text(more.as_str()).size(12).color(theme::TEXT_DIM)).padding([6, 10]));
     }
     if b.list.rows.is_empty() && t.node(subject).is_dir() {
@@ -504,18 +495,18 @@ fn list_panel(b: &Browser) -> Element<'_, Message> {
         .padding(14)
         .width(Length::FillPortion(2))
         .height(Fill)
-        .style(|_| boxed(theme::PANEL, 10.0))
+        .style(|_| rounded_box(theme::PANEL, 10.0))
         .into()
 }
 
-fn list_row<'a>(b: &'a Browser, r: &'a Row) -> Element<'a, Message> {
+fn list_row<'a>(b: &'a Browser, r: &'a ListRow) -> Element<'a, Message> {
     let id = r.id;
     let n = b.tree.node(id);
     let kind_color = theme::kind_color(n.kind());
     let dim = n.is_synthetic() || n.is_unreadable();
 
     let bar = container(Space::new())
-        .width(Length::Fixed((r.share * 60.0).max(1.0)))
+        .width(Length::Fixed((r.fraction_of_listed_folder * 60.0).max(1.0)))
         .height(3)
         .style(move |_| container::background(kind_color.scale_alpha(0.7)));
 

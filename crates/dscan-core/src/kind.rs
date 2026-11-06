@@ -1,6 +1,5 @@
-//! File-type classification used for coloring.
+const LONGEST_KNOWN_EXTENSION_LEN: usize = b"sparsebundle".len();
 
-/// Broad category of a file or folder.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 #[repr(u8)]
 pub enum Kind {
@@ -17,16 +16,12 @@ pub enum Kind {
     Library,
     Cache,
     System,
-    /// Synthetic: space not reachable by the scan (system data, snapshots…).
     Hidden,
-    /// Synthetic: purgeable space macOS can reclaim on demand.
     Purgeable,
-    /// Synthetic: several small items merged into one segment.
     SmallItems,
 }
 
 impl Kind {
-    /// Number of kinds (for per-kind accumulation arrays).
     pub const COUNT: usize = 15;
 
     pub const ALL: [Kind; Kind::COUNT] = [
@@ -47,7 +42,6 @@ impl Kind {
         Kind::SmallItems,
     ];
 
-    /// Not a real file kind: hidden/purgeable space or merged small items.
     pub fn is_synthetic(self) -> bool {
         matches!(self, Kind::Hidden | Kind::Purgeable | Kind::SmallItems)
     }
@@ -56,13 +50,12 @@ impl Kind {
         Kind::ALL.get(v as usize).copied().unwrap_or(Kind::Other)
     }
 
-    /// Classify a regular file by its name.
     pub fn of_file(name: &[u8]) -> Kind {
         let Some(dot) = name.iter().rposition(|&b| b == b'.') else {
             return Kind::Other;
         };
         let ext = &name[dot + 1..];
-        let mut lower = [0u8; 12]; // fits the longest known extension
+        let mut lower = [0u8; LONGEST_KNOWN_EXTENSION_LEN];
         if ext.is_empty() || ext.len() > lower.len() {
             return Kind::Other;
         }
@@ -100,7 +93,6 @@ impl Kind {
         }
     }
 
-    /// Some folders have an inherent kind regardless of their contents.
     pub fn of_dir(name: &[u8]) -> Option<Kind> {
         if name.len() > 4 && name[name.len() - 4..].eq_ignore_ascii_case(b".app") {
             return Some(Kind::App);
@@ -126,7 +118,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn classifies() {
+    fn classifies_files_by_case_insensitive_extension_and_bundle_folders_by_name() {
         assert_eq!(Kind::of_file(b"IMG_7114.MOV"), Kind::Video);
         assert_eq!(Kind::of_file(b"photo.HEIC"), Kind::Image);
         assert_eq!(Kind::of_file(b"Makefile"), Kind::Other);
@@ -137,7 +129,7 @@ mod tests {
         assert_eq!(Kind::of_dir(b"Caches"), Some(Kind::Cache));
         assert_eq!(Kind::of_dir(b"Documents"), None);
         for (i, k) in Kind::ALL.iter().enumerate() {
-            assert_eq!(*k as usize, i);
+            assert_eq!(*k as usize, i, "Kind::ALL must list kinds in discriminant order for from_u8");
         }
     }
 }

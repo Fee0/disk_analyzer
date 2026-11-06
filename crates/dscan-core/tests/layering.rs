@@ -1,18 +1,15 @@
-//! Enforces the core/GUI split described in CLAUDE.md:
-//! core has no UI dependencies, and the GUI does no file-system or OS work.
-
 use std::path::Path;
 
 const CORE: &str = env!("CARGO_MANIFEST_DIR");
 
-/// Crates that would tie core to a UI or an async runtime.
-const UI_CRATES: &[&str] = &["iced", "winit", "wgpu", "rfd", "tokio", "mimalloc", "dscan-gui"];
+const UI_OR_ASYNC_RUNTIME_CRATES: &[&str] = &["iced", "winit", "wgpu", "rfd", "tokio", "mimalloc", "dscan-gui"];
 
-/// APIs only core may use. GUI code goes through core's public API instead.
 const CORE_ONLY_APIS: &[&str] = &["std::fs", "libc::", "objc2", "getattrlist", "statfs", "trash::"];
 
-/// Dependency names declared in a Cargo.toml (any `*dependencies*` table).
-fn dependencies(manifest: &str) -> Vec<String> {
+const HEADLESS_UI_TEST_SCAFFOLDING: &[&str] = &["iced_inspect.rs", "inspect_tests.rs"];
+const UNIT_TEST_MODULE_START: &str = "\n#[cfg(test)]\nmod tests";
+
+fn dependency_names(manifest: &str) -> Vec<String> {
     let mut deps = Vec::new();
     let mut in_deps = false;
     for line in manifest.lines().map(str::trim) {
@@ -21,8 +18,8 @@ fn dependencies(manifest: &str) -> Vec<String> {
             continue;
         }
         if in_deps && let Some((key, _)) = line.split_once('=') {
-            // `name = "1"`, `name = { … }` or `name.workspace = true`
-            deps.push(key.split('.').next().unwrap().trim().to_string());
+            let name_before_dotted_workspace_key = key.split('.').next().unwrap();
+            deps.push(name_before_dotted_workspace_key.trim().to_string());
         }
     }
     deps
@@ -31,9 +28,9 @@ fn dependencies(manifest: &str) -> Vec<String> {
 #[test]
 fn core_has_no_ui_dependencies() {
     let manifest = std::fs::read_to_string(Path::new(CORE).join("Cargo.toml")).unwrap();
-    let bad: Vec<String> = dependencies(&manifest)
+    let bad: Vec<String> = dependency_names(&manifest)
         .into_iter()
-        .filter(|d| UI_CRATES.iter().any(|ui| d == ui || d.starts_with(&format!("{ui}_"))))
+        .filter(|d| UI_OR_ASYNC_RUNTIME_CRATES.iter().any(|ui| d == ui || d.starts_with(&format!("{ui}_"))))
         .collect();
     assert!(bad.is_empty(), "dscan-core must not depend on UI crates: {bad:?} (see CLAUDE.md)");
 }
@@ -45,15 +42,15 @@ fn gui_does_no_file_system_or_os_work() {
     for entry in std::fs::read_dir(&gui_src).unwrap() {
         let path = entry.unwrap().path();
         let file = path.file_name().unwrap().to_string_lossy().into_owned();
-        // Headless UI test scaffolding, not app code.
-        if !file.ends_with(".rs") || file == "iced_inspect.rs" || file == "inspect_tests.rs" {
+        if !file.ends_with(".rs") || HEADLESS_UI_TEST_SCAFFOLDING.contains(&file.as_str()) {
             continue;
         }
         let source = std::fs::read_to_string(&path).unwrap();
-        // Unit tests at the end of a file may build fixtures on disk.
-        let app_code = source.split("\n#[cfg(test)]\nmod tests").next().unwrap();
-        for (n, line) in app_code.lines().enumerate() {
-            if line.trim_start().starts_with("//") {
+        let app_code_before_unit_tests_that_may_build_fixtures_on_disk =
+            source.split(UNIT_TEST_MODULE_START).next().unwrap();
+        for (n, line) in app_code_before_unit_tests_that_may_build_fixtures_on_disk.lines().enumerate() {
+            let is_comment_line = line.trim_start().starts_with("//");
+            if is_comment_line {
                 continue;
             }
             if let Some(api) = CORE_ONLY_APIS.iter().find(|api| line.contains(*api)) {
@@ -68,7 +65,6 @@ fn gui_does_no_file_system_or_os_work() {
     );
 }
 
-/// Lines of the `*dependencies*` tables in a manifest.
 fn dependency_lines(manifest: &str) -> Vec<&str> {
     let mut in_deps = false;
     let mut out = Vec::new();
@@ -108,7 +104,7 @@ fn dependencies_are_declared_in_the_workspace_without_defaults() {
 }
 
 #[test]
-fn parses_dependency_tables() {
+fn parses_dependency_names_from_versioned_inline_table_and_dotted_workspace_entries() {
     let manifest = "[package]\nname = \"x\"\n[dependencies]\nlibc.workspace = true\niced_core = \"0.14\"\nrfd = { workspace = true }\n[dev-dependencies]\ntempfile = \"3\"\n";
-    assert_eq!(dependencies(manifest), ["libc", "iced_core", "rfd", "tempfile"]);
+    assert_eq!(dependency_names(manifest), ["libc", "iced_core", "rfd", "tempfile"]);
 }

@@ -1,5 +1,3 @@
-//! Disk Analyzer: a DaisyDisk-style disk usage explorer for macOS.
-
 mod app;
 mod fmt;
 #[cfg(test)]
@@ -16,11 +14,12 @@ use std::path::PathBuf;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-fn main() -> iced::Result {
-    // `disk-analyzer <folder>` scans that folder right away.
-    let initial: Option<PathBuf> =
-        std::env::args_os().nth(1).map(PathBuf::from).filter(|p| p.is_dir()).map(|p| p.canonicalize().unwrap_or(p));
+fn folder_to_scan_at_launch() -> Option<PathBuf> {
+    std::env::args_os().nth(1).map(PathBuf::from).filter(|p| p.is_dir()).map(|p| p.canonicalize().unwrap_or(p))
+}
 
+fn main() -> iced::Result {
+    let initial = folder_to_scan_at_launch();
     iced::application(move || app::App::new(initial.clone()), app::App::update, view::view)
         .title(app::App::title)
         .subscription(app::App::subscription)

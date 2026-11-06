@@ -1,10 +1,3 @@
-//! Compact arena tree holding the scan result.
-//!
-//! Nodes are stored breadth-first, so a node's children occupy a contiguous
-//! id range and every parent id is smaller than its children's ids. Per
-//! metric, `order` holds a permutation of each child range sorted by size,
-//! largest first.
-
 use std::borrow::Cow;
 use std::cmp::Reverse;
 use std::ffi::OsStr;
@@ -14,7 +7,6 @@ use std::time::Duration;
 
 use crate::kind::Kind;
 
-/// Index of a node in the [`Tree`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NodeId(pub u32);
 
@@ -26,13 +18,10 @@ impl NodeId {
     }
 }
 
-/// Which size to show.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum Metric {
-    /// Bytes allocated on disk (what deleting frees). Hard links count once.
     #[default]
     Allocated,
-    /// Logical file length (what Finder shows as "size").
     Logical,
 }
 
@@ -46,13 +35,11 @@ impl Metric {
 pub(crate) mod flags {
     pub const DIR: u8 = 1;
     pub const REMOVED: u8 = 2;
-    /// Second or later sighting of a hard-linked file; size counted as 0.
     pub const HARDLINK_DUP: u8 = 4;
-    /// The directory could not be read (permissions…).
     pub const UNREADABLE: u8 = 8;
-    /// Not a real file system object (hidden/purgeable space).
     pub const SYNTHETIC: u8 = 16;
     pub const SYMLINK: u8 = 32;
+    pub const CLONE_DUP: u8 = 64;
 }
 
 #[derive(Clone, Debug)]
@@ -64,14 +51,21 @@ pub struct Node {
     parent: u32,
     first_child: u32,
     child_count: u32,
-    /// Number of files in this subtree (1 for a file).
-    items: u32,
+    files_in_subtree: u32,
     alloc: u64,
     logical: u64,
 }
 
 impl Node {
-    fn new(parent: u32, name: (u32, u16), kind: Kind, flags: u8, items: u32, alloc: u64, logical: u64) -> Node {
+    fn new(
+        parent: u32,
+        name: (u32, u16),
+        kind: Kind,
+        flags: u8,
+        files_in_subtree: u32,
+        alloc: u64,
+        logical: u64,
+    ) -> Node {
         Node {
             name_off: name.0,
             name_len: name.1,
@@ -80,7 +74,7 @@ impl Node {
             parent,
             first_child: 0,
             child_count: 0,
-            items,
+            files_in_subtree,
             alloc,
             logical,
         }
@@ -97,8 +91,6 @@ impl Node {
     pub fn is_dir(&self) -> bool {
         self.flags & flags::DIR != 0
     }
-    /// The node or one of its ancestors was removed ([`Tree::remove`]
-    /// marks the whole subtree).
     #[inline]
     pub fn is_removed(&self) -> bool {
         self.flags & flags::REMOVED != 0
@@ -107,10 +99,17 @@ impl Node {
     pub fn is_synthetic(&self) -> bool {
         self.flags & flags::SYNTHETIC != 0
     }
-    /// A directory that could not be read.
     #[inline]
     pub fn is_unreadable(&self) -> bool {
         self.flags & flags::UNREADABLE != 0
+    }
+    #[inline]
+    pub fn is_hardlink_copy(&self) -> bool {
+        self.flags & flags::HARDLINK_DUP != 0
+    }
+    #[inline]
+    pub fn is_clone_copy(&self) -> bool {
+        self.flags & flags::CLONE_DUP != 0
     }
     #[inline]
     pub fn size(&self, m: Metric) -> u64 {
@@ -121,21 +120,17 @@ impl Node {
     }
     #[inline]
     pub fn items(&self) -> u32 {
-        self.items
+        self.files_in_subtree
     }
 }
 
-/// Statistics gathered during a scan.
 #[derive(Clone, Debug, Default)]
 pub struct ScanStats {
     pub files: u64,
     pub dirs: u64,
-    /// Directories that could not be read.
     pub errors: u64,
-    /// A few unreadable paths, for display.
     pub error_samples: Vec<PathBuf>,
     pub duration: Duration,
-    /// Bytes of the volume not reached by the scan (whole-disk mode only).
     pub hidden: u64,
     pub purgeable: u64,
 }
@@ -143,7 +138,7 @@ pub struct ScanStats {
 pub struct Tree {
     nodes: Vec<Node>,
     names: Vec<u8>,
-    order: [Vec<u32>; 2],
+    children_largest_first: [Vec<u32>; 2],
     root_path: PathBuf,
     whole_disk: bool,
     pub stats: ScanStats,
@@ -195,44 +190,42 @@ impl Tree {
         if id == NodeId::ROOT { None } else { Some(NodeId(self.nodes[id.idx()].parent)) }
     }
 
-    /// Live children of `id`, largest first according to `m`.
     pub fn children(&self, id: NodeId, m: Metric) -> impl DoubleEndedIterator<Item = NodeId> + '_ {
         let n = &self.nodes[id.idx()];
         let start = n.first_child as usize;
         let end = start + n.child_count as usize;
-        self.order[m.slot()][start..end].iter().map(|&c| NodeId(c)).filter(|c| !self.nodes[c.idx()].is_removed())
+        self.children_largest_first[m.slot()][start..end]
+            .iter()
+            .map(|&c| NodeId(c))
+            .filter(|c| !self.nodes[c.idx()].is_removed())
     }
 
-    /// All children of `id`, including removed ones, in arena order.
-    fn all_children(&self, id: NodeId) -> impl Iterator<Item = NodeId> + '_ {
+    fn children_including_removed(&self, id: NodeId) -> impl Iterator<Item = NodeId> + '_ {
         let n = &self.nodes[id.idx()];
         let start = n.first_child as usize;
-        self.order[Metric::Allocated.slot()][start..start + n.child_count as usize].iter().map(|&c| NodeId(c))
+        self.children_largest_first[Metric::Allocated.slot()][start..start + n.child_count as usize]
+            .iter()
+            .map(|&c| NodeId(c))
     }
 
-    /// Iterator over `id` and all its ancestors up to the root.
     pub fn ancestors(&self, id: NodeId) -> impl Iterator<Item = NodeId> + '_ {
         std::iter::successors(Some(id), |&c| self.parent(c))
     }
 
-    /// Is `a` an ancestor of (or equal to) `b`?
     pub fn is_ancestor_of(&self, a: NodeId, b: NodeId) -> bool {
-        // Breadth-first ids: ancestors always have smaller ids.
-        a.0 <= b.0 && self.ancestors(b).any(|x| x == a)
+        let could_be_ancestor_since_ids_are_breadth_first = a <= b;
+        could_be_ancestor_since_ids_are_breadth_first && self.ancestors(b).any(|x| x == a)
     }
 
-    /// Is `b` inside `a` (and not `a` itself)?
     pub fn is_strict_ancestor_of(&self, a: NodeId, b: NodeId) -> bool {
         a != b && self.is_ancestor_of(a, b)
     }
 
-    /// Neither the node nor any ancestor has been removed.
     #[inline]
     pub fn is_live(&self, id: NodeId) -> bool {
         !self.nodes[id.idx()].is_removed()
     }
 
-    /// `id` if live, otherwise its closest live ancestor.
     pub fn nearest_live(&self, id: NodeId) -> NodeId {
         let mut cur = id;
         while !self.is_live(cur) {
@@ -241,13 +234,10 @@ impl Tree {
         cur
     }
 
-    /// A live, real file system object other than the root: something that
-    /// can be previewed, collected or trashed.
     pub fn is_actionable(&self, id: NodeId) -> bool {
         id != NodeId::ROOT && !self.nodes[id.idx()].is_synthetic() && self.is_live(id)
     }
 
-    /// Absolute file system path of a node.
     pub fn path(&self, id: NodeId) -> PathBuf {
         let mut parts: Vec<&[u8]> =
             self.ancestors(id).take_while(|&a| a != NodeId::ROOT).map(|a| self.name_bytes(a)).collect();
@@ -259,42 +249,46 @@ impl Tree {
         p
     }
 
-    /// Mark `id` and its whole subtree removed and subtract its sizes from
-    /// all ancestors. Returns false if it was already removed or is root.
     pub fn remove(&mut self, id: NodeId) -> bool {
         if id == NodeId::ROOT || !self.is_live(id) {
             return false;
         }
-        let mut stack = vec![id];
-        while let Some(cur) = stack.pop() {
-            self.nodes[cur.idx()].flags |= flags::REMOVED;
-            stack.extend(self.all_children(cur));
-        }
-        let n = &self.nodes[id.idx()];
-        let (alloc, logical, items) = (n.alloc, n.logical, n.items);
-        let ancestors: Vec<NodeId> = self.ancestors(id).skip(1).collect();
-        for &a in &ancestors {
-            let n = &mut self.nodes[a.idx()];
-            n.alloc = n.alloc.saturating_sub(alloc);
-            n.logical = n.logical.saturating_sub(logical);
-            n.items = n.items.saturating_sub(items);
-        }
-        // Each ancestor shrank: move it to its new rank among its siblings.
-        for &a in &ancestors {
+        self.mark_subtree_removed(id);
+        let shrunken_ancestors: Vec<NodeId> = self.ancestors(id).skip(1).collect();
+        self.subtract_sizes_of_removed_from(&shrunken_ancestors, id);
+        for &a in &shrunken_ancestors {
             if let Some(p) = self.parent(a) {
-                self.reposition(p, a);
+                self.move_shrunken_child_to_its_new_rank(p, a);
             }
         }
         true
     }
 
-    /// `child` got smaller: shift it later in `parent`'s sorted child ranges.
-    fn reposition(&mut self, parent: NodeId, child: NodeId) {
-        let Tree { nodes, order, .. } = self;
+    fn mark_subtree_removed(&mut self, id: NodeId) {
+        let mut stack = vec![id];
+        while let Some(cur) = stack.pop() {
+            self.nodes[cur.idx()].flags |= flags::REMOVED;
+            stack.extend(self.children_including_removed(cur));
+        }
+    }
+
+    fn subtract_sizes_of_removed_from(&mut self, ancestors: &[NodeId], removed: NodeId) {
+        let n = &self.nodes[removed.idx()];
+        let (alloc, logical, files) = (n.alloc, n.logical, n.files_in_subtree);
+        for &a in ancestors {
+            let n = &mut self.nodes[a.idx()];
+            n.alloc = n.alloc.saturating_sub(alloc);
+            n.logical = n.logical.saturating_sub(logical);
+            n.files_in_subtree = n.files_in_subtree.saturating_sub(files);
+        }
+    }
+
+    fn move_shrunken_child_to_its_new_rank(&mut self, parent: NodeId, child: NodeId) {
+        let Tree { nodes, children_largest_first, .. } = self;
         let n = &nodes[parent.idx()];
         let range = n.first_child as usize..(n.first_child + n.child_count) as usize;
         for m in Metric::ALL {
-            let slice = &mut order[m.slot()][range.clone()];
+            let slice = &mut children_largest_first[m.slot()][range.clone()];
             let Some(i) = slice.iter().position(|&c| c == child.0) else { continue };
             let size = nodes[child.idx()].size(m);
             let shift = slice[i + 1..].partition_point(|&c| nodes[c as usize].size(m) > size);
@@ -313,15 +307,9 @@ impl Tree {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Building
-// ---------------------------------------------------------------------------
-
-/// A file record produced by the scanner; its name lives in the owning
-/// [`DirNode`]'s `names` buffer.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct FileRec {
-    pub name_off: u32,
+    pub name_off_in_dir_names: u32,
     pub name_len: u16,
     pub kind: Kind,
     pub flags: u8,
@@ -329,7 +317,6 @@ pub(crate) struct FileRec {
     pub logical: u64,
 }
 
-/// A directory as produced (bottom-up) by the scanner.
 #[derive(Debug, Default)]
 pub(crate) struct DirNode {
     pub name: Box<[u8]>,
@@ -339,10 +326,8 @@ pub(crate) struct DirNode {
     pub alloc: u64,
     pub logical: u64,
     pub items: u32,
-    /// Directories in this subtree, including this one.
-    pub subdirs: u64,
-    /// Name bytes in this subtree, including this directory's own name.
-    pub name_bytes: u64,
+    pub dirs_in_subtree: u64,
+    pub name_bytes_in_subtree: u64,
     pub kind: Kind,
     pub flags: u8,
 }
@@ -360,41 +345,51 @@ impl DirNode {
         let name = clamp_name(name);
         let off = self.names.len() as u32;
         self.names.extend_from_slice(name);
-        self.files.push(FileRec { name_off: off, name_len: name.len() as u16, kind, flags, alloc, logical });
+        self.files.push(FileRec {
+            name_off_in_dir_names: off,
+            name_len: name.len() as u16,
+            kind,
+            flags,
+            alloc,
+            logical,
+        });
     }
 
-    /// Compute totals and the dominant kind from files and child dirs.
     pub fn finish(&mut self, forced_kind: Option<Kind>) {
-        let mut by_kind = [0u64; Kind::COUNT];
+        let mut alloc_by_kind = [0u64; Kind::COUNT];
         let (mut alloc, mut logical, mut items) = (0u64, 0u64, 0u32);
-        let (mut subdirs, mut name_bytes) = (1u64, (self.name.len() + self.names.len()) as u64);
+        let mut dirs_in_subtree = 1u64;
+        let mut name_bytes_in_subtree = (self.name.len() + self.names.len()) as u64;
         for f in &self.files {
             alloc += f.alloc;
             logical += f.logical;
             items = items.saturating_add(1);
-            by_kind[f.kind as usize] += f.alloc.max(1);
+            alloc_by_kind[f.kind as usize] += f.alloc.max(1);
         }
         for d in &self.dirs {
             alloc += d.alloc;
             logical += d.logical;
             items = items.saturating_add(d.items);
-            subdirs += d.subdirs;
-            name_bytes += d.name_bytes;
-            by_kind[d.kind as usize] += d.alloc;
+            dirs_in_subtree += d.dirs_in_subtree;
+            name_bytes_in_subtree += d.name_bytes_in_subtree;
+            alloc_by_kind[d.kind as usize] += d.alloc;
         }
         self.alloc = alloc;
         self.logical = logical;
         self.items = items;
-        self.subdirs = subdirs;
-        self.name_bytes = name_bytes;
-        self.kind = forced_kind.unwrap_or_else(|| {
-            let (i, &v) = by_kind.iter().enumerate().max_by_key(|&(_, v)| *v).unwrap();
-            if v == 0 { Kind::Other } else { Kind::ALL[i] }
-        });
+        self.dirs_in_subtree = dirs_in_subtree;
+        self.name_bytes_in_subtree = name_bytes_in_subtree;
+        self.kind = forced_kind.unwrap_or_else(|| dominant_kind(&alloc_by_kind));
     }
 }
 
-/// Extra synthetic child of the root (hidden / purgeable space).
+fn dominant_kind(alloc_by_kind: &[u64; Kind::COUNT]) -> Kind {
+    let (i, &largest) = alloc_by_kind.iter().enumerate().max_by_key(|&(_, v)| *v).unwrap();
+    if largest == 0 { Kind::Other } else { Kind::ALL[i] }
+}
+
+type LargestFirstThenScanOrder = (Reverse<u64>, u32);
+
 pub(crate) struct Synthetic {
     pub name: &'static str,
     pub kind: Kind,
@@ -409,18 +404,17 @@ pub(crate) fn build(
     synthetic: Vec<Synthetic>,
     stats: ScanStats,
 ) -> Tree {
-    // Fold synthetic sizes into the root totals.
     for s in &synthetic {
         root.alloc += s.size;
         root.logical += s.size;
     }
 
-    // Exact sizes: no reallocation while the scanner's tree is still alive.
-    let node_count = root.items as usize + root.subdirs as usize + synthetic.len();
-    let name_bytes = root.name_bytes as usize + root_name.len() + synthetic.iter().map(|s| s.name.len()).sum::<usize>();
-    let mut nodes: Vec<Node> = Vec::with_capacity(node_count);
-    let mut names: Vec<u8> = Vec::with_capacity(name_bytes);
-    let mut logical_order: Vec<u32> = Vec::with_capacity(node_count);
+    let exact_node_count = root.items as usize + root.dirs_in_subtree as usize + synthetic.len();
+    let exact_name_bytes =
+        root.name_bytes_in_subtree as usize + root_name.len() + synthetic.iter().map(|s| s.name.len()).sum::<usize>();
+    let mut nodes: Vec<Node> = Vec::with_capacity(exact_node_count);
+    let mut names: Vec<u8> = Vec::with_capacity(exact_name_bytes);
+    let mut logical_order: Vec<u32> = Vec::with_capacity(exact_node_count);
 
     let push_name = |names: &mut Vec<u8>, s: &[u8]| -> (u32, u16) {
         let s = clamp_name(s);
@@ -436,10 +430,9 @@ pub(crate) fn build(
     let mut queue: std::collections::VecDeque<(u32, DirNode, Vec<Synthetic>)> = Default::default();
     queue.push_back((0, root, synthetic));
 
-    // Scratch buffers reused for every directory: sort keys and ranks.
-    let mut by_alloc: Vec<(Reverse<u64>, u32)> = Vec::new();
-    let mut by_logical: Vec<(Reverse<u64>, u32)> = Vec::new();
-    let mut rank: Vec<u32> = Vec::new();
+    let mut by_alloc: Vec<LargestFirstThenScanOrder> = Vec::new();
+    let mut by_logical: Vec<LargestFirstThenScanOrder> = Vec::new();
+    let mut alloc_rank: Vec<u32> = Vec::new();
 
     while let Some((id, dir, synth)) = queue.pop_front() {
         let DirNode { names: dir_names, files, mut dirs, .. } = dir;
@@ -457,19 +450,18 @@ pub(crate) fn build(
             by_alloc.push((Reverse(a), i as u32));
             by_logical.push((Reverse(l), i as u32));
         }
-        // Ties break on the index, so the order is deterministic.
         by_alloc.sort_unstable();
         by_logical.sort_unstable();
 
         let first = nodes.len() as u32;
         nodes[id as usize].first_child = first;
         nodes[id as usize].child_count = total as u32;
-        rank.clear();
-        rank.resize(total, 0);
+        alloc_rank.clear();
+        alloc_rank.resize(total, 0);
 
         for (r, &(_, i)) in by_alloc.iter().enumerate() {
             let i = i as usize;
-            rank[i] = r as u32;
+            alloc_rank[i] = r as u32;
             let child_id = first + r as u32;
             if i < nd {
                 let d = std::mem::take(&mut dirs[i]);
@@ -478,7 +470,8 @@ pub(crate) fn build(
                 queue.push_back((child_id, d, Vec::new()));
             } else if i < nd + nf {
                 let f = &files[i - nd];
-                let s = &dir_names[f.name_off as usize..f.name_off as usize + f.name_len as usize];
+                let start = f.name_off_in_dir_names as usize;
+                let s = &dir_names[start..start + f.name_len as usize];
                 let name = push_name(&mut names, s);
                 nodes.push(Node::new(id, name, f.kind, f.flags, 1, f.alloc, f.logical));
             } else {
@@ -487,21 +480,19 @@ pub(crate) fn build(
                 nodes.push(Node::new(id, name, s.kind, flags::SYNTHETIC, 0, s.size, s.size));
             }
         }
-        logical_order.extend(by_logical.iter().map(|&(_, i)| first + rank[i as usize]));
+        logical_order.extend(by_logical.iter().map(|&(_, i)| first + alloc_rank[i as usize]));
     }
 
     let alloc_order: Vec<u32> = (0..nodes.len() as u32).collect();
     debug_assert_eq!(logical_order.len(), nodes.len());
 
-    Tree { nodes, names, order: [alloc_order, logical_order], root_path, whole_disk, stats }
+    Tree { nodes, names, children_largest_first: [alloc_order, logical_order], root_path, whole_disk, stats }
 }
 
 #[cfg(test)]
 pub(crate) mod test_util {
     use super::*;
 
-    /// Build a tree from a nested description: (name, size) leaves and
-    /// (name, children) dirs.
     pub enum T {
         F(&'static str, u64),
         D(&'static str, Vec<T>),
@@ -520,7 +511,11 @@ pub(crate) mod test_util {
     }
 
     pub fn tree(kids: Vec<T>) -> Tree {
-        build(to_dir("root", kids), PathBuf::from("/r"), "root", false, vec![], ScanStats::default())
+        tree_at("/r", kids)
+    }
+
+    pub fn tree_at(root: &str, kids: Vec<T>) -> Tree {
+        build(to_dir("root", kids), PathBuf::from(root), "root", false, vec![], ScanStats::default())
     }
 }
 
@@ -538,7 +533,7 @@ mod tests {
     }
 
     #[test]
-    fn sizes_sum_and_sorted() {
+    fn sizes_sum_up_and_children_are_listed_largest_first() {
         let t = sample();
         assert_eq!(t.size(t.root(), Metric::Allocated), 960);
         assert_eq!(t.size(t.root(), Metric::Logical), 480);
@@ -546,19 +541,33 @@ mod tests {
         assert_eq!(kids, vec!["a", "b", "small.txt"]);
         let a = t.children(t.root(), Metric::Allocated).next().unwrap();
         assert_eq!(t.size(a, Metric::Allocated), 850);
-        assert_eq!(t.node(a).items(), 3);
-        assert_eq!(t.node(a).kind(), Kind::Video);
+        assert_eq!(t.node(a).items(), 3, "items counts the files in the subtree, not folders");
+        assert_eq!(t.node(a).kind(), Kind::Video, "a folder takes the kind holding most of its bytes");
         assert_eq!(t.node(t.root()).items(), 5);
     }
 
     #[test]
-    fn parents_before_children_and_paths() {
+    fn equal_sized_children_keep_the_scanner_order_for_a_deterministic_layout() {
+        let t = tree(vec![F("b", 5), F("a", 5), F("c", 5)]);
+        for m in Metric::ALL {
+            let kids: Vec<_> = t.children(t.root(), m).map(|c| t.name(c).into_owned()).collect();
+            assert_eq!(kids, vec!["b", "a", "c"], "ties break on scan order for {m:?}");
+        }
+    }
+
+    #[test]
+    fn ids_are_breadth_first_so_parents_precede_children() {
         let t = sample();
         for id in t.ids() {
             if let Some(p) = t.parent(id) {
-                assert!(p.0 < id.0);
+                assert!(p.0 < id.0, "parent {p:?} must have a smaller id than {id:?}");
             }
         }
+    }
+
+    #[test]
+    fn paths_depths_and_ancestry() {
+        let t = sample();
         let a = t.children(t.root(), Metric::Allocated).next().unwrap();
         let deep = t.children(a, Metric::Allocated).find(|&c| t.name(c) == "deep").unwrap();
         let z = t.children(deep, Metric::Allocated).next().unwrap();
@@ -567,22 +576,36 @@ mod tests {
         assert_eq!(t.depth(z), 3);
         assert!(t.is_ancestor_of(a, z));
         assert!(!t.is_ancestor_of(z, a));
+        assert!(t.is_ancestor_of(a, a), "a node counts as its own ancestor");
+        assert!(!t.is_strict_ancestor_of(a, a));
     }
 
     #[test]
-    fn remove_propagates_and_resorts() {
+    fn remove_shrinks_ancestors_and_moves_them_to_their_new_rank() {
         let mut t = sample();
         let a = t.children(t.root(), Metric::Allocated).next().unwrap();
         let x = t.children(a, Metric::Allocated).next().unwrap();
         let y = t.children(a, Metric::Allocated).nth(1).unwrap();
+        assert!(!t.remove(t.root()), "the root cannot be removed");
         assert!(t.remove(x));
-        assert!(!t.remove(x));
+        assert!(!t.remove(x), "removing twice is refused");
         assert!(t.remove(y));
         assert_eq!(t.size(a, Metric::Allocated), 50);
         assert_eq!(t.size(t.root(), Metric::Allocated), 160);
         assert_eq!(t.node(t.root()).items(), 3);
         let kids: Vec<_> = t.children(t.root(), Metric::Allocated).map(|c| t.name(c).into_owned()).collect();
-        assert_eq!(kids, vec!["b", "a", "small.txt"]);
+        assert_eq!(kids, vec!["b", "a", "small.txt"], "a shrank below b");
         assert_eq!(t.children(a, Metric::Allocated).count(), 1);
+    }
+
+    #[test]
+    fn removing_a_folder_marks_its_whole_subtree_removed() {
+        let mut t = sample();
+        let a = t.children(t.root(), Metric::Allocated).next().unwrap();
+        let deep = t.children(a, Metric::Allocated).find(|&c| t.name(c) == "deep").unwrap();
+        let z = t.children(deep, Metric::Allocated).next().unwrap();
+        assert!(t.remove(a));
+        assert!(t.node(z).is_removed(), "descendants of a removed folder are removed too");
+        assert_eq!(t.nearest_live(z), t.root());
     }
 }
