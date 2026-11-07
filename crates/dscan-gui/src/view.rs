@@ -2,8 +2,8 @@ use dscan_core::{Kind, NodeId, Segment, TRASH_NAME, format_size};
 use iced::border;
 use iced::widget::text::Wrapping;
 use iced::widget::{
-    Column, Space, Svg, button, canvas, center, column, container, mouse_area, pin, progress_bar, row, scrollable,
-    stack, text, text_input, tooltip,
+    Column, Space, Svg, button, canvas, center, column, container, mouse_area, pin, progress_bar, responsive, row,
+    scrollable, stack, text, text_input, tooltip,
 };
 use iced::{Alignment, Color, Element, Fill, Length, Shrink, Theme};
 
@@ -309,8 +309,15 @@ fn scanning(job: &ScanJob) -> Element<'_, Message> {
     center(col).into()
 }
 
+const PANEL_GAP: f32 = 12.0;
+const CHART_SIDE_PORTION: u16 = 3;
+const LIST_SIDE_PORTION: u16 = 2;
+pub const TOOLBAR_LIST_SIDE_ID: &str = "toolbar-list-side";
+pub const LIST_PANEL_ID: &str = "list-panel";
+pub const PATH_BAR_ID: &str = "path-bar";
+
 fn browse(b: &Browser) -> Element<'_, Message> {
-    let main = column![toolbar(b), row![chart_panel(b), list_panel(b)].spacing(12).height(Fill), status_bar(b)]
+    let main = column![toolbar(b), row![chart_panel(b), list_panel(b)].spacing(PANEL_GAP).height(Fill), status_bar(b)]
         .spacing(10)
         .padding(12);
 
@@ -366,13 +373,16 @@ fn toolbar(b: &Browser) -> Element<'_, Message> {
         .on_input(Message::SearchChanged)
         .padding([6, 10])
         .size(13)
-        .width(220)
+        .width(Fill)
         .style(framed_text_input);
 
-    row![nav, path_bar(b), outlined_text_button("Rescan", Message::Rescan), search]
-        .spacing(8)
-        .align_y(Alignment::Center)
-        .into()
+    let chart_side =
+        row![nav, path_bar(b)].spacing(8).align_y(Alignment::Center).width(Length::FillPortion(CHART_SIDE_PORTION));
+    let list_side =
+        container(row![outlined_text_button("Rescan", Message::Rescan), search].spacing(8).align_y(Alignment::Center))
+            .id(TOOLBAR_LIST_SIDE_ID)
+            .width(Length::FillPortion(LIST_SIDE_PORTION));
+    row![chart_side, list_side].spacing(PANEL_GAP).align_y(Alignment::Center).into()
 }
 
 fn framed_text_input(t: &Theme, status: text_input::Status) -> text_input::Style {
@@ -394,40 +404,68 @@ fn path_bar(b: &Browser) -> Element<'_, Message> {
     let root_icon = if b.opts.whole_disk { icon::drive } else { icon::folder };
     let content = row![
         container(root_icon(PATH_ROOT_ICON_SIZE, theme::TEXT_DIM)).padding([0, 6]),
-        root_and_last_ancestors_breadcrumbs(b),
+        responsive(move |available| container(breadcrumbs_that_fit(b, available.width))
+            .height(Fill)
+            .align_y(Alignment::Center)
+            .into()),
     ]
     .align_y(Alignment::Center);
-    framed_group(content).padding([FRAME_INSET, 2.0 * FRAME_INSET]).width(Fill).clip(true).into()
+    framed_group(content).id(PATH_BAR_ID).padding([FRAME_INSET, 2.0 * FRAME_INSET]).width(Fill).clip(true).into()
 }
 
 fn path_separator<'a>() -> Element<'a, Message> {
     icon::chevron_right(PATH_SEPARATOR_SIZE, theme::mix(theme::PANEL, theme::TEXT_DIM, PATH_SEPARATOR_STRENGTH)).into()
 }
 
+const CRUMB_TEXT_SIZE: f32 = 13.0;
+const CRUMB_PADDING_X: f32 = 6.0;
+const GENEROUS_CHAR_WIDTH_PER_TEXT_SIZE: f32 = 0.55;
+const ELLIPSIS: &str = "…";
+
 fn crumb<'a>(label: String, msg: Option<Message>) -> Element<'a, Message> {
     let idle_text = if msg.is_some() { theme::TEXT_DIM } else { theme::TEXT };
-    button(text(label).size(13).wrapping(Wrapping::None))
-        .padding([3, 6])
+    button(text(label).size(CRUMB_TEXT_SIZE).wrapping(Wrapping::None))
+        .padding([3.0, CRUMB_PADDING_X])
         .style(quiet_button_style(idle_text))
         .on_press_maybe(msg)
         .into()
 }
 
-fn root_and_last_ancestors_breadcrumbs(b: &Browser) -> Element<'_, Message> {
+fn generous_crumb_width(label: &str) -> f32 {
+    let text_width = label.chars().count() as f32 * CRUMB_TEXT_SIZE * GENEROUS_CHAR_WIDTH_PER_TEXT_SIZE;
+    text_width + 2.0 * CRUMB_PADDING_X
+}
+
+fn crumbs_after_the_root_that_fit(root_to_focus_labels: &[String], available_width: f32) -> usize {
+    let after_root = root_to_focus_labels.len() - 1;
+    let width_with_last = |shown: usize| {
+        let ellipsis = if shown < after_root { PATH_SEPARATOR_SIZE + generous_crumb_width(ELLIPSIS) } else { 0.0 };
+        let tail: f32 = root_to_focus_labels[root_to_focus_labels.len() - shown..]
+            .iter()
+            .map(|label| PATH_SEPARATOR_SIZE + generous_crumb_width(label))
+            .sum();
+        generous_crumb_width(&root_to_focus_labels[0]) + ellipsis + tail
+    };
+    let most = after_root.min(BREADCRUMBS_AFTER_ELLIPSIS);
+    (1..=most).rev().find(|&shown| width_with_last(shown) <= available_width).unwrap_or(most.min(1))
+}
+
+fn breadcrumbs_that_fit(b: &Browser, available_width: f32) -> Element<'_, Message> {
     let mut root_to_focus: Vec<NodeId> = b.tree.ancestors(b.focus).collect();
     root_to_focus.reverse();
-    let crumb_for = |id: NodeId| {
-        crumb(truncate(&b.tree.name(id), CRUMB_NAME_MAX_CHARS), (id != b.focus).then_some(Message::Navigate(id)))
-    };
+    let labels: Vec<String> =
+        root_to_focus.iter().map(|&id| truncate(&b.tree.name(id), CRUMB_NAME_MAX_CHARS)).collect();
+    let link_unless_focus = |id: NodeId| (id != b.focus).then_some(Message::Navigate(id));
 
-    let first_after_ellipsis = root_to_focus.len().saturating_sub(BREADCRUMBS_AFTER_ELLIPSIS).max(1);
-    let mut crumbs = row![crumb_for(root_to_focus[0])].align_y(Alignment::Center);
+    let first_after_ellipsis = root_to_focus.len() - crumbs_after_the_root_that_fit(&labels, available_width);
+    let mut crumbs = row![crumb(labels[0].clone(), link_unless_focus(root_to_focus[0]))].align_y(Alignment::Center);
     if first_after_ellipsis > 1 {
         let deepest_hidden = root_to_focus[first_after_ellipsis - 1];
-        crumbs = crumbs.push(path_separator()).push(crumb("…".to_string(), Some(Message::Navigate(deepest_hidden))));
+        crumbs =
+            crumbs.push(path_separator()).push(crumb(ELLIPSIS.to_string(), Some(Message::Navigate(deepest_hidden))));
     }
-    for &id in &root_to_focus[first_after_ellipsis..] {
-        crumbs = crumbs.push(path_separator()).push(crumb_for(id));
+    for (index, &id) in root_to_focus.iter().enumerate().skip(first_after_ellipsis) {
+        crumbs = crumbs.push(path_separator()).push(crumb(labels[index].clone(), link_unless_focus(id)));
     }
     crumbs.into()
 }
@@ -445,7 +483,7 @@ fn chart_panel(b: &Browser) -> Element<'_, Message> {
     .width(Fill)
     .height(Fill);
 
-    column![chart, collector(b)].spacing(10).width(Length::FillPortion(3)).into()
+    column![chart, collector(b)].spacing(10).width(Length::FillPortion(CHART_SIDE_PORTION)).into()
 }
 
 const COLLECTOR_FIXED_HEIGHT: f32 = 72.0;
@@ -607,8 +645,9 @@ fn list_panel(b: &Browser) -> Element<'_, Message> {
     }
 
     container(column![header, scrollable(rows).height(Fill).spacing(4)].spacing(12))
+        .id(LIST_PANEL_ID)
         .padding(14)
-        .width(Length::FillPortion(2))
+        .width(Length::FillPortion(LIST_SIDE_PORTION))
         .height(Fill)
         .style(|_| rounded_box(theme::PANEL, 10.0))
         .into()

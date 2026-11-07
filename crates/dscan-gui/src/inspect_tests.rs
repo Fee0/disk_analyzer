@@ -6,7 +6,7 @@ use iced_test::{Error, Simulator};
 
 use crate::app::{App, Browser, Message, Screen};
 use crate::iced_inspect as ui_inspect;
-use crate::theme;
+use crate::{theme, view};
 
 const VIEW: (f32, f32) = (1280.0, 820.0);
 const OUT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/iced-inspect");
@@ -118,7 +118,7 @@ fn deliver_search_result_without_its_thread(app: &mut App, query: &str) {
 }
 
 fn sim(app: &App) -> Simulator<'_, Message> {
-    Simulator::with_size(Settings::default(), VIEW, crate::view::view(app))
+    Simulator::with_size(Settings::default(), VIEW, view::view(app))
 }
 
 #[test]
@@ -197,6 +197,47 @@ fn bounds_of_text(ui: &mut Simulator<'_, Message>, label: &str) -> iced::Rectang
 
 fn descend(tree: &dscan_core::Tree, names: &[&str]) -> dscan_core::NodeId {
     names.iter().fold(tree.root(), |at, name| tree.children(at).find(|&c| tree.name(c) == *name).expect(name))
+}
+
+#[test]
+fn toolbar_lines_up_with_the_file_list_and_a_long_path_stops_before_it() -> Result<(), Error> {
+    let dir = tempfile::tempdir().unwrap();
+    let chain =
+        ["a-rather-long-folder-name", "another-long-folder-name", "and-one-more-long-folder", "deeper", "deepest"];
+    let deepest = chain.iter().fold(dir.path().to_path_buf(), |p, name| p.join(name));
+    std::fs::create_dir_all(&deepest).unwrap();
+    std::fs::write(deepest.join("file.bin"), vec![0u8; 50_000]).unwrap();
+    let mut app = browser_app(dir.path());
+    let deepest = descend(&browser(&app).tree, &chain);
+    let _ = app.update(Message::Navigate(deepest));
+
+    let mut ui = sim(&app);
+    println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, "toolbar-aligned")?.display());
+    let nodes = ui_inspect::nodes(&mut ui);
+    let bounds_of =
+        |id: &str| nodes.iter().find(|n| n.id.as_deref() == Some(id)).unwrap_or_else(|| panic!("no {id}")).bounds;
+    let (toolbar_list_side, list) = (bounds_of(view::TOOLBAR_LIST_SIDE_ID), bounds_of(view::LIST_PANEL_ID));
+    assert_eq!(toolbar_list_side.x, list.x, "Rescan starts where the file list starts");
+    assert_eq!(
+        toolbar_list_side.x + toolbar_list_side.width,
+        list.x + list.width,
+        "search ends where the file list ends"
+    );
+    let path_bar = bounds_of(view::PATH_BAR_ID);
+    assert!(path_bar.x + path_bar.width < list.x, "the path bar stops before the file list: {path_bar:?} vs {list:?}");
+    let current = nodes
+        .iter()
+        .find(|n| n.text.as_deref() == Some("deepest"))
+        .expect("the current folder is in the path bar")
+        .bounds;
+    assert!(
+        current.x + current.width <= path_bar.x + path_bar.width,
+        "the current folder is not cut off: {current:?} vs {path_bar:?}"
+    );
+    assert!(nodes.iter().any(|n| n.text.as_deref() == Some("…")), "folders that don't fit fold into the ellipsis");
+    let search = nodes.iter().find(|n| n.kind == "text_input").expect("search field").bounds;
+    assert_eq!(search.x + search.width, list.x + list.width, "the search field takes the rest of the width");
+    Ok(())
 }
 
 #[test]
