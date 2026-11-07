@@ -497,6 +497,7 @@ const SEARCH_PLACEHOLDER_WITH_SHORTCUT: &str =
 
 const BACK_TOOLTIP: &str = if cfg!(target_os = "macos") { "Back  ⌘[" } else { "Back  Ctrl+[" };
 const FORWARD_TOOLTIP: &str = if cfg!(target_os = "macos") { "Forward  ⌘]" } else { "Forward  Ctrl+]" };
+const RESCAN_TOOLTIP: &str = if cfg!(target_os = "macos") { "Scan again  ⌘R" } else { "Scan again  F5" };
 
 const NAV_ICON_SIZE: f32 = 16.0;
 const DISABLED_ICON_STRENGTH: f32 = 0.4;
@@ -521,7 +522,7 @@ fn toolbar(b: &Browser) -> Element<'_, Message> {
     let nav = framed_group(
         row![
             nav_icon_button(icon::home, "Start page", Some(Message::GoHome)),
-            nav_icon_button(icon::chevron_left, BACK_TOOLTIP, b.can_back().then_some(Message::Back)),
+            nav_icon_button(icon::chevron_left, BACK_TOOLTIP, Some(Message::Back)),
             nav_icon_button(icon::chevron_right, FORWARD_TOOLTIP, b.can_forward().then_some(Message::Forward)),
         ]
         .spacing(2),
@@ -537,11 +538,14 @@ fn toolbar(b: &Browser) -> Element<'_, Message> {
 
     let chart_side =
         row![nav, path_bar(b)].spacing(8).align_y(Alignment::Center).width(Length::FillPortion(CHART_SIDE_PORTION));
-    let list_side =
-        container(row![outlined_text_button("Rescan", Message::Rescan), search].spacing(8).align_y(Alignment::Center))
-            .id(TOOLBAR_LIST_SIDE_ID)
-            .width(Length::FillPortion(LIST_SIDE_PORTION));
+    let list_side = container(row![rescan_button(), search].spacing(8).align_y(Alignment::Center))
+        .id(TOOLBAR_LIST_SIDE_ID)
+        .width(Length::FillPortion(LIST_SIDE_PORTION));
     row![chart_side, list_side].spacing(PANEL_GAP).align_y(Alignment::Center).into()
+}
+
+fn rescan_button<'a>() -> Element<'a, Message> {
+    with_tooltip(outlined_text_button("Rescan", Message::Rescan), RESCAN_TOOLTIP)
 }
 
 fn framed_text_input(t: &Theme, status: text_input::Status) -> text_input::Style {

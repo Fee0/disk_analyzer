@@ -331,6 +331,84 @@ fn keyboard_navigation() {
 }
 
 #[test]
+fn the_start_page_is_one_step_back_from_the_results_root() -> Result<(), Error> {
+    use iced::keyboard::Key;
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = browser_app(dir.path());
+    let root = browser(&app).tree.root();
+    let movies = descend(&browser(&app).tree, &["Movies"]);
+    let _ = app.update(Message::Navigate(movies));
+
+    let _ = app.update(Message::Back);
+    assert_eq!(browser(&app).focus, root, "back walks the folder history first");
+    let msgs: Vec<Message> = {
+        let mut ui = sim(&app);
+        let back_button = toolbar_icon_buttons_left_to_right(&mut ui)[1];
+        ui_inspect::click_at(&mut ui, (back_button.center_x(), back_button.center_y()));
+        ui.into_messages().collect()
+    };
+    assert!(matches!(msgs[..], [Message::Back]), "back stays clickable at the results root: {msgs:?}");
+    for m in msgs {
+        let _ = app.update(m);
+    }
+    assert!(matches!(app.screen, Screen::Start { scan: None }), "back from the root shows the start page");
+    assert_eq!(app.parked_newest_first.len(), 1, "the results stay open");
+    let _ = app.update(Message::Back);
+    assert!(matches!(app.screen, Screen::Start { scan: None }), "nothing comes before the start page");
+
+    let _ = app.update(Message::Forward);
+    let b = browser(&app);
+    assert_eq!(b.focus, root, "forward returns to the results where they were left");
+    assert!(app.parked_newest_first.is_empty());
+    let _ = app.update(Message::Forward);
+    assert_eq!(browser(&app).focus, movies, "the results keep their own forward history");
+
+    key(&mut app, Key::Character("[".into()), true);
+    key(&mut app, Key::Character("[".into()), true);
+    assert!(matches!(app.screen, Screen::Start { scan: None }), "Cmd-[ steps back to the start page too");
+    key(&mut app, Key::Character("]".into()), true);
+    assert_eq!(browser(&app).focus, root, "and Cmd-] steps forward into the results again");
+
+    let _ = app.update(Message::GoHome);
+    let _ = app.update(Message::CloseParked(0));
+    let _ = app.update(Message::Forward);
+    assert!(matches!(app.screen, Screen::Start { scan: None }), "closed results can't be stepped into");
+    Ok(())
+}
+
+fn toolbar_icon_buttons_left_to_right(ui: &mut Simulator<'_, Message>) -> Vec<iced::Rectangle> {
+    let toolbar_bottom = bounds_of_text(ui, "Rescan").y + TOOLBAR_DEPTH_BELOW_RESCAN_LABEL;
+    let mut squares: Vec<iced::Rectangle> = ui_inspect::nodes(ui)
+        .into_iter()
+        .map(|n| n.bounds)
+        .filter(|b| b.width == b.height && b.width >= MIN_ICON_BUTTON_SIDE && b.y < toolbar_bottom)
+        .collect();
+    squares.sort_by(|a, b| a.x.total_cmp(&b.x));
+    squares.dedup_by(|a, b| a.x == b.x);
+    assert!(squares.len() >= 3, "the toolbar has home, back and forward buttons: {squares:?}");
+    squares
+}
+
+const TOOLBAR_DEPTH_BELOW_RESCAN_LABEL: f32 = 20.0;
+const MIN_ICON_BUTTON_SIDE: f32 = 20.0;
+
+#[test]
+fn f5_or_cmd_r_scans_the_shown_results_again() {
+    use iced::keyboard::{Key, key::Named};
+    let dir = tempfile::tempdir().unwrap();
+    for (shortcut, cmd) in [(Key::Named(Named::F5), false), (Key::Character("r".into()), true)] {
+        let mut app = browser_app(dir.path());
+        let shown_root = browser(&app).opts.root.clone();
+        key(&mut app, shortcut.clone(), cmd);
+        let job = app.scan().unwrap_or_else(|| panic!("{shortcut:?} starts a scan"));
+        assert_eq!(job.opts.root, shown_root, "{shortcut:?} rescans what was shown");
+    }
+    let mut app = browser_app(dir.path());
+    key(&mut app, Key::Character("r".into()), false);
+    assert!(app.scan().is_none(), "a plain R is not a rescan");
+}
+
+#[test]
 fn drag_to_collector() {
     use dscan_core::Segment;
     use iced::Point;

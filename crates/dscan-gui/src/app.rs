@@ -57,6 +57,7 @@ pub struct App {
     pub full_disk_access: bool,
     pub error: Option<String>,
     pub parked_newest_first: Vec<Browser>,
+    stepped_back_from_newest_parked: bool,
     next_job: u64,
 }
 
@@ -227,6 +228,7 @@ impl App {
             full_disk_access: true,
             error: None,
             parked_newest_first: Vec::new(),
+            stepped_back_from_newest_parked: false,
             next_job: 1,
         };
         let load = Self::load_volumes();
@@ -254,10 +256,11 @@ impl App {
 
     pub fn subscription(&self) -> Subscription<Message> {
         match &self.screen {
-            Screen::Start { scan: Some(job) } if !job.cancel.is_paused() => {
-                iced::time::every(SCAN_PROGRESS_REFRESH).map(|_| Message::ScanProgressTick)
-            }
-            Screen::Start { .. } => Subscription::none(),
+            Screen::Start { scan: Some(job) } if !job.cancel.is_paused() => Subscription::batch([
+                event::listen_with(global_event),
+                iced::time::every(SCAN_PROGRESS_REFRESH).map(|_| Message::ScanProgressTick),
+            ]),
+            Screen::Start { .. } => event::listen_with(global_event),
             Screen::Browse(b) => {
                 let mut subscriptions = vec![event::listen_with(global_event)];
                 if b.drag.is_some() {
@@ -299,6 +302,7 @@ impl App {
             off_thread(move || *slot.lock() = Some(dscan_core::scan(&opts, &progress, &cancel)))
         };
         self.error = None;
+        self.stepped_back_from_newest_parked = false;
         let job = ScanJob { id, opts, progress, cancel, snapshot: ProgressSnapshot::default(), result_slot };
         if let Screen::Browse(b) = std::mem::replace(&mut self.screen, Screen::Start { scan: Some(job) }) {
             drop_off_thread(vec![*b]);
@@ -365,22 +369,22 @@ impl App {
                     }
                 }
             }
-            Message::GoHome if matches!(self.screen, Screen::Browse(_)) => {
-                if let Screen::Browse(mut b) = std::mem::replace(&mut self.screen, Screen::Start { scan: None }) {
-                    b.drag = None;
-                    self.parked_newest_first.insert(0, *b);
-                }
-                self.error = None;
-                return Self::load_volumes();
-            }
-            Message::ResumeParked(i) => {
-                if matches!(self.screen, Screen::Start { .. }) && i < self.parked_newest_first.len() {
-                    self.screen = Screen::Browse(Box::new(self.parked_newest_first.remove(i)));
+            Message::GoHome => return self.go_home(),
+            Message::Back if matches!(&self.screen, Screen::Browse(b) if !b.can_back()) => return self.go_home(),
+            Message::Forward if matches!(self.screen, Screen::Start { scan: None }) => {
+                if self.stepped_back_from_newest_parked {
+                    self.resume_parked(0);
                 }
             }
+            Message::Key(key, mods) => match navigation_shortcut(key.as_ref(), mods.command()) {
+                Some(navigation) => return self.update(navigation),
+                None => return self.update_browser(Message::Key(key, mods)),
+            },
+            Message::ResumeParked(i) => self.resume_parked(i),
             Message::CloseParked(i) => {
                 if i < self.parked_newest_first.len() {
                     drop_off_thread(vec![self.parked_newest_first.remove(i)]);
+                    self.stepped_back_from_newest_parked &= i != 0;
                 }
             }
             Message::Rescan => {
@@ -389,13 +393,34 @@ impl App {
                     return self.start_scan(opts);
                 }
             }
-            other => {
-                if let Screen::Browse(b) = &mut self.screen {
-                    return b.update(other);
-                }
-            }
+            other => return self.update_browser(other),
         }
         Task::none()
+    }
+
+    fn update_browser(&mut self, message: Message) -> Task<Message> {
+        match &mut self.screen {
+            Screen::Browse(b) => b.update(message),
+            Screen::Start { .. } => Task::none(),
+        }
+    }
+
+    fn go_home(&mut self) -> Task<Message> {
+        let Screen::Browse(mut b) = std::mem::replace(&mut self.screen, Screen::Start { scan: None }) else {
+            return Task::none();
+        };
+        b.drag = None;
+        self.parked_newest_first.insert(0, *b);
+        self.stepped_back_from_newest_parked = true;
+        self.error = None;
+        Self::load_volumes()
+    }
+
+    fn resume_parked(&mut self, i: usize) {
+        if matches!(self.screen, Screen::Start { .. }) && i < self.parked_newest_first.len() {
+            self.screen = Screen::Browse(Box::new(self.parked_newest_first.remove(i)));
+            self.stepped_back_from_newest_parked = false;
+        }
     }
 
     fn drop_parked_results_superseded_by(&mut self, fresh: &Tree) {
@@ -408,7 +433,7 @@ impl App {
 }
 
 fn is_cmd_shortcut_a_text_field_has_no_use_for(key: &Key, modifiers: keyboard::Modifiers) -> bool {
-    modifiers.command() && matches!(key.as_ref(), Key::Character("f" | "[" | "]"))
+    modifiers.command() && matches!(key.as_ref(), Key::Character("f" | "r" | "[" | "]"))
 }
 
 fn global_event(event: iced::Event, status: event::Status, _window: iced::window::Id) -> Option<Message> {
@@ -432,14 +457,22 @@ fn drag_event(event: iced::Event, _status: event::Status, _window: iced::window:
     }
 }
 
-fn shortcut_message(key: Key<&str>, cmd: bool) -> Option<Message> {
+fn navigation_shortcut(key: Key<&str>, cmd: bool) -> Option<Message> {
     Some(match key {
-        Key::Named(Named::ArrowUp) if cmd => Message::GoUp,
         Key::Named(Named::Backspace) if !cmd => Message::Back,
         Key::Named(Named::BrowserBack) => Message::Back,
         Key::Named(Named::BrowserForward) => Message::Forward,
         Key::Character("[") if cmd => Message::Back,
         Key::Character("]") if cmd => Message::Forward,
+        Key::Named(Named::F5) | Key::Named(Named::BrowserRefresh) => Message::Rescan,
+        Key::Character("r") if cmd => Message::Rescan,
+        _ => return None,
+    })
+}
+
+fn shortcut_message(key: Key<&str>, cmd: bool) -> Option<Message> {
+    Some(match key {
+        Key::Named(Named::ArrowUp) if cmd => Message::GoUp,
         Key::Character("f") if cmd => Message::FocusSearch,
         Key::Character("c") if !cmd => Message::CollectSelected,
         Key::Named(Named::Space) if !cmd => Message::Preview,
@@ -491,7 +524,7 @@ impl Browser {
     }
 
     pub fn can_back(&self) -> bool {
-        !self.history.is_empty()
+        self.history.iter().any(|&id| self.is_still_reachable_history_entry(id))
     }
 
     pub fn can_forward(&self) -> bool {
