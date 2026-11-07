@@ -61,7 +61,7 @@ tempfile = { version = "3", default-features = false }
 iced_test = { version = "0.14", default-features = false }
 
 [profile.release]
-lto = "fat"
+lto = "thin"
 codegen-units = 1
 strip = true
 
@@ -73,34 +73,3 @@ strip = false
 
 [profile.dev.package."*"]
 opt-level = 2
-
-# Code that runs once at startup (shader translation, SVG icon parsing) or never
-# (raster decoders pulled in by resvg) is optimised for size; hot paths stay at -O3.
-[profile.release.package.naga]
-opt-level = "s"
-[profile.release.package.usvg]
-opt-level = "s"
-[profile.release.package.resvg]
-opt-level = "s"
-[profile.release.package.roxmltree]
-opt-level = "s"
-[profile.release.package.image-webp]
-opt-level = "s"
-[profile.release.package.zune-jpeg]
-opt-level = "s"
-[profile.release.package.gif]
-opt-level = "s"
-[profile.release.package.png]
-opt-level = "s"
-[profile.release.package.rustybuzz]
-opt-level = "s"
-[profile.release.package.svgtypes]
-opt-level = "s"
-[profile.release.package.simplecss]
-opt-level = "s"
-[profile.release.package.imagesize]
-opt-level = "s"
-[profile.release.package.fdeflate]
-opt-level = "s"
-[profile.release.package.codespan-reporting]
-opt-level = "s"
