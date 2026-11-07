@@ -50,6 +50,7 @@ jobs:
           cp "target/release/$BIN" packaging/linux/disk-analyzer.desktop packaging/linux/install.sh README.md LICENSE "$PACKAGE/"
           cp assets/icon/icon-256.png "$PACKAGE/disk-analyzer.png"
           cp assets/icon/icon.svg "$PACKAGE/disk-analyzer.svg"
+          chmod +x "$PACKAGE/$BIN" "$PACKAGE/install.sh"
           tar czf "$PACKAGE.tar.gz" "$PACKAGE"
       - uses: actions/upload-artifact@v4
         with:
