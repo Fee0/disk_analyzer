@@ -746,6 +746,41 @@ fn collected_items_are_listed_only_after_clicking_the_collector() -> Result<(), 
     Ok(())
 }
 
+const LONG_FAILURE: &str = "Reveal in Explorer failed for “an-extremely-long-folder-name”: the system could not find the file specified, and nothing else could be opened in its place.";
+
+#[test]
+fn messages_float_over_the_chart_instead_of_a_status_line() -> Result<(), Error> {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = browser_app(dir.path());
+    {
+        let mut ui = sim(&app);
+        let texts = texts_on_screen(&mut ui);
+        assert!(
+            !texts.iter().any(|t| t.contains("scanned in") || t.contains(" files in ")),
+            "no status line repeats the scan's counts: {texts:?}"
+        );
+    }
+
+    let _ = app.update(Message::DesktopActionFinished { failure: Some(LONG_FAILURE.to_string()) });
+    let msgs = {
+        let mut ui = sim(&app);
+        let chart_side = list_panel_left(&mut ui);
+        let message = bounds_of_text(&mut ui, LONG_FAILURE);
+        assert!(message.x + message.width < chart_side, "the notice floats over the chart: {message:?}");
+        assert!(message.y < VIEW.1 / 4.0, "the notice sits at the top of the chart: {message:?}");
+        println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, "notice")?.display());
+        let dismiss = remove_button_beside(&mut ui, LONG_FAILURE);
+        ui_inspect::click_at(&mut ui, dismiss);
+        clicks_only(ui.into_messages())
+    };
+    assert!(matches!(msgs[..], [Message::DismissNotice]), "the notice's close button dismisses it: {msgs:?}");
+    for m in msgs {
+        let _ = app.update(m);
+    }
+    assert!(!texts_on_screen(&mut sim(&app)).iter().any(|t| t == LONG_FAILURE), "a dismissed notice is gone");
+    Ok(())
+}
+
 fn collect_through_the_ui(app: &mut App, names: &[&str]) {
     for name in names {
         let id = descend(&browser(app).tree, &[name]);
@@ -817,6 +852,9 @@ fn every_screen_stays_readable_from_the_default_window_down_to_the_minimum_size(
     );
     let _ = collected_list_open.update(Message::ToggleCollectedList);
 
+    let mut long_notice = browser_app(dir.path());
+    let _ = long_notice.update(Message::DesktopActionFinished { failure: Some(LONG_FAILURE.to_string()) });
+
     let mut long_file_selected = browser_app(dir.path());
     let long_folder = descend(&browser(&long_file_selected).tree, &[long_name]);
     select(&mut long_file_selected, long_folder);
@@ -835,6 +873,7 @@ fn every_screen_stays_readable_from_the_default_window_down_to_the_minimum_size(
         ("confirm", &confirming_trash),
         ("collected-list", &collected_list_open),
         ("selected", &long_file_selected),
+        ("notice", &long_notice),
         ("hidden", &hidden_space_explained),
     ];
     let mut problems = Vec::new();

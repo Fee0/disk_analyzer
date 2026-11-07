@@ -146,7 +146,7 @@ pub struct Browser {
     removal_waiting_for_tree: Option<PendingRemoval>,
     pub(crate) delete_hold_started: Option<Instant>,
     pub drag: Option<PendingDrag>,
-    pub status: Option<String>,
+    pub notice: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -195,7 +195,7 @@ pub enum Message {
     GoHome,
     ResumeParked(usize),
     CloseParked(usize),
-    DismissStatus,
+    DismissNotice,
     Preview,
     Reveal,
     DesktopActionFinished { failure: Option<String> },
@@ -467,7 +467,7 @@ impl Browser {
             removal_waiting_for_tree: None,
             delete_hold_started: None,
             drag: None,
-            status: None,
+            notice: None,
         };
         b.relayout();
         b.sync_list();
@@ -677,7 +677,7 @@ impl Browser {
         match self.collector.add(&self.tree, id) {
             Ok(()) => self.collector_changed(),
             Err(Refusal::Protected) => {
-                self.status = Some(format!(
+                self.notice = Some(format!(
                     "“{}” is a protected system location and can't be moved to the {TRASH_NAME}.",
                     truncate(&self.tree.name(id), 40)
                 ))
@@ -753,7 +753,7 @@ impl Browser {
         if let Some((_, err)) = report.failed.first() {
             msg.push_str(&format!(" {} failed: {err}", report.failed.len()));
         }
-        self.status = Some(msg);
+        self.notice = Some(msg);
         self.focus = self.tree.nearest_live(self.focus);
         self.selected = self.selected.filter(|&s| self.tree.is_live(s));
         self.search_gen += 1;
@@ -899,10 +899,10 @@ impl Browser {
                 self.delete_hold_started = None;
                 return self.remove_collected(Removal::DeletePermanently);
             }
-            Message::DismissStatus => self.status = None,
+            Message::DismissNotice => self.notice = None,
             Message::Preview => return self.hand_selection_to_desktop(PREVIEW_ACTION, desktop::preview),
             Message::Reveal => return self.hand_selection_to_desktop(REVEAL_ACTION, desktop::reveal),
-            Message::DesktopActionFinished { failure: Some(why) } => self.status = Some(why),
+            Message::DesktopActionFinished { failure: Some(why) } => self.notice = Some(why),
             _ => {}
         }
         Task::none()
@@ -979,7 +979,7 @@ mod tests {
         assert!(!dir.path().join("Movies").exists());
         assert!(!b.tree.is_live(movies) && b.collector.is_empty());
         assert!(b.delete_hold_started.is_none());
-        assert!(b.status.as_deref().is_some_and(|s| s.starts_with("Deleted 1 item permanently")), "{:?}", b.status);
+        assert!(b.notice.as_deref().is_some_and(|s| s.starts_with("Deleted 1 item permanently")), "{:?}", b.notice);
     }
 
     #[test]
@@ -1050,15 +1050,15 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_desktop_action_is_reported_in_the_status_bar() {
+    fn a_failed_desktop_action_is_reported_in_a_notice() {
         let dir = tempfile::tempdir().unwrap();
         let mut b = browser(dir.path());
         let failure = Some("Quick Look failed for “a.mov”: not found".to_string());
         let _ = b.update(Message::DesktopActionFinished { failure: failure.clone() });
-        assert_eq!(b.status, failure);
-        let _ = b.update(Message::DismissStatus);
+        assert_eq!(b.notice, failure);
+        let _ = b.update(Message::DismissNotice);
         let _ = b.update(Message::DesktopActionFinished { failure: None });
-        assert_eq!(b.status, None, "success needs no message");
+        assert_eq!(b.notice, None, "success needs no message");
     }
 
     #[test]

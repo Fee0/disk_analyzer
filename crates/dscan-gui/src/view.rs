@@ -489,7 +489,7 @@ pub const LIST_PANEL_ID: &str = "list-panel";
 pub const PATH_BAR_ID: &str = "path-bar";
 
 fn browse(b: &Browser) -> Element<'_, Message> {
-    let main = column![toolbar(b), row![chart_panel(b), list_panel(b)].spacing(PANEL_GAP).height(Fill), status_bar(b)]
+    let main = column![toolbar(b), row![chart_panel(b), list_panel(b)].spacing(PANEL_GAP).height(Fill)]
         .spacing(10)
         .padding(12);
 
@@ -668,10 +668,41 @@ fn chart_panel(b: &Browser) -> Element<'_, Message> {
         column![chart, Space::new().height(COLLECTOR_FIXED_HEIGHT)].spacing(CHART_COLLECTOR_GAP);
     let collector_floating_over_the_chart =
         responsive(move |size| column![Space::new().height(Fill), collector(b, size)].into());
-    stack![chart_above_the_collector, collector_floating_over_the_chart]
-        .width(Length::FillPortion(CHART_SIDE_PORTION))
-        .height(Fill)
-        .into()
+    let mut layers = stack![chart_above_the_collector, collector_floating_over_the_chart];
+    if let Some(message) = &b.notice {
+        layers = layers.push(container(notice(message)).width(Fill).padding(NOTICE_MARGIN).align_x(Alignment::Center));
+    }
+    layers.width(Length::FillPortion(CHART_SIDE_PORTION)).height(Fill).into()
+}
+
+const NOTICE_MARGIN: f32 = 8.0;
+const NOTICE_MAX_WIDTH: f32 = 560.0;
+const NOTICE_TEXT_SIZE: f32 = 14.0;
+const NOTICE_LINE_SPACING: f32 = 1.5;
+const NOTICE_PADDING: [f32; 2] = [8.0, 12.0];
+const NOTICE_SPACING: f32 = 10.0;
+const NOTICE_RADIUS: f32 = 10.0;
+const NOTICE_DISMISS_ICON: f32 = 12.0;
+const NOTICE_DISMISS_PADDING: f32 = 5.0;
+
+fn notice(message: &str) -> Element<'_, Message> {
+    let dismiss = button(icon::close(NOTICE_DISMISS_ICON, theme::TEXT_DIM))
+        .padding(NOTICE_DISMISS_PADDING)
+        .style(quiet_button_style(theme::TEXT_DIM))
+        .on_press(Message::DismissNotice);
+    container(
+        row![text(message).size(NOTICE_TEXT_SIZE).line_height(NOTICE_LINE_SPACING), dismiss]
+            .spacing(NOTICE_SPACING)
+            .align_y(Alignment::Center),
+    )
+    .padding(NOTICE_PADDING)
+    .max_width(NOTICE_MAX_WIDTH)
+    .style(|_| {
+        rounded_box(theme::PANEL_HI, NOTICE_RADIUS)
+            .border(border::rounded(NOTICE_RADIUS).width(1).color(theme::NEUTRAL_BUTTON))
+            .shadow(floating_shadow())
+    })
+    .into()
 }
 
 const CHART_COLLECTOR_GAP: f32 = 10.0;
@@ -696,8 +727,8 @@ const COLLECTED_ROW_TEXT_SIZE: f32 = 13.0;
 const COLLECTED_ROW_REMOVE_ICON: f32 = 12.0;
 const COLLECTED_ROW_REMOVE_PADDING: f32 = 5.0;
 const COLLECTED_ROW_REMOVE_WIDTH: f32 = COLLECTED_ROW_REMOVE_ICON + 2.0 * COLLECTED_ROW_REMOVE_PADDING;
-const OPEN_COLLECTOR_SHADOW_BLUR: f32 = 24.0;
-const OPEN_COLLECTOR_SHADOW_ALPHA: f32 = 0.5;
+const FLOATING_SHADOW_BLUR: f32 = 24.0;
+const FLOATING_SHADOW_ALPHA: f32 = 0.5;
 const HOLD_BUTTON_FULL_WIDTH: f32 = 228.0;
 const HOLD_BUTTON_COMPACT_WIDTH: f32 = 120.0;
 const HOLD_BUTTON_HEIGHT: f32 = 29.0;
@@ -803,16 +834,16 @@ fn collector(b: &Browser, layer: iced::Size) -> Element<'_, Message> {
         let edge = if dragging { 1.5 } else { 0.0 };
         let style = rounded_box(bg, COLLECTOR_RADIUS)
             .border(border::rounded(COLLECTOR_RADIUS).width(edge).color(theme::ACCENT.scale_alpha(0.8)));
-        if list_open { style.shadow(open_collector_shadow()) } else { style }
+        if list_open { style.shadow(floating_shadow()) } else { style }
     });
     mouse_area(zone).on_enter(Message::CollectorEnter).on_exit(Message::CollectorExit).into()
 }
 
-fn open_collector_shadow() -> iced::Shadow {
+fn floating_shadow() -> iced::Shadow {
     iced::Shadow {
-        color: Color::BLACK.scale_alpha(OPEN_COLLECTOR_SHADOW_ALPHA),
+        color: Color::BLACK.scale_alpha(FLOATING_SHADOW_ALPHA),
         offset: iced::Vector::ZERO,
-        blur_radius: OPEN_COLLECTOR_SHADOW_BLUR,
+        blur_radius: FLOATING_SHADOW_BLUR,
     }
 }
 
@@ -1266,79 +1297,4 @@ fn list_row<'a>(b: &'a Browser, r: &'a ListRow, columns: &ListColumns) -> Elemen
         .into()
 }
 
-const STATUS_BAR_HEIGHT: f32 = 24.0;
-const STATUS_TEXT_SIZE: f32 = 12.0;
-const STATUS_SPACING: f32 = 12.0;
-const STATUS_INNER_SPACING: f32 = 6.0;
-const STATUS_DISMISS_PADDING_X: f32 = 6.0;
 const SUBTLE_BUTTON_PADDING_X: f32 = 8.0;
-const FULL_DISK_ACCESS_BUTTON_LABEL: &str = "Full Disk Access…";
-
-fn status_bar(b: &Browser) -> Element<'_, Message> {
-    container(responsive(move |size| status_bar_content(b, size.width))).height(STATUS_BAR_HEIGHT).into()
-}
-
-fn status_bar_content(b: &Browser, width: f32) -> Element<'_, Message> {
-    let t = &b.tree;
-    if let Some(s) = &b.status {
-        let dismiss_width = generous_text_width("×", STATUS_TEXT_SIZE) + 2.0 * STATUS_DISMISS_PADDING_X;
-        let message_width = width - dismiss_width - STATUS_INNER_SPACING;
-        return row![
-            text(fit_width(s, message_width, STATUS_TEXT_SIZE))
-                .size(STATUS_TEXT_SIZE)
-                .color(theme::TEXT)
-                .wrapping(Wrapping::None),
-            button(text("×").size(STATUS_TEXT_SIZE))
-                .padding([0.0, STATUS_DISMISS_PADDING_X])
-                .style(button::text)
-                .on_press(Message::DismissStatus),
-        ]
-        .spacing(STATUS_INNER_SPACING)
-        .height(Fill)
-        .align_y(Alignment::Center)
-        .into();
-    }
-
-    let mut summary = format!(
-        "{} files in {} folders scanned in {:.1} s",
-        thousands(t.stats.files),
-        thousands(t.stats.dirs),
-        t.stats.duration.as_secs_f32()
-    );
-    if t.is_whole_disk() {
-        summary.push_str(&format!(
-            " · hidden {} · purgeable {}",
-            format_size(t.stats.hidden),
-            format_size(t.stats.purgeable)
-        ));
-    }
-    let mut bar = row![].spacing(STATUS_SPACING).height(Fill).align_y(Alignment::Center);
-    let mut unreadable_width = 0.0;
-    let mut unreadable = row![].spacing(STATUS_INNER_SPACING).align_y(Alignment::Center);
-    if t.stats.errors > 0 {
-        let couldnt_read = format!("{} folders couldn't be read", thousands(t.stats.errors));
-        unreadable_width += generous_text_width(&couldnt_read, STATUS_TEXT_SIZE) + STATUS_SPACING;
-        unreadable = unreadable.push(
-            text(couldnt_read).size(STATUS_TEXT_SIZE).color(theme::kind_color(Kind::Archive)).wrapping(Wrapping::None),
-        );
-        if dscan_core::FULL_DISK_ACCESS_SETTINGS.is_some() {
-            unreadable_width += STATUS_INNER_SPACING
-                + generous_text_width(FULL_DISK_ACCESS_BUTTON_LABEL, STATUS_TEXT_SIZE)
-                + 2.0 * SUBTLE_BUTTON_PADDING_X;
-            unreadable = unreadable.push(subtle_button(
-                text(FULL_DISK_ACCESS_BUTTON_LABEL).size(STATUS_TEXT_SIZE).wrapping(Wrapping::None),
-                Some(Message::OpenFdaSettings),
-            ));
-        }
-    }
-    bar = bar.push(clipped(
-        text(fit_width(&summary, width - unreadable_width, STATUS_TEXT_SIZE))
-            .size(STATUS_TEXT_SIZE)
-            .color(theme::TEXT_DIM)
-            .wrapping(Wrapping::None),
-    ));
-    if t.stats.errors > 0 {
-        bar = bar.push(unreadable);
-    }
-    bar.into()
-}
