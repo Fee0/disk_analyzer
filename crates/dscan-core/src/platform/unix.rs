@@ -4,6 +4,7 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use super::{DeviceId, DirEntry, SharedBlocks};
 
@@ -52,4 +53,10 @@ pub(super) fn path_bytes(path: &Path) -> Cow<'_, [u8]> {
 
 pub(super) fn os_str_from_bytes(bytes: &[u8]) -> Cow<'_, OsStr> {
     Cow::Borrowed(OsStr::from_bytes(bytes))
+}
+
+pub(super) fn run_until_done(program: &str, args: &[&OsStr]) -> io::Result<()> {
+    let status =
+        Command::new(program).args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status()?;
+    if status.success() { Ok(()) } else { Err(io::Error::other(format!("{program} failed ({status})"))) }
 }

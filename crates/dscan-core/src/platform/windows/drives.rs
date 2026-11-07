@@ -5,6 +5,7 @@ const DEFAULT_SYSTEM_DRIVE_LETTER: char = 'C';
 pub(super) const DRIVE_REMOVABLE: u32 = 2;
 pub(super) const DRIVE_FIXED: u32 = 3;
 pub(super) const DRIVE_REMOTE: u32 = 4;
+pub(super) const DRIVE_CDROM: u32 = 5;
 pub(super) const DRIVE_RAMDISK: u32 = 6;
 
 pub(super) fn letters_in(logical_drives_bitmask: u32) -> impl Iterator<Item = char> {
@@ -16,7 +17,7 @@ pub(super) fn root_of(letter: char) -> String {
 }
 
 pub(super) fn holds_browsable_files(drive_type: u32) -> bool {
-    matches!(drive_type, DRIVE_REMOVABLE | DRIVE_FIXED | DRIVE_REMOTE | DRIVE_RAMDISK)
+    matches!(drive_type, DRIVE_REMOVABLE | DRIVE_FIXED | DRIVE_REMOTE | DRIVE_CDROM | DRIVE_RAMDISK)
 }
 
 pub(super) fn display_name(label: &str, letter: char) -> String {
@@ -43,12 +44,12 @@ mod tests {
     }
 
     #[test]
-    fn optical_drives_and_unknown_types_are_not_offered() {
+    fn disks_shares_and_optical_drives_are_offered_but_unknown_types_are_not() {
         const DRIVE_UNKNOWN: u32 = 0;
         const DRIVE_NO_ROOT_DIR: u32 = 1;
-        const DRIVE_CDROM: u32 = 5;
-        assert!([DRIVE_FIXED, DRIVE_REMOVABLE, DRIVE_REMOTE, DRIVE_RAMDISK].into_iter().all(holds_browsable_files));
-        assert!(![DRIVE_UNKNOWN, DRIVE_NO_ROOT_DIR, DRIVE_CDROM].into_iter().any(holds_browsable_files));
+        let offered = [DRIVE_FIXED, DRIVE_REMOVABLE, DRIVE_REMOTE, DRIVE_CDROM, DRIVE_RAMDISK];
+        assert!(offered.into_iter().all(holds_browsable_files));
+        assert!(![DRIVE_UNKNOWN, DRIVE_NO_ROOT_DIR].into_iter().any(holds_browsable_files));
     }
 
     #[test]

@@ -14,10 +14,12 @@ use std::ffi::OsStr;
 use std::io;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::time::Duration;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::hidden::SpaceInfo;
+use crate::hidden::{SpaceExplanation, SpaceInfo};
 use crate::protection::ProtectedLocations;
 use crate::volumes::Volume;
 
@@ -81,6 +83,10 @@ pub(crate) trait Platform {
     const FULL_DISK_ACCESS_SETTINGS: Option<&'static str>;
     const PROTECTED: ProtectedLocations;
     const SYSTEM_FOLDERS_AT_SYSTEM_ROOT: &'static [&'static str];
+    const HIDDEN_SPACE: SpaceExplanation;
+    const PURGEABLE_SPACE: SpaceExplanation;
+    const PREVIEW_ACTION: &'static str;
+    const REVEAL_ACTION: &'static str;
 
     fn read_dir(path: &[u8], visit: impl FnMut(DirEntry<'_>)) -> io::Result<()>;
     fn device_of(path: &Path) -> io::Result<DeviceId>;
@@ -93,4 +99,16 @@ pub(crate) trait Platform {
     fn trash_context() -> trash::TrashContext;
     fn path_bytes(path: &Path) -> Cow<'_, [u8]>;
     fn os_str_from_bytes(bytes: &[u8]) -> Cow<'_, OsStr>;
+    fn would_run_a_program(path: &Path) -> bool;
+    fn preview(path: &Path) -> io::Result<()>;
+    fn reveal(path: &Path) -> io::Result<()>;
+}
+
+pub(crate) fn answered_within<T: Send + 'static>(
+    limit: Duration,
+    question: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    let (answer, answered) = mpsc::channel();
+    std::thread::spawn(move || answer.send(question()));
+    answered.recv_timeout(limit).ok()
 }

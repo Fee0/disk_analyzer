@@ -11,10 +11,20 @@ pub struct Volume {
     pub used: u64,
     pub available: u64,
     pub is_root: bool,
+    pub file_system: String,
+    pub is_network: bool,
+}
+
+pub(crate) struct MountedFileSystem {
+    pub name: String,
+    pub mount: PathBuf,
+    pub file_system: String,
+    pub is_network: bool,
 }
 
 impl Volume {
-    pub(crate) fn new(name: String, mount: PathBuf, space: &SpaceInfo, is_root: bool) -> Self {
+    pub(crate) fn new(mounted: MountedFileSystem, space: &SpaceInfo, is_root: bool) -> Self {
+        let MountedFileSystem { name, mount, file_system, is_network } = mounted;
         Volume {
             name,
             mount,
@@ -22,9 +32,13 @@ impl Volume {
             used: space.used,
             available: space.available_important.max(space.available),
             is_root,
+            file_system,
+            is_network,
         }
     }
 }
+
+pub(crate) const NETWORK_ANSWER_LIMIT: std::time::Duration = std::time::Duration::from_secs(2);
 
 pub fn list_volumes() -> Vec<Volume> {
     let mut volumes = Current::mounted_volumes();

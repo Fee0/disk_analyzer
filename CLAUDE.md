@@ -111,6 +111,7 @@ crates/dscan-core/src/
   layout.rs                    sunburst geometry + hit-testing
   volumes.rs, hidden.rs        volume list, hidden/purgeable split
   search.rs, actions.rs, protection.rs, kind.rs
+  desktop.rs                   preview (Quick Look / open) and reveal in the file manager
   examples/scan.rs             CLI for benchmarking
 crates/dscan-gui/src/
   app.rs      state, Message, update, subscriptions

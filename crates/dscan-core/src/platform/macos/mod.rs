@@ -1,11 +1,14 @@
 mod apfs;
 #[cfg(target_os = "macos")]
 mod bulk;
+mod file_systems;
 #[cfg(target_os = "macos")]
 mod mounts;
 mod protected;
 #[cfg(target_os = "macos")]
 mod space;
+#[cfg(target_os = "macos")]
+mod space_causes;
 
 #[cfg(target_os = "macos")]
 pub(crate) use system::MacOs;
@@ -17,13 +20,17 @@ mod system {
     use std::io;
     use std::path::{Path, PathBuf};
 
-    use super::{apfs, bulk, mounts, protected, space};
-    use crate::hidden::SpaceInfo;
+    use super::{apfs, bulk, mounts, protected, space, space_causes};
+    use crate::hidden::{SpaceExplanation, SpaceInfo};
     use crate::platform::{DeviceId, DirEntry, Platform, ScanBoundaries, ScanExtent, unix};
     use crate::protection::ProtectedLocations;
     use crate::volumes::Volume;
 
     const FIRMLINKS_FILE: &str = "/usr/share/firmlinks";
+    const QUICK_LOOK_TOOL: &str = "qlmanage";
+    const QUICK_LOOK_PREVIEW: &str = "-p";
+    const OPENER: &str = "open";
+    const REVEAL_IN_FINDER: &str = "-R";
 
     pub(crate) struct MacOs;
 
@@ -35,6 +42,10 @@ mod system {
         const PROTECTED: ProtectedLocations = protected::PROTECTED;
         const SYSTEM_FOLDERS_AT_SYSTEM_ROOT: &'static [&'static str] =
             &["System", "usr", "bin", "sbin", "private", "cores", "etc", "var"];
+        const HIDDEN_SPACE: SpaceExplanation = space_causes::HIDDEN_SPACE;
+        const PURGEABLE_SPACE: SpaceExplanation = space_causes::PURGEABLE_SPACE;
+        const PREVIEW_ACTION: &'static str = "Quick Look";
+        const REVEAL_ACTION: &'static str = "Show in Finder";
 
         fn read_dir(path: &[u8], visit: impl FnMut(DirEntry<'_>)) -> io::Result<()> {
             bulk::read_dir(path, visit)
@@ -91,6 +102,18 @@ mod system {
 
         fn os_str_from_bytes(bytes: &[u8]) -> Cow<'_, OsStr> {
             unix::os_str_from_bytes(bytes)
+        }
+
+        fn would_run_a_program(_path: &Path) -> bool {
+            false
+        }
+
+        fn preview(path: &Path) -> io::Result<()> {
+            unix::run_until_done(QUICK_LOOK_TOOL, &[OsStr::new(QUICK_LOOK_PREVIEW), path.as_os_str()])
+        }
+
+        fn reveal(path: &Path) -> io::Result<()> {
+            unix::run_until_done(OPENER, &[OsStr::new(REVEAL_IN_FINDER), path.as_os_str()])
         }
     }
 }

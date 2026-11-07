@@ -1,4 +1,6 @@
-use dscan_core::{Kind, NodeId, Segment, TRASH_NAME, format_size};
+use dscan_core::{
+    Kind, NodeId, PREVIEW_ACTION, REVEAL_ACTION, Remedy, Segment, SpaceExplanation, TRASH_NAME, Volume, format_size,
+};
 use iced::border;
 use iced::widget::text::Wrapping;
 use iced::widget::{
@@ -158,7 +160,7 @@ fn start_content(app: &App) -> Column<'_, Message> {
                     row![dot(theme::kind_color(Kind::Document), 12.0), text(v.name.clone()).size(20)]
                         .spacing(10)
                         .align_y(Alignment::Center),
-                    text(v.mount.display().to_string()).size(12).color(theme::TEXT_DIM),
+                    text(volume_details(v)).size(12).color(theme::TEXT_DIM),
                     progress_bar(0.0..=1.0, frac).girth(8),
                     text(format!("{} used of {}", format_size(v.used), format_size(v.total))).size(13),
                     text(format!("{} available", format_size(v.available))).size(12).color(theme::TEXT_DIM),
@@ -231,6 +233,19 @@ fn start_content(app: &App) -> Column<'_, Message> {
         col = col.push(container(text(err.clone()).color(theme::DANGER).size(14)).max_width(START_BLOCK_MAX_WIDTH));
     }
     col
+}
+
+const NETWORK_VOLUME_NOTE: &str = "network";
+
+fn volume_details(v: &Volume) -> String {
+    let mut details = v.mount.display().to_string();
+    for fact in [v.file_system.as_str(), if v.is_network { NETWORK_VOLUME_NOTE } else { "" }] {
+        if !fact.is_empty() {
+            details.push_str(" · ");
+            details.push_str(fact);
+        }
+    }
+    details
 }
 
 const RESULT_ROW_H: f32 = 56.0;
@@ -890,7 +905,7 @@ fn clipped<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message>
 }
 
 fn list_panel(b: &Browser) -> Element<'_, Message> {
-    container(responsive(move |size| list_panel_content(b, size.width)))
+    container(responsive(move |size| list_panel_content(b, size)))
         .id(LIST_PANEL_ID)
         .padding(LIST_PANEL_PADDING)
         .width(Length::FillPortion(LIST_SIDE_PORTION))
@@ -899,7 +914,8 @@ fn list_panel(b: &Browser) -> Element<'_, Message> {
         .into()
 }
 
-fn list_panel_content(b: &Browser, width: f32) -> Element<'_, Message> {
+fn list_panel_content(b: &Browser, panel_size: iced::Size) -> Element<'_, Message> {
+    let width = panel_size.width;
     let subject = b.listed_folder();
     let t = &b.tree;
 
@@ -942,7 +958,98 @@ fn list_panel_content(b: &Browser, width: f32) -> Element<'_, Message> {
         rows = rows.push(container(text("Empty").size(13).color(theme::TEXT_DIM)).padding(10));
     }
 
-    column![header, scrollable(rows).height(Fill).spacing(LIST_SCROLLBAR_GAP)].spacing(12).into()
+    let mut panel = column![header, scrollable(rows).height(Fill).spacing(LIST_SCROLLBAR_GAP)].spacing(12);
+    if let Some(details) = selection_details(b, panel_size) {
+        panel = panel.push(column![separator(), details].spacing(12));
+    }
+    panel.into()
+}
+
+const DETAILS_TITLE_TEXT_SIZE: f32 = 14.0;
+const DETAILS_TEXT_SIZE: f32 = 12.0;
+const DETAILS_SPACING: f32 = 8.0;
+const BULLET: &str = "•";
+const BULLET_SPACING: f32 = 6.0;
+const EXPLANATION_SHARE_OF_THE_PANEL: f32 = 0.5;
+const PREVIEW_SHORTCUT: &str = "Space";
+const OPEN_FULL_DISK_ACCESS_LABEL: &str = "Open Full Disk Access Settings";
+
+fn separator<'a>() -> Element<'a, Message> {
+    container(Space::new()).width(Fill).height(1).style(|_| container::background(theme::PANEL_HI)).into()
+}
+
+fn selection_details(b: &Browser, panel: iced::Size) -> Option<Element<'_, Message>> {
+    let id = b.selected?;
+    if let Some(explanation) = dscan_core::hidden::explain(&b.tree, id) {
+        return Some(unscanned_space_explanation(b, id, explanation, panel));
+    }
+    b.tree.is_actionable(id).then(|| selection_actions(b, id, panel.width))
+}
+
+fn selection_title(b: &Browser, id: NodeId, width: f32) -> Element<'_, Message> {
+    let size = format_size(b.size(id));
+    let name_width =
+        width - LIST_ROW_DOT - 2.0 * LIST_ROW_SPACING - generous_text_width(&size, DETAILS_TITLE_TEXT_SIZE);
+    row![
+        dot(theme::kind_color(b.tree.node(id).kind()), LIST_ROW_DOT),
+        clipped(
+            text(fit_width(&b.tree.name(id), name_width, DETAILS_TITLE_TEXT_SIZE))
+                .size(DETAILS_TITLE_TEXT_SIZE)
+                .wrapping(Wrapping::None)
+        ),
+        text(size).size(DETAILS_TITLE_TEXT_SIZE).wrapping(Wrapping::None),
+    ]
+    .spacing(LIST_ROW_SPACING)
+    .align_y(Alignment::Center)
+    .into()
+}
+
+fn selection_actions(b: &Browser, id: NodeId, width: f32) -> Element<'_, Message> {
+    let preview = tooltip(
+        outlined_text_button(PREVIEW_ACTION, Message::Preview),
+        tooltip_box(PREVIEW_SHORTCUT),
+        tooltip::Position::Top,
+    )
+    .gap(4);
+    let actions = row![preview, outlined_text_button(REVEAL_ACTION, Message::Reveal)].spacing(DETAILS_SPACING);
+    column![selection_title(b, id, width), actions].spacing(DETAILS_SPACING).into()
+}
+
+fn remedy_button<'a>(remedy: Remedy) -> Option<Element<'a, Message>> {
+    match remedy {
+        Remedy::GrantFullDiskAccess => dscan_core::FULL_DISK_ACCESS_SETTINGS
+            .map(|_| outlined_text_button(OPEN_FULL_DISK_ACCESS_LABEL, Message::OpenFdaSettings)),
+    }
+}
+
+fn details_text<'a>(content: impl text::IntoFragment<'a>) -> text::Text<'a, Theme> {
+    text(content).size(DETAILS_TEXT_SIZE)
+}
+
+fn unscanned_space_explanation(
+    b: &Browser,
+    id: NodeId,
+    explanation: SpaceExplanation,
+    panel: iced::Size,
+) -> Element<'_, Message> {
+    let mut body = column![details_text(explanation.summary).color(theme::TEXT_DIM)].spacing(DETAILS_SPACING);
+    let unreadable = b.tree.stats.errors;
+    if b.tree.node(id).kind() == Kind::Hidden && unreadable > 0 {
+        let note = format!("{} folders couldn't be read in this scan.", thousands(unreadable));
+        body = body.push(details_text(note).color(theme::kind_color(Kind::Archive)));
+    }
+    for cause in explanation.causes {
+        let mut item =
+            column![row![details_text(BULLET), details_text(cause.text).width(Fill)].spacing(BULLET_SPACING)]
+                .spacing(BULLET_SPACING);
+        if let Some(button) = cause.remedy.and_then(remedy_button) {
+            item = item.push(button);
+        }
+        body = body.push(item);
+    }
+    let body = container(scrollable(body).spacing(LIST_SCROLLBAR_GAP))
+        .max_height(panel.height * EXPLANATION_SHARE_OF_THE_PANEL);
+    column![selection_title(b, id, panel.width), body].spacing(DETAILS_SPACING).into()
 }
 
 fn list_row<'a>(b: &'a Browser, r: &'a ListRow, columns: &ListColumns) -> Element<'a, Message> {

@@ -1,11 +1,12 @@
 use std::any::Any;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use dscan_core::{
-    CancelToken, Collection, Exclusions, Layout, LayoutParams, NodeId, Progress, ProgressSnapshot, Refusal, Removal,
-    ScanError, ScanOptions, SearchResult, Segment, TRASH_NAME, Transition, Tree, Volume, actions, format_size,
+    CancelToken, Collection, DesktopError, Exclusions, Layout, LayoutParams, NodeId, PREVIEW_ACTION, Progress,
+    ProgressSnapshot, REVEAL_ACTION, Refusal, Removal, ScanError, ScanOptions, SearchResult, Segment, TRASH_NAME,
+    Transition, Tree, Volume, actions, desktop, format_size,
 };
 use iced::keyboard::{self, Key, key::Named};
 use iced::widget::canvas::Cache;
@@ -181,6 +182,9 @@ pub enum Message {
     ResumeParked(usize),
     CloseParked(usize),
     DismissStatus,
+    Preview,
+    Reveal,
+    DesktopActionFinished { failure: Option<String> },
 }
 
 impl App {
@@ -409,6 +413,7 @@ fn shortcut_message(key: Key<&str>, cmd: bool) -> Option<Message> {
         Key::Character("]") if cmd => Message::Forward,
         Key::Character("f") if cmd => Message::FocusSearch,
         Key::Character("c") if !cmd => Message::CollectSelected,
+        Key::Named(Named::Space) if !cmd => Message::Preview,
         _ => return None,
     })
 }
@@ -669,6 +674,26 @@ impl Browser {
         self.relayout_animated();
     }
 
+    fn hand_selection_to_desktop(
+        &self,
+        action_name: &'static str,
+        action: fn(&Path) -> Result<(), DesktopError>,
+    ) -> Task<Message> {
+        let Some(id) = self.selected.filter(|&s| self.tree.is_actionable(s)) else { return Task::none() };
+        let path = self.tree.path(id);
+        let name = truncate(&self.tree.name(id), 40);
+        Task::perform(off_thread(move || action(&path)), move |outcome| {
+            let why = match outcome {
+                Ok(Ok(())) => None,
+                Ok(Err(e)) => Some(e.to_string()),
+                Err(panic) => Some(panic),
+            };
+            Message::DesktopActionFinished {
+                failure: why.map(|why| format!("{action_name} failed for “{name}”: {why}")),
+            }
+        })
+    }
+
     fn wait_for_the_cancelled_search_to_report_done() -> Task<Message> {
         Task::none()
     }
@@ -848,6 +873,9 @@ impl Browser {
                 return self.remove_collected(Removal::DeletePermanently);
             }
             Message::DismissStatus => self.status = None,
+            Message::Preview => return self.hand_selection_to_desktop(PREVIEW_ACTION, desktop::preview),
+            Message::Reveal => return self.hand_selection_to_desktop(REVEAL_ACTION, desktop::reveal),
+            Message::DesktopActionFinished { failure: Some(why) } => self.status = Some(why),
             _ => {}
         }
         Task::none()
@@ -986,6 +1014,34 @@ mod tests {
         assert_eq!(b.focus, root);
         let _ = b.update(press(mouse::Button::Forward));
         assert_eq!(b.focus, movies);
+    }
+
+    #[test]
+    fn space_previews_the_selection_unless_a_modifier_is_held() {
+        assert!(matches!(shortcut_message(Key::Named(Named::Space), false), Some(Message::Preview)));
+        assert!(shortcut_message(Key::Named(Named::Space), true).is_none());
+    }
+
+    #[test]
+    fn a_failed_desktop_action_is_reported_in_the_status_bar() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut b = browser(dir.path());
+        let failure = Some("Quick Look failed for “a.mov”: not found".to_string());
+        let _ = b.update(Message::DesktopActionFinished { failure: failure.clone() });
+        assert_eq!(b.status, failure);
+        let _ = b.update(Message::DismissStatus);
+        let _ = b.update(Message::DesktopActionFinished { failure: None });
+        assert_eq!(b.status, None, "success needs no message");
+    }
+
+    #[test]
+    fn desktop_actions_need_a_real_selected_item() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut b = browser(dir.path());
+        b.selected = None;
+        assert!(b.hand_selection_to_desktop(PREVIEW_ACTION, |_| panic!("nothing is selected")).units() == 0);
+        b.selected = Some(b.tree.root());
+        assert!(b.hand_selection_to_desktop(REVEAL_ACTION, |_| panic!("the root is not an item")).units() == 0);
     }
 
     #[test]

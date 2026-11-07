@@ -599,6 +599,15 @@ fn every_screen_stays_readable_from_the_default_window_down_to_the_minimum_size(
     collect_through_the_ui(&mut confirming_trash, &["Movies"]);
     let _ = confirming_trash.update(Message::AskTrash);
 
+    let mut long_file_selected = browser_app(dir.path());
+    let long_folder = descend(&browser(&long_file_selected).tree, &[long_name]);
+    select(&mut long_file_selected, long_folder);
+
+    let whole_disk = tempfile::tempdir().unwrap();
+    let mut hidden_space_explained = whole_disk_scan_of(whole_disk.path());
+    let hidden = descend(&browser(&hidden_space_explained).tree, &[HIDDEN_SPACE_NAME]);
+    select(&mut hidden_space_explained, hidden);
+
     let screens = [
         ("start", &start),
         ("scanning", &scanning),
@@ -606,6 +615,8 @@ fn every_screen_stays_readable_from_the_default_window_down_to_the_minimum_size(
         ("holding", &holding_delete),
         ("long", &long_folder_with_unreadable_parts),
         ("confirm", &confirming_trash),
+        ("selected", &long_file_selected),
+        ("hidden", &hidden_space_explained),
     ];
     let mut problems = Vec::new();
     for (name, app) in screens {
@@ -623,4 +634,94 @@ fn every_screen_stays_readable_from_the_default_window_down_to_the_minimum_size(
 fn scanned_folder(path: &Path) -> Browser {
     let opts = ScanOptions::folder(path);
     Browser::new(dscan_core::scan(&opts, &Progress::default(), &CancelToken::default()).unwrap(), opts)
+}
+
+fn select(app: &mut App, id: dscan_core::NodeId) {
+    let _ = app.update(Message::Press(dscan_core::Segment::Node(id)));
+    let _ = app.update(Message::MouseReleased);
+}
+
+fn texts_on_screen(ui: &mut Simulator<'_, Message>) -> Vec<String> {
+    ui_inspect::nodes(ui).into_iter().filter_map(|n| n.text).collect()
+}
+
+fn whole_disk_scan_of(dir: &Path) -> App {
+    fixture(dir);
+    let opts = ScanOptions::volume(dir, "Test Disk");
+    let tree = dscan_core::scan(&opts, &Progress::default(), &CancelToken::default()).unwrap();
+    app_showing(Browser::new(tree, opts))
+}
+
+const HIDDEN_SPACE_NAME: &str = "Hidden space";
+
+#[test]
+fn a_selected_file_offers_preview_and_reveal_and_the_buttons_only_send_messages() -> Result<(), Error> {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = browser_app(dir.path());
+    let notes = descend(&browser(&app).tree, &["notes.txt"]);
+    select(&mut app, notes);
+    {
+        let mut ui = sim(&app);
+        println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, "selection-actions")?.display());
+    }
+    for (label, expected) in [(dscan_core::PREVIEW_ACTION, "Preview"), (dscan_core::REVEAL_ACTION, "Reveal")] {
+        let mut ui = sim(&app);
+        ui.click(label)?;
+        let msgs: Vec<Message> = ui.into_messages().collect();
+        let sent = msgs.iter().any(|m| match m {
+            Message::Preview => expected == "Preview",
+            Message::Reveal => expected == "Reveal",
+            _ => false,
+        });
+        assert!(sent, "{label} sends {expected}, which the test never runs: {msgs:?}");
+    }
+    let _ = app.update(Message::Deselect);
+    let mut ui = sim(&app);
+    assert!(!texts_on_screen(&mut ui).iter().any(|t| t == dscan_core::REVEAL_ACTION), "no selection, no actions");
+    Ok(())
+}
+
+#[test]
+fn selecting_hidden_space_explains_it_and_offers_the_fixes_this_os_has() -> Result<(), Error> {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = whole_disk_scan_of(dir.path());
+    let hidden = descend(&browser(&app).tree, &[HIDDEN_SPACE_NAME]);
+    if let Screen::Browse(b) = &mut app.screen {
+        std::sync::Arc::get_mut(&mut b.tree).expect("nothing else holds the fresh tree").stats.errors = 12;
+    }
+    select(&mut app, hidden);
+    let explanation = dscan_core::hidden::explain(&browser(&app).tree, hidden).expect("hidden space is explained");
+
+    let mut ui = sim(&app);
+    println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, "hidden-space-explained")?.display());
+    let texts = texts_on_screen(&mut ui);
+    assert!(texts.iter().any(|t| t == explanation.summary), "the summary is shown: {texts:?}");
+    for cause in explanation.causes {
+        assert!(texts.iter().any(|t| t == cause.text), "cause listed: {}", cause.text);
+    }
+    assert!(texts.iter().any(|t| t == "12 folders couldn't be read in this scan."), "the scan's own evidence");
+    assert!(!texts.iter().any(|t| t == dscan_core::REVEAL_ACTION), "hidden space is not a file to show");
+    let offers_settings = texts.iter().any(|t| t == "Open Full Disk Access Settings");
+    assert_eq!(offers_settings, dscan_core::FULL_DISK_ACCESS_SETTINGS.is_some());
+    Ok(())
+}
+
+#[test]
+fn disk_cards_name_the_file_system_and_mark_network_shares() {
+    let (mut app, _) = App::new(None);
+    let share = dscan_core::Volume {
+        name: "media".into(),
+        mount: "/Volumes/media".into(),
+        total: 4_000_000_000_000,
+        used: 1_000_000_000_000,
+        available: 3_000_000_000_000,
+        is_root: false,
+        file_system: "SMB".into(),
+        is_network: true,
+    };
+    app.volumes = Some(vec![share]);
+    let mut ui = sim(&app);
+    let texts = texts_on_screen(&mut ui);
+    let expected = format!("{} · SMB · network", Path::new("/Volumes/media").display());
+    assert!(texts.contains(&expected), "{texts:?}");
 }

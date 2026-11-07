@@ -1,4 +1,5 @@
 pub mod actions;
+pub mod desktop;
 pub mod exclusions;
 pub mod hidden;
 pub mod kind;
@@ -12,7 +13,9 @@ pub mod tree;
 pub mod volumes;
 
 pub use actions::{Collection, Refusal, Removal};
+pub use desktop::{DesktopError, PREVIEW_ACTION, REVEAL_ACTION};
 pub use exclusions::Exclusions;
+pub use hidden::{Cause, Remedy, SpaceExplanation};
 pub use kind::Kind;
 pub use layout::{Arc, Layout, LayoutParams, MAX_DEPTH, Segment, sunburst};
 pub use protection::is_protected;

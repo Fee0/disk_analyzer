@@ -3,9 +3,10 @@ use std::path::{Path, PathBuf};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use super::{apfs, space};
-use crate::platform::{DeviceId, unix};
-use crate::volumes::Volume;
+use super::{apfs, file_systems, space};
+use crate::hidden::SpaceInfo;
+use crate::platform::{DeviceId, answered_within, unix};
+use crate::volumes::{MountedFileSystem, NETWORK_ANSWER_LIMIT, Volume};
 
 const SPARE_SLOTS_FOR_MOUNTS_APPEARING_BETWEEN_CALLS: usize = 4;
 const TCC_PROTECTED_HOME_FOLDERS: [&str; 2] = ["Library/Mail", "Library/Safari"];
@@ -17,6 +18,34 @@ struct Mount {
     from: String,
     fstype: String,
     flags: u32,
+    space_when_listed: SpaceInfo,
+}
+
+impl Mount {
+    fn is_network(&self) -> bool {
+        self.flags & (libc::MNT_LOCAL as u32) == 0
+    }
+
+    fn is_user_visible(&self) -> bool {
+        let browsable = self.flags & (libc::MNT_DONTBROWSE as u32) == 0;
+        self.is_root() || (browsable && self.on.starts_with(USER_VOLUMES_FOLDER))
+    }
+
+    fn is_root(&self) -> bool {
+        self.on == Path::new("/")
+    }
+}
+
+fn space_of_a_share_that_may_not_answer(m: &Mount) -> SpaceInfo {
+    let on = m.on.clone();
+    answered_within(NETWORK_ANSWER_LIMIT, move || space::space_info(&on).ok()).flatten().unwrap_or(m.space_when_listed)
+}
+
+fn space_reported_by(s: &libc::statfs) -> SpaceInfo {
+    let block = s.f_bsize as u64;
+    let available = s.f_bavail * block;
+    let total = s.f_blocks * block;
+    SpaceInfo { total, used: total.saturating_sub(s.f_bfree * block), available, available_important: available }
 }
 
 fn cstr(buf: &[libc::c_char]) -> String {
@@ -48,6 +77,7 @@ fn mounts_via_getfsstat_into_own_buffer() -> Vec<Mount> {
             from: cstr(&s.f_mntfromname),
             fstype: cstr(&s.f_fstypename),
             flags: s.f_flags,
+            space_when_listed: space_reported_by(s),
         })
         .collect()
 }
@@ -77,23 +107,24 @@ pub(super) fn devices_mounted_on() -> FxHashMap<Vec<u8>, DeviceId> {
 pub(super) fn mounted_volumes() -> Vec<Volume> {
     mounts_via_getfsstat_into_own_buffer()
         .into_iter()
-        .filter(|m| m.fstype == "apfs")
+        .filter(Mount::is_user_visible)
         .filter_map(|m| {
-            let is_root = m.on == Path::new("/");
-            let browsable = m.flags & (libc::MNT_DONTBROWSE as u32) == 0;
-            let user_visible = is_root || (browsable && m.on.starts_with(USER_VOLUMES_FOLDER));
-            if !user_visible {
-                return None;
-            }
-            let space = space::space_info(&m.on).ok()?;
-            let name = space::volume_name(&m.on).unwrap_or_else(|| {
-                if is_root {
-                    DEFAULT_STARTUP_DISK_NAME.into()
-                } else {
-                    m.on.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
-                }
+            let (space, localized_name) = match m.is_network() {
+                true => (space_of_a_share_that_may_not_answer(&m), None),
+                false => (space::space_info(&m.on).ok()?, space::volume_name(&m.on)),
+            };
+            let name = localized_name.unwrap_or_else(|| match m.is_root() {
+                true => DEFAULT_STARTUP_DISK_NAME.into(),
+                false => m.on.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
             });
-            Some(Volume::new(name, m.on, &space, is_root))
+            let is_root = m.is_root();
+            let mounted = MountedFileSystem {
+                name,
+                file_system: file_systems::display_name(&m.fstype),
+                is_network: m.is_network(),
+                mount: m.on,
+            };
+            Some(Volume::new(mounted, &space, is_root))
         })
         .collect()
 }
@@ -114,7 +145,9 @@ mod tests {
     #[test]
     fn root_volume_listed() {
         let v = mounted_volumes();
-        assert!(v.iter().any(|v| v.is_root && v.total > 0 && v.used > 0));
+        let root = v.iter().find(|v| v.is_root).expect("the startup disk is listed");
+        assert!(root.total > 0 && root.used > 0);
+        assert!(root.file_system == "APFS" && !root.is_network, "{root:?}");
     }
 
     #[test]

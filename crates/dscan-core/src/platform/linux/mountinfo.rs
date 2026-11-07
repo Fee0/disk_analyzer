@@ -8,6 +8,25 @@ const OCTAL_ESCAPE_DIGITS: usize = 3;
 const LOOP_DEVICE_PREFIX: &str = "/dev/loop";
 const BLOCK_DEVICE_PREFIX: &str = "/dev/";
 const READ_ONLY_IMAGE_FILE_SYSTEMS: &[&str] = &["squashfs", "erofs"];
+const NETWORK_FILE_SYSTEMS: &[&str] = &[
+    "nfs",
+    "nfs4",
+    "cifs",
+    "smb3",
+    "smbfs",
+    "afs",
+    "ceph",
+    "fuse.sshfs",
+    "fuse.rclone",
+    "fuse.s3fs",
+    "fuse.gcsfuse",
+    "fuse.glusterfs",
+    "fuse.ceph-fuse",
+];
+const FUSE_TYPE: &str = "fuse";
+const FUSE_SUBTYPE_PREFIX: &str = "fuse.";
+const SYSTEM_MOUNT_LOCATIONS: &[&str] = &["/proc", "/sys", "/dev", "/run", "/tmp", "/var", "/snap"];
+const REMOVABLE_MEDIA_UNDER_RUN: &str = "/run/media";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Mount {
@@ -22,10 +41,54 @@ impl Mount {
         self.source == other.source && self.fs_type == other.fs_type
     }
 
-    fn is_on_a_real_disk(&self) -> bool {
+    pub fn is_on_a_block_device(&self) -> bool {
         self.source.starts_with(BLOCK_DEVICE_PREFIX)
+    }
+
+    fn is_on_a_real_disk(&self) -> bool {
+        self.is_on_a_block_device()
             && !self.source.starts_with(LOOP_DEVICE_PREFIX)
             && !READ_ONLY_IMAGE_FILE_SYSTEMS.contains(&self.fs_type.as_str())
+    }
+
+    pub fn is_network(&self) -> bool {
+        NETWORK_FILE_SYSTEMS.contains(&self.fs_type.as_str())
+    }
+
+    fn is_fuse(&self) -> bool {
+        self.fs_type == FUSE_TYPE || self.fs_type.starts_with(FUSE_SUBTYPE_PREFIX)
+    }
+
+    fn is_in_a_system_location(&self) -> bool {
+        let point = &self.mount_point;
+        !point.starts_with(REMOVABLE_MEDIA_UNDER_RUN)
+            && SYSTEM_MOUNT_LOCATIONS.iter().any(|location| point.starts_with(location))
+    }
+
+    fn is_a_user_visible_volume(&self) -> bool {
+        let is_share_or_user_mount = self.is_network() || self.is_fuse();
+        self.mount_point == Path::new("/")
+            || self.is_on_a_real_disk()
+            || (is_share_or_user_mount && !self.is_in_a_system_location())
+    }
+
+    pub fn file_system_name(&self) -> String {
+        let name = match self.fs_type.as_str() {
+            "btrfs" => "Btrfs",
+            "xfs" => "XFS",
+            "zfs" => "ZFS",
+            "f2fs" => "F2FS",
+            "vfat" | "msdos" => "FAT",
+            "exfat" => "exFAT",
+            "ntfs" | "ntfs3" => "NTFS",
+            "fuseblk" | "fuse" => "FUSE",
+            "iso9660" => "ISO 9660",
+            "udf" => "UDF",
+            "nfs" | "nfs4" => "NFS",
+            "cifs" | "smb3" | "smbfs" => "SMB",
+            other => other.strip_prefix(FUSE_SUBTYPE_PREFIX).unwrap_or(other),
+        };
+        name.to_owned()
     }
 }
 
@@ -129,17 +192,20 @@ fn places_inside_a_mount_that_show_another_shown_mount(shown: &[&Mount]) -> Vec<
     places
 }
 
-pub(super) fn volume_mounts(mounts: &[Mount], is_directory: impl Fn(&Path) -> bool) -> Vec<&Mount> {
-    let mut candidates: Vec<&Mount> = mounts
+pub(super) fn volume_mounts<Facts>(
+    mounts: &[Mount],
+    facts_of_a_mounted_folder: impl Fn(&Mount) -> Option<Facts>,
+) -> Vec<(&Mount, Facts)> {
+    let mut candidates: Vec<(&Mount, Facts)> = mounts
         .iter()
-        .filter(|m| m.mount_point == Path::new("/") || m.is_on_a_real_disk())
-        .filter(|m| is_directory(&m.mount_point))
+        .filter(|m| m.is_a_user_visible_volume())
+        .filter_map(|m| Some((m, facts_of_a_mounted_folder(m)?)))
         .collect();
-    candidates.sort_by_key(|m| m.mount_point.components().count());
-    let mut volumes: Vec<&Mount> = Vec::new();
-    for mount in candidates {
-        if !volumes.iter().any(|v| v.shows_the_same_file_system_as(mount)) {
-            volumes.push(mount);
+    candidates.sort_by_key(|(m, _)| m.mount_point.components().count());
+    let mut volumes: Vec<(&Mount, Facts)> = Vec::new();
+    for (mount, facts) in candidates {
+        if !volumes.iter().any(|(v, _)| v.shows_the_same_file_system_as(mount)) {
+            volumes.push((mount, facts));
         }
     }
     volumes
@@ -243,11 +309,56 @@ mod tests {
         assert_eq!(found, SameFileSystemMounts::default());
     }
 
+    fn volume_points(mounts: &[Mount], is_folder: impl Fn(&Path) -> bool) -> Vec<&Path> {
+        volume_mounts(mounts, |m| is_folder(&m.mount_point).then_some(()))
+            .iter()
+            .map(|(m, _)| m.mount_point.as_path())
+            .collect()
+    }
+
     #[test]
     fn volumes_are_one_per_real_file_system_at_its_shortest_mount_point() {
         let mounts = mounts();
-        let volumes: Vec<&Path> = volume_mounts(&mounts, |_| true).iter().map(|m| m.mount_point.as_path()).collect();
+        let volumes = volume_points(&mounts, |_| true);
         assert_eq!(volumes, [Path::new("/"), Path::new("/boot/efi"), Path::new("/media/alex/USB Stick")]);
+    }
+
+    const SHARES_AND_USER_MOUNTS: &str = r"50 22 0:60 / /mnt/nas rw,relatime shared:40 - nfs4 nas.local:/export/media rw
+51 22 0:61 / /media/alex/Backup rw shared:41 - cifs //server/backup rw,vers=3.1.1
+52 41 0:62 / /home/alex/remote rw,nosuid shared:42 - fuse.sshfs alex@host:/srv rw,user_id=1000
+53 22 0:63 / /run/user/1000/gvfs rw,nosuid shared:43 - fuse.gvfsd-fuse gvfsd-fuse rw,user_id=1000
+54 22 0:64 / /run/user/1000/doc rw,nosuid shared:44 - fuse.portal portal rw,user_id=1000
+55 22 0:65 / /var/lib/lxcfs rw,nosuid shared:45 - fuse.lxcfs lxcfs rw
+56 22 0:66 / /tmp/.mount_KritaX ro,nosuid shared:46 - fuse.Krita.AppImage Krita.AppImage ro
+57 22 0:67 / /run/media/alex/Phone rw,nosuid shared:47 - fuse.jmtpfs jmtpfs rw
+58 22 8:33 / /media/alex/Old\040Disk rw shared:48 - fuseblk /dev/sdc1 rw,user_id=0
+";
+
+    #[test]
+    fn network_shares_and_user_fuse_mounts_are_volumes_but_desktop_plumbing_is_not() {
+        let all = parse(format!("{BTRFS_LAPTOP}{SHARES_AND_USER_MOUNTS}").as_bytes());
+        let volumes = volume_points(&all, |_| true);
+        let offered =
+            ["/mnt/nas", "/media/alex/Backup", "/home/alex/remote", "/run/media/alex/Phone", "/media/alex/Old Disk"];
+        for shown in offered {
+            assert!(volumes.contains(&Path::new(shown)), "{shown} should be offered: {volumes:?}");
+        }
+        for plumbing in ["/run/user/1000/gvfs", "/run/user/1000/doc", "/var/lib/lxcfs", "/tmp/.mount_KritaX"] {
+            assert!(!volumes.contains(&Path::new(plumbing)), "{plumbing} is not a place users keep files");
+        }
+    }
+
+    #[test]
+    fn shares_are_marked_as_network_and_file_systems_get_their_usual_names() {
+        let all = parse(SHARES_AND_USER_MOUNTS.as_bytes());
+        let at = |point: &str| all.iter().find(|m| m.mount_point == Path::new(point)).unwrap();
+        assert!(at("/mnt/nas").is_network() && at("/home/alex/remote").is_network());
+        assert!(!at("/media/alex/Old Disk").is_network() && !at("/run/media/alex/Phone").is_network());
+        assert_eq!(at("/mnt/nas").file_system_name(), "NFS");
+        assert_eq!(at("/media/alex/Backup").file_system_name(), "SMB");
+        assert_eq!(at("/home/alex/remote").file_system_name(), "sshfs");
+        assert_eq!(mounts()[0].file_system_name(), "Btrfs");
+        assert_eq!(mounts()[7].file_system_name(), "exFAT");
     }
 
     #[test]
@@ -257,8 +368,7 @@ mod tests {
               2 1 254:1 /docker/containers/abc/hosts /etc/hosts rw - ext4 /dev/vda1 rw\n\
               3 1 254:1 /volumes/data /data rw - ext4 /dev/vda1 rw\n",
         );
-        let volumes: Vec<&Path> =
-            volume_mounts(&docker, |p| p != Path::new("/etc/hosts")).iter().map(|m| m.mount_point.as_path()).collect();
+        let volumes = volume_points(&docker, |p| p != Path::new("/etc/hosts"));
         assert_eq!(volumes, [Path::new("/"), Path::new("/data")]);
     }
 
