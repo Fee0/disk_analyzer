@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Disk Analyzer
+Comment=See what takes up space on your disks
+Exec=disk-analyzer %f
+Icon=disk-analyzer
+Terminal=false
+Categories=Utility;System;Filesystem;
+StartupWMClass=disk-analyzer

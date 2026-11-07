@@ -51,6 +51,9 @@ iced = { version = "0.14", default-features = false, features = [
 ] }
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 mimalloc = { version = "0.1", default-features = false }
+
+# gui build: icon and version info for the Windows executable
+winresource = { version = "0.1", default-features = false }
 tokio = { version = "1", default-features = false, features = ["rt", "time"] }
 
 # tests

@@ -58,7 +58,7 @@ fn gui_does_no_file_system_or_os_work() {
         if !file.ends_with(".rs") || HEADLESS_UI_TEST_SCAFFOLDING.contains(&file.as_str()) {
             continue;
         }
-        let source = std::fs::read_to_string(&path).unwrap();
+        let source = source_with_unix_line_endings(&path);
         let app_code_before_unit_tests_that_may_build_fixtures_on_disk = code_before_unit_tests(&source);
         for (n, line) in app_code_before_unit_tests_that_may_build_fixtures_on_disk.lines().enumerate() {
             let is_comment_line = line.trim_start().starts_with("//");
@@ -94,6 +94,22 @@ fn code_before_unit_tests(source: &str) -> &str {
     source.split(UNIT_TEST_MODULE_START).next().unwrap()
 }
 
+fn source_with_unix_line_endings(path: &Path) -> String {
+    std::fs::read_to_string(path).unwrap().replace("\r\n", "\n")
+}
+
+#[test]
+fn unit_test_modules_are_found_in_a_windows_checkout_with_crlf_line_endings() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("checked_out_with_autocrlf.rs");
+    std::fs::write(&file, "fn app() {}\r\n\r\n#[cfg(test)]\r\nmod tests {\r\n    use std::fs;\r\n}\r\n").unwrap();
+    let source = source_with_unix_line_endings(&file);
+    assert!(
+        !code_before_unit_tests(&source).contains("std::fs"),
+        "the test module of a CRLF file must not count as app code"
+    );
+}
+
 #[test]
 fn os_specific_code_lives_only_in_the_platform_layer() {
     let core_src = Path::new(CORE).join("src");
@@ -103,7 +119,7 @@ fn os_specific_code_lives_only_in_the_platform_layer() {
         if relative.starts_with(PLATFORM_LAYER) {
             continue;
         }
-        let source = std::fs::read_to_string(&path).unwrap();
+        let source = source_with_unix_line_endings(&path);
         for (n, line) in code_before_unit_tests(&source).lines().enumerate() {
             if let Some(api) = OS_SPECIFIC_APIS.iter().find(|api| line.contains(*api)) {
                 violations.push(format!("{}:{}: uses `{api}`: {}", relative.display(), n + 1, line.trim()));

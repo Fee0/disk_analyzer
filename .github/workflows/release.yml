@@ -1,0 +1,144 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  APP_NAME: Disk Analyzer
+  BIN: disk-analyzer
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
+          if [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match the workspace version $version"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  linux:
+    needs: version
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            arch: x86_64
+          - runner: ubuntu-22.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    env:
+      PACKAGE: disk-analyzer-${{ needs.version.outputs.version }}-linux-${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p dscan-gui --locked
+      - name: Package
+        run: |
+          mkdir "$PACKAGE"
+          cp "target/release/$BIN" packaging/linux/disk-analyzer.desktop packaging/linux/install.sh README.md LICENSE "$PACKAGE/"
+          cp assets/icon/icon-256.png "$PACKAGE/disk-analyzer.png"
+          cp assets/icon/icon.svg "$PACKAGE/disk-analyzer.svg"
+          tar czf "$PACKAGE.tar.gz" "$PACKAGE"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PACKAGE }}
+          path: ${{ env.PACKAGE }}.tar.gz
+
+  macos:
+    needs: version
+    runs-on: macos-latest
+    env:
+      PACKAGE: disk-analyzer-${{ needs.version.outputs.version }}-macos-universal
+      VERSION: ${{ needs.version.outputs.version }}
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - run: |
+          cargo build --release -p dscan-gui --locked --target aarch64-apple-darwin
+          cargo build --release -p dscan-gui --locked --target x86_64-apple-darwin
+      - name: Bundle
+        run: |
+          app="$APP_NAME.app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          lipo -create -output "$app/Contents/MacOS/$BIN" \
+            "target/aarch64-apple-darwin/release/$BIN" \
+            "target/x86_64-apple-darwin/release/$BIN"
+          sed "s/__VERSION__/$VERSION/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
+          cp assets/icon/icon.icns "$app/Contents/Resources/icon.icns"
+          codesign --force --deep --sign - "$app"
+          mkdir dmg
+          cp -R "$app" dmg/
+          ln -s /Applications dmg/Applications
+          for attempt in 1 2 3; do
+            hdiutil create -volname "$APP_NAME" -srcfolder dmg -ov -format UDZO "$PACKAGE.dmg" && break
+            sleep 5
+          done
+          test -f "$PACKAGE.dmg"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PACKAGE }}
+          path: ${{ env.PACKAGE }}.dmg
+
+  windows:
+    needs: version
+    runs-on: windows-latest
+    env:
+      PACKAGE: disk-analyzer-${{ needs.version.outputs.version }}-windows-x86_64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p dscan-gui --locked
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory $env:PACKAGE | Out-Null
+          Copy-Item "target/release/$env:BIN.exe", README.md, LICENSE $env:PACKAGE
+          Compress-Archive -Path $env:PACKAGE -DestinationPath "$env:PACKAGE.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PACKAGE }}
+          path: ${{ env.PACKAGE }}.zip
+
+  release:
+    needs: [version, linux, macos, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+      - name: Draft the release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$APP_NAME ${{ needs.version.outputs.version }}" \
+            --generate-notes \
+            --draft
+      - if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: all-packages
+          path: dist
