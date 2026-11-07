@@ -387,7 +387,10 @@ fn disk(name: &str, mount: &Path, used_share: f64) -> dscan_core::Volume {
 }
 
 fn scan_job(app: &mut App) -> &mut crate::app::ScanJob {
-    app.scan.as_mut().expect("a scan is running")
+    match &mut app.screen {
+        Screen::Start { scan: Some(job) } => job,
+        _ => panic!("a scan is running"),
+    }
 }
 
 fn count_of(texts: &[String], label: &str) -> usize {
@@ -414,7 +417,7 @@ fn scanning_a_disk_turns_its_row_into_a_moving_line_with_pause_and_stop() -> Res
     }
 
     let _scan_task_never_run = app.update(Message::ScanVolume(0));
-    assert!(matches!(app.screen, Screen::Start), "the scan runs inside the disk list");
+    assert!(matches!(app.screen, Screen::Start { scan: Some(_) }), "the scan runs inside the disk list");
     assert_eq!(app.title(), "Scanning Macintosh HD — Disk Analyzer");
     scan_job(&mut app).snapshot = MID_SCAN;
     let progress_label = format!("{} · 673,862 files", dscan_core::format_size(MID_SCAN.bytes));
@@ -453,9 +456,9 @@ fn scanning_a_disk_turns_its_row_into_a_moving_line_with_pause_and_stop() -> Res
     let job_id = scan_job(&mut app).id;
     let _ = app.update(Message::CancelScan);
     assert!(cancel.is_cancelled(), "stopping cancels the scan thread");
-    assert!(app.scan.is_none(), "the row is back to normal at once, without waiting for the thread");
+    assert!(app.scan().is_none(), "the row is back to normal at once, without waiting for the thread");
     let _ = app.update(Message::ScanFinished { job_id, crash: None });
-    assert!(app.scan.is_none() && app.error.is_none(), "the stopped scan reporting back changes nothing");
+    assert!(app.scan().is_none() && app.error.is_none(), "the stopped scan reporting back changes nothing");
     let mut ui = sim(&app);
     assert_eq!(count_of(&texts_on_screen(&mut ui), "Scan"), 3);
     Ok(())
@@ -498,7 +501,7 @@ fn a_folder_scan_gets_its_own_row_and_another_scan_replaces_it() -> Result<(), E
     let _scan_task_never_run = app.update(Message::ScanVolume(0));
     assert!(folder_cancel.is_cancelled(), "the replaced scan stops");
     let _ = app.update(Message::ScanFinished { job_id: folder_job, crash: None });
-    let disk_job = app.scan.as_ref().expect("the disk scan keeps running");
+    let disk_job = app.scan().expect("the disk scan keeps running");
     assert_ne!(disk_job.id, folder_job);
     assert!(disk_job.opts.whole_disk);
     Ok(())
@@ -568,7 +571,7 @@ fn inspect_open_results() -> Result<(), Error> {
     );
 
     let _ = app.update(Message::FolderPicked(Some(dirs[0].path().to_path_buf())));
-    let job = app.scan.as_ref().expect("scanning");
+    let job = app.scan().expect("scanning");
     let job_id = job.id;
     *job.result_slot.lock() = Some(Ok(scan(dirs[0].path()).0));
     let _ = app.update(Message::ScanFinished { job_id, crash: None });
@@ -808,19 +811,14 @@ fn selecting_hidden_space_explains_it_and_offers_the_fixes_this_os_has() -> Resu
 fn disk_cards_name_the_file_system_and_mark_network_shares() {
     let (mut app, _) = App::new(None);
     let share = dscan_core::Volume {
-        name: "media".into(),
-        mount: "/Volumes/media".into(),
-        total: 4_000_000_000_000,
-        used: 1_000_000_000_000,
-        available: 3_000_000_000_000,
-        is_root: false,
         file_system: "SMB".into(),
         is_network: true,
+        ..disk("media", Path::new("/Volumes/media"), 0.25)
     };
     app.volumes = Some(vec![share]);
     let mut ui = sim(&app);
     let texts = texts_on_screen(&mut ui);
     let expected =
-        format!("{} · {} · SMB · network", dscan_core::format_size(4 * TB), Path::new("/Volumes/media").display());
+        format!("{} · {} · SMB · network", dscan_core::format_size(2 * TB), Path::new("/Volumes/media").display());
     assert!(texts.contains(&expected), "{texts:?}");
 }

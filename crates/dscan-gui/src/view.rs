@@ -4,8 +4,8 @@ use dscan_core::{
 use iced::border;
 use iced::widget::text::Wrapping;
 use iced::widget::{
-    Column, Space, Svg, button, canvas, center, column, container, mouse_area, pin, responsive, row, scrollable, stack,
-    text, text_input, tooltip,
+    Column, Space, Svg, button, canvas, center, column, container, mouse_area, pin, progress_bar, responsive, row,
+    scrollable, stack, text, text_input, tooltip,
 };
 use iced::{Alignment, Color, Element, Fill, Length, Theme};
 
@@ -13,7 +13,6 @@ use crate::animation::ChartAnimation;
 use crate::app::{App, Browser, HOLD_TO_DELETE, ListRow, Message, SEARCH_ID, ScanJob, Screen};
 use crate::fmt::{fit_width, fit_width_keeping_both_ends, generous_text_width, thousands, truncate};
 use crate::icon;
-use crate::meter::Meter;
 use crate::sunburst::Sunburst;
 use crate::theme;
 
@@ -22,7 +21,7 @@ pub const MIN_WINDOW_SIZE: iced::Size = iced::Size::new(860.0, 560.0);
 
 pub fn view(app: &App) -> Element<'_, Message> {
     let content = match &app.screen {
-        Screen::Start => start(app),
+        Screen::Start { .. } => start(app),
         Screen::Browse(b) => browse(b),
     };
     container(content).width(Fill).height(Fill).style(|_| container::background(theme::BG)).into()
@@ -216,8 +215,9 @@ fn start_content(app: &App, width: f32) -> Column<'_, Message> {
 }
 
 fn disk_list(app: &App, width: f32) -> Element<'_, Message> {
-    let scan = app.scan.as_ref();
+    let scan = app.scan();
     let text_width = disk_text_width(width);
+    let mut scan_shown = false;
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     match &app.volumes {
         None => rows.push(
@@ -230,25 +230,23 @@ fn disk_list(app: &App, width: f32) -> Element<'_, Message> {
         Some(volumes) => {
             for (i, v) in volumes.iter().enumerate() {
                 let identity = DiskIdentity {
-                    icon: icon::drive(DISK_ICON_SIZE, theme::TEXT_DIM),
+                    icon: icon::scan_root(true, DISK_ICON_SIZE, theme::TEXT_DIM),
                     name: v.name.clone(),
                     details: format!("{} · {}", format_size(v.total), volume_details(v)),
                 };
                 rows.push(match scan.filter(|job| job.scans_volume(v)) {
-                    Some(job) => scanning_row(identity, job, text_width),
+                    Some(job) => {
+                        scan_shown = true;
+                        scanning_row(identity, job, text_width)
+                    }
                     None => volume_row(identity, i, v, text_width),
                 });
             }
         }
     }
-    let scans_a_listed_volume = |job: &ScanJob| app.volumes.iter().flatten().any(|v| job.scans_volume(v));
-    if let Some(job) = scan.filter(|job| !scans_a_listed_volume(job)) {
+    if let Some(job) = scan.filter(|_| !scan_shown) {
         let identity = DiskIdentity {
-            icon: if job.opts.whole_disk {
-                icon::drive(DISK_ICON_SIZE, theme::TEXT_DIM)
-            } else {
-                icon::folder(DISK_ICON_SIZE, theme::TEXT_DIM)
-            },
+            icon: icon::scan_root(job.opts.whole_disk, DISK_ICON_SIZE, theme::TEXT_DIM),
             name: job.opts.display_name(),
             details: job.opts.root.display().to_string(),
         };
@@ -282,13 +280,23 @@ struct DiskIdentity<'a> {
     details: String,
 }
 
-fn disk_row<'a>(
-    identity: DiskIdentity<'a>,
-    meter: Meter,
-    label: text::Text<'a, Theme>,
-    controls: impl Into<Element<'a, Message>>,
-    text_width: f32,
-) -> Element<'a, Message> {
+struct DiskMeter<'a> {
+    fraction: f32,
+    color: Color,
+    label: String,
+    label_color: Color,
+    controls: Element<'a, Message>,
+}
+
+fn disk_row<'a>(identity: DiskIdentity<'a>, meter: DiskMeter<'a>, text_width: f32) -> Element<'a, Message> {
+    let line_color = meter.color;
+    let line = progress_bar(0.0..=1.0, meter.fraction).length(METER_WIDTH).girth(METER_HEIGHT).style(move |_| {
+        progress_bar::Style {
+            background: theme::BG.into(),
+            bar: line_color.into(),
+            border: border::rounded(METER_HEIGHT / 2.0),
+        }
+    });
     row![
         identity.icon,
         column![
@@ -301,14 +309,11 @@ fn disk_row<'a>(
         .spacing(DISK_TEXT_SPACING)
         .width(Fill)
         .clip(true),
-        column![
-            canvas(meter).width(METER_WIDTH).height(METER_HEIGHT),
-            label.size(METER_LABEL_SIZE).wrapping(Wrapping::None)
-        ]
-        .spacing(METER_LABEL_GAP)
-        .width(METER_WIDTH)
-        .align_x(Alignment::End),
-        container(controls).width(SCAN_CONTROLS_WIDTH).align_x(Alignment::End),
+        column![line, text(meter.label).size(METER_LABEL_SIZE).color(meter.label_color).wrapping(Wrapping::None)]
+            .spacing(METER_LABEL_GAP)
+            .width(METER_WIDTH)
+            .align_x(Alignment::End),
+        container(meter.controls).width(SCAN_CONTROLS_WIDTH).align_x(Alignment::End),
     ]
     .spacing(DISK_ROW_SPACING)
     .align_y(Alignment::Center)
@@ -340,26 +345,34 @@ fn scan_button<'a>(label: &'a str, msg: Message) -> Element<'a, Message> {
 fn volume_row<'a>(identity: DiskIdentity<'a>, index: usize, v: &Volume, text_width: f32) -> Element<'a, Message> {
     let used_fraction = if v.total > 0 { v.used as f32 / v.total as f32 } else { 0.0 };
     let color = fullness_color(used_fraction);
-    let label = text(format!("{} free", format_size(v.available))).color(color);
-    let meter = Meter { fraction: used_fraction, color };
-    disk_row(identity, meter, label, scan_button(SCAN_LABEL, Message::ScanVolume(index)), text_width)
+    let meter = DiskMeter {
+        fraction: used_fraction,
+        color,
+        label: format!("{} free", format_size(v.available)),
+        label_color: color,
+        controls: scan_button(SCAN_LABEL, Message::ScanVolume(index)),
+    };
+    disk_row(identity, meter, text_width)
 }
 
 fn scanning_row<'a>(identity: DiskIdentity<'a>, job: &ScanJob, text_width: f32) -> Element<'a, Message> {
     let s = &job.snapshot;
     let fraction =
         s.expected.map_or(0.0, |expected| (s.bytes as f32 / expected as f32).min(SCAN_SHOWN_COMPLETE_ONLY_WHEN_DONE));
-    let paused = job.cancel.is_paused();
-    let (meter, label) = if paused {
-        let dimmed = theme::mix(theme::BG, theme::ACCENT, PAUSED_SCAN_STRENGTH);
-        (Meter { fraction, color: dimmed }, format!("Paused · {}", format_size(s.bytes)))
+    let (color, label, pause_icon, pause_tooltip) = if job.cancel.is_paused() {
+        (
+            theme::mix(theme::BG, theme::ACCENT, PAUSED_SCAN_STRENGTH),
+            format!("Paused · {}", format_size(s.bytes)),
+            icon::resume(PAUSE_ICON_SIZE, theme::TEXT),
+            "Resume",
+        )
     } else {
-        (Meter { fraction, color: theme::ACCENT }, format!("{} · {} files", format_size(s.bytes), thousands(s.files)))
-    };
-    let (pause_icon, pause_tooltip) = if paused {
-        (icon::resume(PAUSE_ICON_SIZE, theme::TEXT), "Resume")
-    } else {
-        (icon::pause(PAUSE_ICON_SIZE, theme::TEXT), "Pause")
+        (
+            theme::ACCENT,
+            format!("{} · {} files", format_size(s.bytes), thousands(s.files)),
+            icon::pause(PAUSE_ICON_SIZE, theme::TEXT),
+            "Pause",
+        )
     };
     let controls = row![
         icon_button(pause_icon, pause_tooltip, Message::TogglePause),
@@ -367,7 +380,8 @@ fn scanning_row<'a>(identity: DiskIdentity<'a>, job: &ScanJob, text_width: f32) 
     ]
     .spacing(SCAN_CONTROLS_SPACING)
     .align_y(Alignment::Center);
-    disk_row(identity, meter, text(label).color(theme::TEXT), controls, text_width)
+    let meter = DiskMeter { fraction, color, label, label_color: theme::TEXT, controls: controls.into() };
+    disk_row(identity, meter, text_width)
 }
 
 const NETWORK_VOLUME_NOTE: &str = "network";
@@ -559,9 +573,8 @@ const CRUMB_NAME_MAX_CHARS: usize = 28;
 const BREADCRUMBS_AFTER_ELLIPSIS: usize = 5;
 
 fn path_bar(b: &Browser) -> Element<'_, Message> {
-    let root_icon = if b.opts.whole_disk { icon::drive } else { icon::folder };
     let content = row![
-        container(root_icon(PATH_ROOT_ICON_SIZE, theme::TEXT_DIM)).padding([0, 6]),
+        container(icon::scan_root(b.opts.whole_disk, PATH_ROOT_ICON_SIZE, theme::TEXT_DIM)).padding([0, 6]),
         responsive(move |available| container(breadcrumbs_that_fit(b, available.width))
             .height(Fill)
             .align_y(Alignment::Center)

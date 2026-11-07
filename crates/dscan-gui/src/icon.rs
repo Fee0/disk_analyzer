@@ -73,3 +73,7 @@ pub fn pause<'a>(size: f32, color: Color) -> Svg<'a, Theme> {
 pub fn resume<'a>(size: f32, color: Color) -> Svg<'a, Theme> {
     tinted(&RESUME, size, color)
 }
+
+pub fn scan_root<'a>(whole_disk: bool, size: f32, color: Color) -> Svg<'a, Theme> {
+    if whole_disk { drive(size, color) } else { folder(size, color) }
+}
