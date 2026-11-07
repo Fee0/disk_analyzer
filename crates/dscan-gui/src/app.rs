@@ -4,13 +4,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use dscan_core::{
-    CancelToken, Collection, Layout, LayoutParams, Metric, NodeId, Progress, ProgressSnapshot, Refusal, Removal,
-    ScanError, ScanOptions, SearchResult, Segment, TRASH_NAME, Tree, Volume, actions, format_size,
+    CancelToken, Collection, Exclusions, Layout, LayoutParams, Metric, NodeId, Progress, ProgressSnapshot, Refusal,
+    Removal, ScanError, ScanOptions, SearchResult, Segment, TRASH_NAME, Transition, Tree, Volume, actions, format_size,
 };
 use iced::keyboard::{self, Key, key::Named};
 use iced::widget::canvas::Cache;
 use iced::{Point, Subscription, Task, event, mouse};
 
+use crate::animation::{Advance, ChartAnimation};
 use crate::fmt::{thousands, truncate};
 
 pub const SEARCH_ID: &str = "search";
@@ -125,6 +126,8 @@ pub struct Browser {
     pub search: Option<Arc<SearchResult>>,
     pub list: ListView,
     pub collector: Collection,
+    pub exclusions: Exclusions,
+    pub animation: Option<ChartAnimation>,
     pub over_collector: bool,
     pub confirm_trash: bool,
     removal_waiting_for_tree: Option<PendingRemoval>,
@@ -142,6 +145,7 @@ pub enum Message {
     OpenFdaSettings,
     RefreshVolumes,
     Tick,
+    AnimationFrame(Instant),
     CancelScan,
     TogglePause,
     ScanFinished { job_id: u64, crash: Option<PanicMessage> },
@@ -223,6 +227,9 @@ impl App {
                 let mut subscriptions = vec![event::listen_with(global_event)];
                 if b.drag.is_some() {
                     subscriptions.push(event::listen_with(drag_event));
+                }
+                if b.animation.is_some() {
+                    subscriptions.push(iced::window::frames().map(Message::AnimationFrame));
                 }
                 if b.delete_hold_started.is_some() {
                     subscriptions.push(iced::time::every(HOLD_PROGRESS_REFRESH).map(|_| Message::DeleteHoldTick));
@@ -317,7 +324,7 @@ impl App {
                 match result {
                     Some(Ok(tree)) => {
                         self.drop_parked_results_superseded_by(&tree);
-                        self.screen = Screen::Browse(Box::new(Browser::new(tree, opts)));
+                        self.screen = Screen::Browse(Box::new(Browser::new(tree, opts).with_opening_reveal()));
                     }
                     Some(Err(ScanError::Cancelled)) => {}
                     Some(Err(e)) => self.error = Some(e.to_string()),
@@ -430,6 +437,8 @@ impl Browser {
             search: None,
             list: ListView::default(),
             collector: Collection::default(),
+            exclusions: Exclusions::default(),
+            animation: None,
             over_collector: false,
             confirm_trash: false,
             removal_waiting_for_tree: None,
@@ -442,6 +451,11 @@ impl Browser {
         b
     }
 
+    pub fn with_opening_reveal(mut self) -> Self {
+        self.animation = Some(ChartAnimation::new(Transition::reveal(&self.layout)));
+        self
+    }
+
     pub fn can_back(&self) -> bool {
         !self.history.is_empty()
     }
@@ -450,12 +464,36 @@ impl Browser {
         !self.forward.is_empty()
     }
 
+    fn computed_layout(&self) -> Layout {
+        dscan_core::sunburst(
+            &self.tree,
+            self.focus,
+            self.metric,
+            LayoutParams::default(),
+            self.search.as_deref(),
+            &self.exclusions,
+        )
+    }
+
     fn relayout(&mut self) {
-        self.layout =
-            dscan_core::sunburst(&self.tree, self.focus, self.metric, LayoutParams::default(), self.search.as_deref());
+        self.install_layout(self.computed_layout());
+    }
+
+    fn relayout_animated(&mut self) {
+        let layout = self.computed_layout();
+        self.animation = Some(ChartAnimation::new(Transition::between(&self.layout, &layout)));
+        self.install_layout(layout);
+    }
+
+    fn install_layout(&mut self, layout: Layout) {
+        self.layout = layout;
         self.layout_revision += 1;
         self.chart_cache.clear();
         self.highlight_cache.clear();
+    }
+
+    pub fn size(&self, id: NodeId) -> u64 {
+        self.exclusions.size(&self.tree, id, self.metric)
     }
 
     pub fn listed_folder(&self) -> NodeId {
@@ -466,7 +504,9 @@ impl Browser {
     }
 
     fn visible_children(&self, id: NodeId) -> impl Iterator<Item = NodeId> + '_ {
-        self.tree.children(id, self.metric).filter(|&c| self.search.as_ref().is_none_or(|s| s.is_relevant(c)))
+        self.exclusions
+            .children(&self.tree, id, self.metric)
+            .filter(|&c| self.search.as_ref().is_none_or(|s| s.is_relevant(c)))
     }
 
     fn sync_list(&mut self) {
@@ -475,14 +515,14 @@ impl Browser {
         if self.list.built_for == source {
             return;
         }
-        let total = self.tree.size(subject, self.metric).max(1);
+        let total = self.size(subject).max(1);
         let children: Vec<NodeId> = self.visible_children(subject).collect();
         let rows = children
             .iter()
             .take(MAX_LIST_ROWS)
             .map(|&id| {
                 let node = self.tree.node(id);
-                let size = node.size(self.metric);
+                let size = self.size(id);
                 let mut name = truncate(&self.tree.name(id), 44);
                 if node.is_dir() {
                     name.push('/');
@@ -498,7 +538,7 @@ impl Browser {
             })
             .collect();
         let cut_off_rows_summary = (children.len() > MAX_LIST_ROWS).then(|| {
-            let rest: u64 = children[MAX_LIST_ROWS..].iter().map(|&c| self.tree.size(c, self.metric)).sum();
+            let rest: u64 = children[MAX_LIST_ROWS..].iter().map(|&c| self.size(c)).sum();
             format!("… {} more items · {}", thousands((children.len() - MAX_LIST_ROWS) as u64), format_size(rest))
         });
         self.list = ListView { built_for: source, rows, cut_off_rows_summary };
@@ -517,7 +557,7 @@ impl Browser {
             self.selected = None;
         }
         self.hovered = None;
-        self.relayout();
+        self.relayout_animated();
     }
 
     fn select_and_reveal(&mut self, id: NodeId) {
@@ -618,12 +658,25 @@ impl Browser {
     }
 
     fn collect(&mut self, id: NodeId) {
-        if let Err(Refusal::Protected) = self.collector.add(&self.tree, id) {
-            self.status = Some(format!(
-                "“{}” is a protected system location and can't be moved to the {TRASH_NAME}.",
-                truncate(&self.tree.name(id), 40)
-            ));
+        match self.collector.add(&self.tree, id) {
+            Ok(()) => self.collector_changed(),
+            Err(Refusal::Protected) => {
+                self.status = Some(format!(
+                    "“{}” is a protected system location and can't be moved to the {TRASH_NAME}.",
+                    truncate(&self.tree.name(id), 40)
+                ))
+            }
+            Err(Refusal::NotActionable | Refusal::AlreadyCoveredByCollectedFolder) => {}
         }
+    }
+
+    fn collector_changed(&mut self) {
+        self.exclusions = self.collector.exclusions(&self.tree);
+        if self.selected.is_some_and(|s| self.collector.covers(&self.tree, s)) {
+            self.selected = None;
+        }
+        self.hovered = None;
+        self.relayout_animated();
     }
 
     fn wait_for_the_cancelled_search_to_report_done() -> Task<Message> {
@@ -666,9 +719,8 @@ impl Browser {
         self.status = Some(msg);
         self.focus = self.tree.nearest_live(self.focus);
         self.selected = self.selected.filter(|&s| self.tree.is_live(s));
-        self.hovered = None;
         self.search_gen += 1;
-        self.relayout();
+        self.collector_changed();
         self.run_search()
     }
 
@@ -701,7 +753,12 @@ impl Browser {
             Message::Forward => self.forward(),
             Message::SetMetric(m) if m != self.metric => {
                 self.metric = m;
-                self.relayout();
+                self.relayout_animated();
+            }
+            Message::AnimationFrame(now) => {
+                if let Some(Advance::Finished) = self.animation.as_mut().map(|a| a.advance(now)) {
+                    self.animation = None;
+                }
             }
             Message::SearchChanged(s) => {
                 self.search_text = s;
@@ -781,10 +838,14 @@ impl Browser {
                     self.collect(s);
                 }
             }
-            Message::Uncollect(id) => self.collector.remove(id),
+            Message::Uncollect(id) => {
+                self.collector.remove(id);
+                self.collector_changed();
+            }
             Message::ClearCollector => {
                 self.collector.clear();
                 self.confirm_trash = false;
+                self.collector_changed();
             }
             Message::AskTrash => self.confirm_trash = !self.collector.is_empty(),
             Message::CancelTrash => self.confirm_trash = false,

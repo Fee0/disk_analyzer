@@ -37,13 +37,77 @@ fn fixture(root: &Path) {
     }
 }
 
-fn browser_app(dir: &Path) -> App {
+fn scanned_fixture(dir: &Path) -> Browser {
     fixture(dir);
     let opts = ScanOptions::folder(dir);
     let tree = dscan_core::scan(&opts, &Progress::default(), &CancelToken::default()).unwrap();
+    Browser::new(tree, opts)
+}
+
+fn app_showing(browser: Browser) -> App {
     let (mut app, _) = App::new(None);
-    app.screen = Screen::Browse(Box::new(Browser::new(tree, opts)));
+    app.screen = Screen::Browse(Box::new(browser));
     app
+}
+
+fn browser_app(dir: &Path) -> App {
+    app_showing(scanned_fixture(dir))
+}
+
+const LONGER_THAN_ANY_CHART_ANIMATION: std::time::Duration = std::time::Duration::from_secs(5);
+
+fn finish_chart_animation(app: &mut App) {
+    let first_frame = std::time::Instant::now();
+    let _ = app.update(Message::AnimationFrame(first_frame));
+    let _ = app.update(Message::AnimationFrame(first_frame + LONGER_THAN_ANY_CHART_ANIMATION));
+    assert!(browser(app).animation.is_none(), "the animation ends once its time is up");
+}
+
+fn shoot_chart_animation(app: &mut App, name: &str, kind: dscan_core::TransitionKind) -> Result<(), Error> {
+    let animation = browser(app).animation.as_ref().expect("the change animates the chart");
+    assert_eq!(animation.kind(), kind, "{name}");
+    for percent in [25, 50, 75] {
+        if let Screen::Browse(b) = &mut app.screen {
+            b.animation.as_mut().unwrap().jump_to(f64::from(percent) / 100.0);
+        }
+        let mut ui = sim(app);
+        println!(
+            "shot: {}",
+            ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, &format!("{name}-{percent}"))?.display()
+        );
+    }
+    finish_chart_animation(app);
+    Ok(())
+}
+
+#[test]
+fn chart_reveals_zooms_and_lets_collected_items_shrink_away() -> Result<(), Error> {
+    use dscan_core::TransitionKind;
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_showing(scanned_fixture(dir.path()).with_opening_reveal());
+    shoot_chart_animation(&mut app, "anim-reveal", TransitionKind::Reveal)?;
+
+    let movies = descend(&browser(&app).tree, &["Movies"]);
+    let _ = app.update(Message::Navigate(movies));
+    shoot_chart_animation(&mut app, "anim-zoom-in", TransitionKind::ZoomIn)?;
+    let _ = app.update(Message::Back);
+    shoot_chart_animation(&mut app, "anim-zoom-out", TransitionKind::ZoomOut)?;
+
+    let size_before = browser(&app).layout.total;
+    let pictures = descend(&browser(&app).tree, &["Pictures"]);
+    let _ = app.update(Message::Press(dscan_core::Segment::Node(pictures)));
+    let _ = app.update(Message::CollectSelected);
+    let b = browser(&app);
+    assert_eq!(b.collector.items(), &[pictures]);
+    assert_eq!(b.layout.total, size_before - b.tree.size(pictures, b.metric), "the chart leaves out what is collected");
+    assert!(b.layout.find(dscan_core::Segment::Node(pictures)).is_none(), "the collected folder has no arc");
+    assert!(b.list.rows.iter().all(|r| r.id != pictures), "nor a row in the list");
+    shoot_chart_animation(&mut app, "anim-collect", TransitionKind::Morph)?;
+
+    let _ = app.update(Message::Uncollect(pictures));
+    assert_eq!(browser(&app).layout.total, size_before, "uncollecting puts it back");
+    shoot_chart_animation(&mut app, "anim-uncollect", TransitionKind::Morph)?;
+    Ok(())
 }
 
 fn deliver_search_result_without_its_thread(app: &mut App, query: &str) {

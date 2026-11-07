@@ -1,3 +1,4 @@
+use crate::exclusions::Exclusions;
 use crate::kind::Kind;
 use crate::search::SearchResult;
 use crate::tree::{Metric, NodeId, Tree};
@@ -68,10 +69,14 @@ impl Layout {
     }
 
     pub fn hit(&self, ring: usize, turn_fraction: f64) -> Option<&Arc> {
+        self.hit_index(ring, turn_fraction).map(|i| &self.rings[ring][i])
+    }
+
+    pub fn hit_index(&self, ring: usize, turn_fraction: f64) -> Option<usize> {
         let arcs = self.rings.get(ring)?;
         let turn_fraction = turn_fraction.rem_euclid(1.0);
         let i = arcs.partition_point(|a| a.end <= turn_fraction);
-        arcs.get(i).filter(|a| a.start <= turn_fraction && turn_fraction < a.end)
+        arcs.get(i).filter(|a| a.start <= turn_fraction && turn_fraction < a.end).map(|_| i)
     }
 
     pub fn find(&self, seg: Segment) -> Option<(usize, &Arc)> {
@@ -93,11 +98,12 @@ pub fn sunburst(
     metric: Metric,
     params: LayoutParams,
     search: Option<&SearchResult>,
+    excluded: &Exclusions,
 ) -> Layout {
-    let total = tree.size(focus, metric);
+    let total = excluded.size(tree, focus, metric);
     let mut layout = Layout { focus, total, rings: vec![Vec::new(); params.max_depth] };
     if total > 0 {
-        let mut placer = Placer { tree, metric, params, search, rings: &mut layout.rings };
+        let mut placer = Placer { tree, metric, params, search, excluded, rings: &mut layout.rings };
         placer.place(focus, 0.0, 1.0, 0, 0);
     }
     while layout.rings.last().is_some_and(Vec::is_empty) {
@@ -111,6 +117,7 @@ struct Placer<'a> {
     metric: Metric,
     params: LayoutParams,
     search: Option<&'a SearchResult>,
+    excluded: &'a Exclusions,
     rings: &'a mut [Vec<Arc>],
 }
 
@@ -133,7 +140,7 @@ impl Placer<'_> {
             return;
         }
         let tree = self.tree;
-        let size = tree.size(node, self.metric);
+        let size = self.excluded.size(tree, node, self.metric);
         if size == 0 {
             return;
         }
@@ -141,8 +148,7 @@ impl Placer<'_> {
         let mut cursor = start;
         let (mut small_size, mut small_count, mut small_relevant) = (0u64, 0u32, false);
         let mut last_small = None;
-        for child in tree.children(node, self.metric) {
-            let cs = tree.size(child, self.metric);
+        for (child, cs) in self.excluded.children_with_sizes(tree, node, self.metric) {
             if cs == 0 {
                 continue;
             }
@@ -184,7 +190,7 @@ impl Placer<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tree::test_util::{T::*, tree};
+    use crate::tree::test_util::{T::*, descend, tree};
 
     #[test]
     fn layout_and_hit_roundtrip() {
@@ -194,7 +200,14 @@ mod tests {
             F("tiny1", 1),
             F("tiny2", 1),
         ]);
-        let l = sunburst(&t, t.root(), Metric::Allocated, LayoutParams { max_depth: 4, min_span: 0.01 }, None);
+        let l = sunburst(
+            &t,
+            t.root(),
+            Metric::Allocated,
+            LayoutParams { max_depth: 4, min_span: 0.01 },
+            None,
+            &Exclusions::default(),
+        );
         assert_eq!(l.total, 1001);
         assert_eq!(l.rings.len(), 2);
         assert_eq!(l.rings[0].len(), 3, "ring 0 holds the focus's children: a, b and one bucket of small items");
@@ -227,10 +240,24 @@ mod tests {
     }
 
     #[test]
+    fn excluded_items_leave_the_chart_and_their_space_goes_to_the_rest() {
+        let t = tree(vec![D("a", vec![F("x.mov", 600), F("y.mov", 200)]), D("b", vec![F("w.png", 400)])]);
+        let x = descend(&t, &["a", "x.mov"]);
+        let params = LayoutParams { max_depth: 4, min_span: 0.01 };
+        let l = sunburst(&t, t.root(), Metric::Allocated, params, None, &Exclusions::new(&t, &[x]));
+
+        assert_eq!(l.total, t.size(t.root(), Metric::Allocated) - t.size(x, Metric::Allocated));
+        assert!(l.find(Segment::Node(x)).is_none(), "an excluded file has no arc");
+        let ring0: Vec<_> = l.rings[0].iter().map(|arc| t.name(arc.node().unwrap()).into_owned()).collect();
+        assert_eq!(ring0, ["b", "a"], "the shrunken folder is re-ranked");
+        assert!((l.rings[0].last().unwrap().end - 1.0).abs() < 1e-9, "the remaining arcs still fill the turn");
+    }
+
+    #[test]
     fn small_items_keep_total() {
         let kids: Vec<_> = (0..1000).map(|_| F("f", 1)).collect();
         let t = tree(kids);
-        let l = sunburst(&t, t.root(), Metric::Allocated, LayoutParams::default(), None);
+        let l = sunburst(&t, t.root(), Metric::Allocated, LayoutParams::default(), None, &Exclusions::default());
         assert_eq!(l.rings[0].len(), 1);
         assert_eq!(l.rings[0][0].size, 1000);
         assert!((l.rings[0][0].span() - 1.0).abs() < 1e-9);
@@ -249,7 +276,7 @@ mod search_tests {
         kids.push(F("needle", 1));
         let t = tree(kids);
         let s = crate::search::search(&t, "needle", &Default::default()).unwrap();
-        let l = sunburst(&t, t.root(), Metric::Allocated, LayoutParams::default(), Some(&s));
+        let l = sunburst(&t, t.root(), Metric::Allocated, LayoutParams::default(), Some(&s), &Exclusions::default());
         let big = &l.rings[0][0];
         assert!(!big.relevant);
         let small = l.rings[0].iter().find(|a| matches!(a.segment, Segment::Small { .. })).unwrap();

@@ -1,4 +1,5 @@
 pub mod actions;
+pub mod exclusions;
 pub mod hidden;
 pub mod kind;
 pub mod layout;
@@ -6,15 +7,18 @@ mod platform;
 mod protection;
 pub mod scan;
 pub mod search;
+pub mod transition;
 pub mod tree;
 pub mod volumes;
 
 pub use actions::{Collection, Refusal, Removal};
+pub use exclusions::Exclusions;
 pub use kind::Kind;
 pub use layout::{Arc, Layout, LayoutParams, MAX_DEPTH, Segment, sunburst};
 pub use protection::is_protected;
 pub use scan::{CancelToken, Progress, ProgressSnapshot, ScanError, ScanOptions, scan};
 pub use search::{SearchResult, search};
+pub use transition::{ArcStyle, FrameArc, Transition, TransitionKind};
 pub use tree::{Metric, NodeId, ScanStats, Tree};
 pub use volumes::{TRASH_NAME, Volume, has_full_disk_access, list_volumes};
 

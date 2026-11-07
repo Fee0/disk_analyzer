@@ -25,8 +25,8 @@ pub enum Metric {
 }
 
 impl Metric {
-    const ALL: [Metric; 2] = [Metric::Allocated, Metric::Logical];
-    fn slot(self) -> usize {
+    pub(crate) const ALL: [Metric; 2] = [Metric::Allocated, Metric::Logical];
+    pub(crate) fn slot(self) -> usize {
         self as usize
     }
 }
@@ -511,6 +511,12 @@ pub(crate) mod test_util {
 
     pub fn tree(kids: Vec<T>) -> Tree {
         tree_at("/r", kids)
+    }
+
+    pub fn descend(tree: &Tree, names: &[&str]) -> NodeId {
+        names.iter().fold(tree.root(), |at, name| {
+            tree.children(at, Metric::Allocated).find(|&c| tree.name(c) == *name).expect(name)
+        })
     }
 
     pub fn tree_at(root: &str, kids: Vec<T>) -> Tree {

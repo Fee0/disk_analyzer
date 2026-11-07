@@ -7,6 +7,7 @@ use iced::widget::{
 };
 use iced::{Alignment, Color, Element, Fill, Length, Shrink, Theme};
 
+use crate::animation::ChartAnimation;
 use crate::app::{App, Browser, HOLD_TO_DELETE, ListRow, Message, SEARCH_ID, ScanJob, Screen};
 use crate::fmt::{thousands, truncate};
 use crate::icon;
@@ -341,8 +342,7 @@ fn browse(b: &Browser) -> Element<'_, Message> {
 
     match &b.drag {
         Some(d) if d.dragging => {
-            let label =
-                format!("{}  {}", truncate(&b.tree.name(d.item), 40), format_size(b.tree.size(d.item, b.metric)));
+            let label = format!("{}  {}", truncate(&b.tree.name(d.item), 40), format_size(b.size(d.item)));
             let chip = container(text(label).size(13))
                 .padding([6, 10])
                 .style(|_| rounded_box(theme::ACCENT.scale_alpha(0.92), 8.0).color(Color::WHITE));
@@ -477,6 +477,7 @@ fn chart_panel(b: &Browser) -> Element<'_, Message> {
         highlight_cache: &b.highlight_cache,
         hovered: b.hovered,
         selected: b.selected,
+        moving: b.animation.as_ref().map(ChartAnimation::current_frame),
     })
     .width(Fill)
     .height(Fill);
@@ -630,7 +631,7 @@ fn list_panel(b: &Browser) -> Element<'_, Message> {
             dot(theme::kind_color(t.node(subject).kind()), 14.0),
             text(truncate(&t.name(subject), 34)).size(22).wrapping(Wrapping::None),
             Space::new().width(Fill),
-            text(format_size(t.size(subject, b.metric))).size(22),
+            text(format_size(b.size(subject))).size(22),
         ]
         .spacing(10)
         .align_y(Alignment::Center),

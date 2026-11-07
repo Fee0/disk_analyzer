@@ -77,11 +77,11 @@ fn hue_shift_distinguishing_neighbour_branches(kind: Kind, branch: u32) -> f32 {
     centered_variant * BRANCH_HUE_STEP_DEGREES
 }
 
-fn darkened_for_ring(lightness: f32, ring: usize) -> f32 {
-    (lightness - ring as f32 * LIGHTNESS_LOSS_PER_RING).max(MIN_SEGMENT_LIGHTNESS)
+fn darkened_for_ring(lightness: f32, ring: f32) -> f32 {
+    (lightness - ring * LIGHTNESS_LOSS_PER_RING).max(MIN_SEGMENT_LIGHTNESS)
 }
 
-pub fn segment_color(kind: Kind, ring: usize, branch: u32) -> Color {
+pub fn segment_color(kind: Kind, ring: f32, branch: u32) -> Color {
     let base = base_hsl(kind);
     Hsl {
         hue_degrees: base.hue_degrees + hue_shift_distinguishing_neighbour_branches(kind, branch),

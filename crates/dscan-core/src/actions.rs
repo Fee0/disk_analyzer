@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use crate::exclusions::Exclusions;
 use crate::platform::{Current, Platform};
 use crate::protection::is_protected;
 use crate::tree::{Metric, NodeId, Tree};
@@ -30,11 +31,19 @@ impl Collection {
         self.items.contains(&id)
     }
 
+    pub fn covers(&self, tree: &Tree, id: NodeId) -> bool {
+        self.items.iter().any(|&c| tree.is_ancestor_of(c, id))
+    }
+
+    pub fn exclusions(&self, tree: &Tree) -> Exclusions {
+        Exclusions::new(tree, &self.items)
+    }
+
     pub fn add(&mut self, tree: &Tree, id: NodeId) -> Result<(), Refusal> {
         if !tree.is_actionable(id) {
             return Err(Refusal::NotActionable);
         }
-        if self.items.iter().any(|&c| tree.is_ancestor_of(c, id)) {
+        if self.covers(tree, id) {
             return Err(Refusal::AlreadyCoveredByCollectedFolder);
         }
         if is_protected(&tree.path(id)) {
@@ -125,6 +134,7 @@ mod tests {
         assert_eq!(c.add(&t, a), Ok(()), "folder replaces collected child");
         assert_eq!(c.items(), &[a]);
         assert_eq!(c.add(&t, x), Err(Refusal::AlreadyCoveredByCollectedFolder));
+        assert!(c.covers(&t, x) && c.covers(&t, a), "a collected folder covers itself and what is inside it");
         assert_eq!(c.size(&t), 8, "size counts allocated bytes");
     }
 

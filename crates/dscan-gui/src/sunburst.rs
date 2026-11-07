@@ -1,10 +1,12 @@
 use std::f32::consts::{FRAC_PI_2, TAU};
 use std::time::{Duration, Instant};
 
-use dscan_core::{Arc, Layout, MAX_DEPTH, NodeId, Segment, Tree, format_size};
+use dscan_core::transition::at_rest;
+use dscan_core::{Arc, ArcStyle, FrameArc, Layout, MAX_DEPTH, NodeId, Segment, Tree, format_size};
 use iced::widget::canvas::{self, Cache, Event, Frame, Geometry, Path, Stroke, Text};
 use iced::{Color, Pixels, Point, Rectangle, Renderer, Size, Theme, Vector, alignment, mouse};
 
+use crate::animation::MovingChart;
 use crate::app::Message;
 use crate::fmt::truncate;
 use crate::theme;
@@ -19,6 +21,7 @@ pub struct Sunburst<'a> {
     pub highlight_cache: &'a Cache,
     pub hovered: Option<Segment>,
     pub selected: Option<NodeId>,
+    pub moving: Option<&'a MovingChart>,
 }
 
 #[derive(Default)]
@@ -45,16 +48,40 @@ impl Geo {
         frac as f32 * TAU - FRAC_PI_2
     }
 
-    fn arc_path(&self, ring: usize, arc: &Arc) -> Path {
-        let r_in = self.r0 + ring as f32 * self.ring_w;
+    fn radius(&self, ring: f64) -> f32 {
+        self.r0 + ring as f32 * self.ring_w
+    }
+
+    fn sector(&self, inner_ring: f64, outer_ring: f64, start: f64, end: f64) -> Path {
         annular_sector_as_one_polygon(
             self.center,
-            r_in,
-            r_in + self.ring_w,
-            Self::angle(arc.start),
-            Self::angle(arc.end),
+            self.radius(inner_ring),
+            self.radius(outer_ring),
+            Self::angle(start),
+            Self::angle(end),
         )
     }
+
+    fn arc_path(&self, ring: usize, arc: &Arc) -> Path {
+        self.sector(ring as f64, ring as f64 + 1.0, arc.start, arc.end)
+    }
+}
+
+const IRRELEVANT_ARC_STRENGTH: f32 = 0.22;
+
+fn style_color(style: ArcStyle, ring: f32) -> Color {
+    let color = theme::segment_color(style.kind, ring, style.branch);
+    if style.relevant { color } else { theme::mix(theme::BG, color, IRRELEVANT_ARC_STRENGTH) }
+}
+
+const AT_REST: f64 = 1.0;
+
+fn frame_arc_color(a: &FrameArc, style_progress: f64) -> Color {
+    let ring = a.inner_ring as f32;
+    if a.style_before == a.style_after {
+        return style_color(a.style_after, ring);
+    }
+    theme::mix(style_color(a.style_before, ring), style_color(a.style_after, ring), style_progress as f32)
 }
 
 enum Hit<'a> {
@@ -96,22 +123,15 @@ impl Sunburst<'_> {
         self.layout.focus != self.tree.root()
     }
 
-    fn draw_chart(&self, frame: &mut Frame, geo: &Geo) {
+    fn draw_chart(&self, frame: &mut Frame, geo: &Geo, arcs: &[FrameArc], style_progress: f64) {
         let separator = Stroke::default().with_color(theme::BG).with_width(1.0);
-        for (ring, arcs) in self.layout.rings.iter().enumerate() {
-            let r_in = geo.r0 + ring as f32 * geo.ring_w;
-            for a in arcs {
-                let mut color = theme::segment_color(a.kind, ring, a.branch);
-                if !a.relevant {
-                    color = theme::mix(theme::BG, color, 0.22);
-                }
-                let path = geo.arc_path(ring, a);
-                frame.fill(&path, color);
-                let inner_arc_length = a.span() as f32 * TAU * r_in;
-                let separator_would_hide_the_color = inner_arc_length <= SLIVER_MAX_ARC_LENGTH;
-                if !separator_would_hide_the_color {
-                    frame.stroke(&path, separator);
-                }
+        for a in arcs {
+            let path = geo.sector(a.inner_ring, a.outer_ring, a.start, a.end);
+            frame.fill(&path, frame_arc_color(a, style_progress));
+            let inner_arc_length = a.span() as f32 * TAU * geo.radius(a.inner_ring);
+            let separator_would_hide_the_color = inner_arc_length <= SLIVER_MAX_ARC_LENGTH;
+            if !separator_would_hide_the_color {
+                frame.stroke(&path, separator);
             }
         }
         self.draw_center_disc_with_focus_size(frame, geo);
@@ -121,7 +141,7 @@ impl Sunburst<'_> {
         frame.fill(&Path::circle(geo.center, geo.r0 - 2.0), theme::PANEL);
         let focus = self.layout.focus;
         frame.fill_text(Text {
-            content: format_size(self.layout.total),
+            content: format_size(self.moving.map_or(self.layout.total, |m| m.total)),
             position: geo.center - Vector::new(0.0, 6.0),
             color: theme::kind_color(self.tree.node(focus).kind()),
             size: Pixels((geo.r0 * 0.28).clamp(13.0, 26.0)),
@@ -271,9 +291,16 @@ impl canvas::Program<Message> for Sunburst<'_> {
         cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
         let geo = Geo::new(bounds.size());
-        let chart = self.chart_cache.draw(renderer, bounds.size(), |f| self.draw_chart(f, &geo));
-        let highlight = self.highlight_cache.draw(renderer, bounds.size(), |f| self.draw_highlight(f, &geo));
         let uncached_cursor_overlay = self.draw_cursor_overlay(renderer, bounds, cursor, &geo);
+        if let Some(moving) = self.moving {
+            let mut moving_chart = Frame::new(renderer, bounds.size());
+            self.draw_chart(&mut moving_chart, &geo, &moving.arcs, moving.style_progress);
+            return vec![moving_chart.into_geometry(), uncached_cursor_overlay];
+        }
+        let chart = self
+            .chart_cache
+            .draw(renderer, bounds.size(), |f| self.draw_chart(f, &geo, &at_rest(self.layout), AT_REST));
+        let highlight = self.highlight_cache.draw(renderer, bounds.size(), |f| self.draw_highlight(f, &geo));
         vec![chart, highlight, uncached_cursor_overlay]
     }
 
