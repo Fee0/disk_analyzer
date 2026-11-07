@@ -11,7 +11,7 @@ use crate::{theme, view};
 const VIEW: (f32, f32) = (1280.0, 820.0);
 const OUT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/iced-inspect");
 const A_CHART_SEGMENT: (f32, f32) = (440.0, 320.0);
-const CLOSE_BUTTON_COLUMN_X: f32 = 900.0;
+const CLOSE_BUTTON_COLUMN_X: f32 = 960.0;
 
 fn fixture(root: &Path) {
     let files: &[(&str, usize)] = &[
@@ -369,34 +369,138 @@ fn drag_to_collector() {
     assert!(browser(&app).collector.is_empty(), "a drag released outside the collector collects nothing");
 }
 
-#[test]
-fn inspect_scanning() -> Result<(), Error> {
-    let dir = tempfile::tempdir().unwrap();
-    let (mut app, _) = App::new(None);
-    let _scan_task_never_run = app.update(Message::FolderPicked(Some(dir.path().to_path_buf())));
-    let Screen::Scanning(job) = &mut app.screen else { panic!("not scanning") };
-    job.snapshot =
-        dscan_core::ProgressSnapshot { files: 673_862, dirs: 163_187, bytes: 86_624_714_752, expected: None };
-    let mut ui = sim(&app);
-    let report = ui_inspect::report(&mut ui, VIEW);
-    println!("{report}");
-    assert!(report.contains("\"Files\"") && report.contains("\"673,862\"") && report.contains("\"163,187\""));
-    println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, "scanning")?.display());
+const TB: u64 = 1_000_000_000_000;
 
-    ui.click("Pause")?;
-    let msgs: Vec<Message> = ui.into_messages().collect();
-    assert!(matches!(msgs[..], [Message::TogglePause]), "{msgs:?}");
-    let _ = app.update(Message::TogglePause);
-    let Screen::Scanning(job) = &app.screen else { panic!("not scanning") };
-    assert!(job.cancel.is_paused());
+fn disk(name: &str, mount: &Path, used_share: f64) -> dscan_core::Volume {
+    let total = 2 * TB;
+    let used = (total as f64 * used_share) as u64;
+    dscan_core::Volume {
+        name: name.into(),
+        mount: mount.to_path_buf(),
+        total,
+        used,
+        available: total - used,
+        is_root: false,
+        file_system: "APFS".into(),
+        is_network: false,
+    }
+}
+
+fn scan_job(app: &mut App) -> &mut crate::app::ScanJob {
+    app.scan.as_mut().expect("a scan is running")
+}
+
+fn count_of(texts: &[String], label: &str) -> usize {
+    texts.iter().filter(|t| *t == label).count()
+}
+
+const MID_SCAN: dscan_core::ProgressSnapshot =
+    dscan_core::ProgressSnapshot { files: 673_862, dirs: 163_187, bytes: 86_624_714_752, expected: Some(2 * TB) };
+
+#[test]
+fn scanning_a_disk_turns_its_row_into_a_moving_line_with_pause_and_stop() -> Result<(), Error> {
+    let mounts = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
+    let (mut app, _) = App::new(None);
+    app.volumes = Some(vec![
+        disk("Macintosh HD", mounts[0].path(), 0.37),
+        disk("Backup", mounts[1].path(), 0.8),
+        disk("Archive", mounts[2].path(), 0.96),
+    ]);
+    {
+        let mut ui = sim(&app);
+        println!("{}", ui_inspect::report(&mut ui, VIEW));
+        println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, "start-disks")?.display());
+        assert_eq!(count_of(&texts_on_screen(&mut ui), "Scan"), 3, "every disk offers a scan");
+    }
+
+    let _scan_task_never_run = app.update(Message::ScanVolume(0));
+    assert!(matches!(app.screen, Screen::Start), "the scan runs inside the disk list");
+    assert_eq!(app.title(), "Scanning Macintosh HD — Disk Analyzer");
+    scan_job(&mut app).snapshot = MID_SCAN;
+    let progress_label = format!("{} · 673,862 files", dscan_core::format_size(MID_SCAN.bytes));
+    for percent in [10, 40, 80] {
+        let bytes = MID_SCAN.expected.unwrap() / 100 * percent;
+        scan_job(&mut app).snapshot = dscan_core::ProgressSnapshot { bytes, ..MID_SCAN };
+        let mut ui = sim(&app);
+        println!(
+            "shot: {}",
+            ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, &format!("scanning-{percent}"))?.display()
+        );
+    }
+    scan_job(&mut app).snapshot = MID_SCAN;
     let mut ui = sim(&app);
-    let report = ui_inspect::report(&mut ui, VIEW);
-    assert!(report.contains("\"Resume\"") && report.contains("Paused: "), "{report}");
-    println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, "paused")?.display());
-    drop(ui);
+    let texts = texts_on_screen(&mut ui);
+    assert!(texts.contains(&progress_label), "the scanned size and file count replace the free space: {texts:?}");
+    assert_eq!(count_of(&texts, "Stop"), 1, "only the scanned disk can be stopped");
+    assert_eq!(count_of(&texts, "Scan"), 2, "the other disks keep their scan button");
+    assert!(texts.contains(&"Backup".to_string()) && texts.contains(&"Archive".to_string()), "the list stays");
+    ui.click("Stop")?;
+    let msgs: Vec<Message> = ui.into_messages().collect();
+    assert!(matches!(msgs[..], [Message::CancelScan]), "{msgs:?}");
+
     let _ = app.update(Message::TogglePause);
-    let Screen::Scanning(job) = &app.screen else { panic!("not scanning") };
-    assert!(!job.cancel.is_paused());
+    assert!(scan_job(&mut app).cancel.is_paused());
+    {
+        let mut ui = sim(&app);
+        let paused_label = format!("Paused · {}", dscan_core::format_size(MID_SCAN.bytes));
+        assert!(texts_on_screen(&mut ui).contains(&paused_label));
+        println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, "paused")?.display());
+    }
+    let _ = app.update(Message::TogglePause);
+    let cancel = scan_job(&mut app).cancel.clone();
+    assert!(!cancel.is_paused());
+
+    let job_id = scan_job(&mut app).id;
+    let _ = app.update(Message::CancelScan);
+    assert!(cancel.is_cancelled(), "stopping cancels the scan thread");
+    assert!(app.scan.is_none(), "the row is back to normal at once, without waiting for the thread");
+    let _ = app.update(Message::ScanFinished { job_id, crash: None });
+    assert!(app.scan.is_none() && app.error.is_none(), "the stopped scan reporting back changes nothing");
+    let mut ui = sim(&app);
+    assert_eq!(count_of(&texts_on_screen(&mut ui), "Scan"), 3);
+    Ok(())
+}
+
+#[test]
+fn a_folder_scan_gets_its_own_row_and_another_scan_replaces_it() -> Result<(), Error> {
+    let mount = tempfile::tempdir().unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    fixture(folder.path());
+    let (mut app, _) = App::new(None);
+    app.volumes = Some(vec![disk("Macintosh HD", mount.path(), 0.5)]);
+    app.screen = Screen::Browse(Box::new(scanned_folder(folder.path())));
+    let _ = app.update(Message::GoHome);
+
+    let _scan_task_never_run = app.update(Message::FolderPicked(Some(folder.path().to_path_buf())));
+    scan_job(&mut app).snapshot = dscan_core::ProgressSnapshot { expected: None, ..MID_SCAN };
+    let folder_name = scan_job(&mut app).opts.display_name();
+    {
+        let mut ui = sim(&app);
+        println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, "scanning-folder")?.display());
+        let texts = texts_on_screen(&mut ui);
+        assert!(count_of(&texts, &folder_name) >= 1, "the folder is listed under the disks: {texts:?}");
+        assert_eq!((count_of(&texts, "Stop"), count_of(&texts, "Scan")), (1, 1), "{texts:?}");
+    }
+    let msgs: Vec<Message> = {
+        let mut ui = sim(&app);
+        let open_result = ui_inspect::nodes(&mut ui)
+            .into_iter()
+            .filter(|n| n.text.as_deref() == Some(folder_name.as_str()))
+            .map(|n| n.bounds)
+            .max_by(|a, b| a.y.total_cmp(&b.y))
+            .expect("the open result is listed below the disks");
+        ui_inspect::click_at(&mut ui, (open_result.center_x(), open_result.center_y()));
+        ui.into_messages().collect()
+    };
+    assert!(msgs.is_empty(), "open results can't be resumed while a scan runs: {msgs:?}");
+
+    let (folder_job, folder_cancel) = (scan_job(&mut app).id, scan_job(&mut app).cancel.clone());
+    let _scan_task_never_run = app.update(Message::ScanVolume(0));
+    assert!(folder_cancel.is_cancelled(), "the replaced scan stops");
+    let _ = app.update(Message::ScanFinished { job_id: folder_job, crash: None });
+    let disk_job = app.scan.as_ref().expect("the disk scan keeps running");
+    assert_ne!(disk_job.id, folder_job);
+    assert!(disk_job.opts.whole_disk);
     Ok(())
 }
 
@@ -464,7 +568,7 @@ fn inspect_open_results() -> Result<(), Error> {
     );
 
     let _ = app.update(Message::FolderPicked(Some(dirs[0].path().to_path_buf())));
-    let Screen::Scanning(job) = &app.screen else { panic!("not scanning") };
+    let job = app.scan.as_ref().expect("scanning");
     let job_id = job.id;
     *job.result_slot.lock() = Some(Ok(scan(dirs[0].path()).0));
     let _ = app.update(Message::ScanFinished { job_id, crash: None });
@@ -568,14 +672,8 @@ fn every_screen_stays_readable_from_the_default_window_down_to_the_minimum_size(
 
     let (mut scanning, _) = App::new(None);
     let _scan_task_never_run = scanning.update(Message::FolderPicked(Some(long.clone())));
-    if let Screen::Scanning(job) = &mut scanning.screen {
-        job.snapshot = dscan_core::ProgressSnapshot {
-            files: 673_862,
-            dirs: 163_187,
-            bytes: 86_624_714_752,
-            expected: Some(200_000_000_000),
-        };
-    }
+    scanning.volumes = start.volumes.clone();
+    scan_job(&mut scanning).snapshot = MID_SCAN;
 
     let mut collected_and_searching = browser_app(dir.path());
     let inner = descend(&browser(&collected_and_searching).tree, &[long_name, "inner"]);
@@ -722,6 +820,7 @@ fn disk_cards_name_the_file_system_and_mark_network_shares() {
     app.volumes = Some(vec![share]);
     let mut ui = sim(&app);
     let texts = texts_on_screen(&mut ui);
-    let expected = format!("{} · SMB · network", Path::new("/Volumes/media").display());
+    let expected =
+        format!("{} · {} · SMB · network", dscan_core::format_size(4 * TB), Path::new("/Volumes/media").display());
     assert!(texts.contains(&expected), "{texts:?}");
 }

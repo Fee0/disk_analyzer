@@ -8,6 +8,7 @@ mod iced_inspect;
 mod icon;
 #[cfg(test)]
 mod inspect_tests;
+mod meter;
 mod sunburst;
 mod theme;
 mod view;

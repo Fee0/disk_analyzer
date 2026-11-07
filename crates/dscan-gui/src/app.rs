@@ -20,6 +20,7 @@ pub const MAX_LIST_ROWS: usize = 400;
 const DRAG_THRESHOLD: f32 = 4.0;
 pub const HOLD_TO_DELETE: Duration = Duration::from_secs(3);
 const HOLD_PROGRESS_REFRESH: Duration = Duration::from_millis(33);
+const SCAN_PROGRESS_REFRESH: Duration = Duration::from_millis(100);
 
 struct PendingRemoval {
     removal: Removal,
@@ -51,6 +52,7 @@ fn drop_off_thread(results: Vec<Browser>) {
 
 pub struct App {
     pub screen: Screen,
+    pub scan: Option<ScanJob>,
     pub volumes: Option<Vec<Volume>>,
     pub full_disk_access: bool,
     pub error: Option<String>,
@@ -60,7 +62,6 @@ pub struct App {
 
 pub enum Screen {
     Start,
-    Scanning(ScanJob),
     Browse(Box<Browser>),
 }
 
@@ -73,6 +74,12 @@ pub struct ScanJob {
     pub cancel: CancelToken,
     pub snapshot: ProgressSnapshot,
     pub(crate) result_slot: ScanResultSlot,
+}
+
+impl ScanJob {
+    pub fn scans_volume(&self, volume: &Volume) -> bool {
+        self.opts.whole_disk && self.opts.root == volume.mount
+    }
 }
 
 pub struct PendingDrag {
@@ -144,7 +151,7 @@ pub enum Message {
     FolderPicked(Option<PathBuf>),
     OpenFdaSettings,
     RefreshVolumes,
-    Tick,
+    ScanProgressTick,
     AnimationFrame(Instant),
     CancelScan,
     TogglePause,
@@ -191,6 +198,7 @@ impl App {
     pub fn new(initial: Option<PathBuf>) -> (Self, Task<Message>) {
         let mut app = App {
             screen: Screen::Start,
+            scan: None,
             volumes: None,
             full_disk_access: true,
             error: None,
@@ -213,18 +221,21 @@ impl App {
     }
 
     pub fn title(&self) -> String {
-        match &self.screen {
-            Screen::Start => "Disk Analyzer".into(),
-            Screen::Scanning(j) => format!("Scanning {} — Disk Analyzer", j.opts.display_name()),
-            Screen::Browse(b) => format!("{} — Disk Analyzer", b.tree.name(b.focus)),
+        match (&self.screen, &self.scan) {
+            (Screen::Start, Some(j)) => format!("Scanning {} — Disk Analyzer", j.opts.display_name()),
+            (Screen::Start, None) => "Disk Analyzer".into(),
+            (Screen::Browse(b), _) => format!("{} — Disk Analyzer", b.tree.name(b.focus)),
         }
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
         match &self.screen {
-            Screen::Start => Subscription::none(),
-            Screen::Scanning(job) if job.cancel.is_paused() => Subscription::none(),
-            Screen::Scanning(_) => iced::time::every(Duration::from_millis(100)).map(|_| Message::Tick),
+            Screen::Start => match &self.scan {
+                Some(job) if !job.cancel.is_paused() => {
+                    iced::time::every(SCAN_PROGRESS_REFRESH).map(|_| Message::ScanProgressTick)
+                }
+                _ => Subscription::none(),
+            },
             Screen::Browse(b) => {
                 let mut subscriptions = vec![event::listen_with(global_event)];
                 if b.drag.is_some() {
@@ -247,7 +258,18 @@ impl App {
         }
     }
 
+    fn stop_scan(&mut self) {
+        if let Some(job) = self.scan.take() {
+            job.cancel.cancel();
+        }
+    }
+
+    pub fn is_scanning(&self) -> bool {
+        self.scan.is_some()
+    }
+
     fn start_scan(&mut self, opts: ScanOptions) -> Task<Message> {
+        self.stop_scan();
         self.discard_browser_on_screen();
         let id = self.next_job;
         self.next_job += 1;
@@ -259,14 +281,7 @@ impl App {
             off_thread(move || *slot.lock() = Some(dscan_core::scan(&opts, &progress, &cancel)))
         };
         self.error = None;
-        self.screen = Screen::Scanning(ScanJob {
-            id,
-            opts,
-            progress,
-            cancel,
-            snapshot: ProgressSnapshot::default(),
-            result_slot,
-        });
+        self.scan = Some(ScanJob { id, opts, progress, cancel, snapshot: ProgressSnapshot::default(), result_slot });
         Task::perform(work, move |r| Message::ScanFinished { job_id: id, crash: r.err() })
     }
 
@@ -300,29 +315,24 @@ impl App {
                 }
             }
             Message::RefreshVolumes => return Self::load_volumes(),
-            Message::Tick => {
-                if let Screen::Scanning(job) = &mut self.screen {
+            Message::ScanProgressTick => {
+                if let Some(job) = &mut self.scan {
                     job.snapshot = job.progress.snapshot();
                 }
             }
             Message::TogglePause => {
-                if let Screen::Scanning(job) = &self.screen {
+                if let Some(job) = &self.scan {
                     job.cancel.set_paused(!job.cancel.is_paused());
                 }
             }
-            Message::CancelScan => {
-                if let Screen::Scanning(job) = &self.screen {
-                    job.cancel.cancel();
-                }
-            }
+            Message::CancelScan => self.stop_scan(),
             Message::ScanFinished { job_id, crash } => {
-                let Screen::Scanning(job) = &mut self.screen else { return Task::none() };
-                if job.id != job_id {
+                if self.scan.as_ref().is_none_or(|job| job.id != job_id) {
                     return Task::none();
                 }
+                let Some(job) = self.scan.take() else { return Task::none() };
                 let result = job.result_slot.lock().take();
-                let opts = job.opts.clone();
-                self.screen = Screen::Start;
+                let opts = job.opts;
                 match result {
                     Some(Ok(tree)) => {
                         self.drop_parked_results_superseded_by(&tree);
@@ -345,7 +355,7 @@ impl App {
                 return Self::load_volumes();
             }
             Message::ResumeParked(i) => {
-                if matches!(self.screen, Screen::Start) && i < self.parked_newest_first.len() {
+                if matches!(self.screen, Screen::Start) && !self.is_scanning() && i < self.parked_newest_first.len() {
                     self.screen = Screen::Browse(Box::new(self.parked_newest_first.remove(i)));
                 }
             }

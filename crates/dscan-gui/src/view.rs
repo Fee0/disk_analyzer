@@ -4,15 +4,16 @@ use dscan_core::{
 use iced::border;
 use iced::widget::text::Wrapping;
 use iced::widget::{
-    Column, Space, Svg, button, canvas, center, column, container, mouse_area, pin, progress_bar, responsive, row,
-    scrollable, stack, text, text_input, tooltip,
+    Column, Space, Svg, button, canvas, center, column, container, mouse_area, pin, responsive, row, scrollable, stack,
+    text, text_input, tooltip,
 };
-use iced::{Alignment, Color, Element, Fill, Length, Shrink, Theme};
+use iced::{Alignment, Color, Element, Fill, Length, Theme};
 
 use crate::animation::ChartAnimation;
 use crate::app::{App, Browser, HOLD_TO_DELETE, ListRow, Message, SEARCH_ID, ScanJob, Screen};
 use crate::fmt::{fit_width, fit_width_keeping_both_ends, generous_text_width, thousands, truncate};
 use crate::icon;
+use crate::meter::Meter;
 use crate::sunburst::Sunburst;
 use crate::theme;
 
@@ -22,7 +23,6 @@ pub const MIN_WINDOW_SIZE: iced::Size = iced::Size::new(860.0, 560.0);
 pub fn view(app: &App) -> Element<'_, Message> {
     let content = match &app.screen {
         Screen::Start => start(app),
-        Screen::Scanning(job) => scanning(job),
         Screen::Browse(b) => browse(b),
     };
     container(content).width(Fill).height(Fill).style(|_| container::background(theme::BG)).into()
@@ -139,81 +139,61 @@ fn icon_button<'a>(
 }
 
 const START_PADDING: f32 = 24.0;
-const DISK_CARD_GAP: f32 = 16.0;
-const START_BLOCK_MAX_WIDTH: f32 = 600.0;
+const START_BLOCK_MAX_WIDTH: f32 = 720.0;
+const START_SECTION_GAP: f32 = 14.0;
+const DISK_LIST_PADDING: f32 = 4.0;
+const DISK_LIST_RADIUS: f32 = 12.0;
+const DISK_ROW_RADIUS: f32 = DISK_LIST_RADIUS - DISK_LIST_PADDING;
+const DISK_ROW_HEIGHT: f32 = 76.0;
+const DISK_ROW_PADDING_X: f32 = 18.0;
+const DISK_ROW_SPACING: f32 = 18.0;
+const DISK_ICON_SIZE: f32 = 34.0;
+const DISK_NAME_SIZE: f32 = 17.0;
+const DISK_DETAILS_SIZE: f32 = 13.0;
+const DISK_TEXT_SPACING: f32 = 4.0;
+const METER_WIDTH: f32 = 200.0;
+const METER_HEIGHT: f32 = 6.0;
+const METER_LABEL_SIZE: f32 = 13.0;
+const METER_LABEL_GAP: f32 = 10.0;
+const SCAN_CONTROLS_WIDTH: f32 = 116.0;
+const SCAN_BUTTON_WIDTH: f32 = 76.0;
+const SCAN_BUTTON_TEXT_SIZE: f32 = 14.0;
+const SCAN_CONTROLS_SPACING: f32 = 6.0;
+const PAUSE_ICON_SIZE: f32 = 14.0;
+const ALTERNATE_ROW_SHADE: f32 = 0.45;
+const FILLING_UP: f32 = 0.75;
+const NEARLY_FULL: f32 = 0.9;
+const SCAN_SHOWN_COMPLETE_ONLY_WHEN_DONE: f32 = 0.99;
+const PAUSED_SCAN_STRENGTH: f32 = 0.5;
+const SCAN_FOLDER_LABEL: &str = "Scan Folder…";
+const SCAN_LABEL: &str = "Scan";
+const STOP_LABEL: &str = "Stop";
 
 fn start(app: &App) -> Element<'_, Message> {
     responsive(move |viewport| {
-        scrollable(center(start_content(app)).padding(START_PADDING)).width(Fill).height(viewport.height).into()
+        let width = (viewport.width - 2.0 * START_PADDING).min(START_BLOCK_MAX_WIDTH);
+        scrollable(center(start_content(app, width)).padding(START_PADDING)).width(Fill).height(viewport.height).into()
     })
     .into()
 }
 
-fn start_content(app: &App) -> Column<'_, Message> {
-    let cards: Element<'_, Message> = match &app.volumes {
-        None => text("Loading disks…").size(14).color(theme::TEXT_DIM).into(),
-        Some(volumes) => {
-            let mut cards = row![].spacing(DISK_CARD_GAP);
-            for (i, v) in volumes.iter().enumerate() {
-                let frac = if v.total > 0 { v.used as f32 / v.total as f32 } else { 0.0 };
-                let card = column![
-                    row![dot(theme::kind_color(Kind::Document), 12.0), text(v.name.clone()).size(20)]
-                        .spacing(10)
-                        .align_y(Alignment::Center),
-                    text(volume_details(v)).size(12).color(theme::TEXT_DIM),
-                    progress_bar(0.0..=1.0, frac).girth(8),
-                    text(format!("{} used of {}", format_size(v.used), format_size(v.total))).size(13),
-                    text(format!("{} available", format_size(v.available))).size(12).color(theme::TEXT_DIM),
-                ]
-                .spacing(10)
-                .width(260);
-                cards = cards.push(
-                    button(card)
-                        .padding(18)
-                        .style(|t: &Theme, s| {
-                            let bg = if matches!(s, button::Status::Hovered) { theme::PANEL_HI } else { theme::PANEL };
-                            button::Style {
-                                background: Some(bg.into()),
-                                text_color: theme::TEXT,
-                                border: border::rounded(12),
-                                ..button::secondary(t, s)
-                            }
-                        })
-                        .on_press(Message::ScanVolume(i)),
-                );
-            }
-            cards.wrap().vertical_spacing(DISK_CARD_GAP).into()
-        }
-    };
-
-    let disks_header = row![
-        text("Disks").size(13).color(theme::TEXT_DIM),
+fn start_content(app: &App, width: f32) -> Column<'_, Message> {
+    let footer = row![
+        outlined_text_button(SCAN_FOLDER_LABEL, Message::OpenFolder),
+        Space::new().width(Fill),
         icon_button(icon::refresh(14.0, theme::TEXT_DIM), "Refresh disks", Message::RefreshVolumes),
     ]
-    .spacing(4)
     .align_y(Alignment::Center);
 
-    let mut col = column![
-        text("Disk Analyzer").size(34),
-        text("Choose a disk or a folder to see what takes up space.").size(15).color(theme::TEXT_DIM),
-        Space::new().height(12),
-        column![disks_header, cards].spacing(4).width(Shrink),
-        Space::new().height(4),
-        button(text("Open folder…").size(14).wrapping(Wrapping::None))
-            .padding([8, 16])
-            .style(filled_white_text_button(theme::ACCENT))
-            .on_press(Message::OpenFolder),
-    ]
-    .spacing(12)
-    .align_x(Alignment::Center);
+    let mut col = column![disk_list(app, width), footer].spacing(START_SECTION_GAP).width(width);
 
     if !app.parked_newest_first.is_empty() {
-        col = col.push(Space::new().height(12)).push(open_results(app));
+        col = col.push(Space::new().height(START_SECTION_GAP)).push(open_results(app));
     }
 
     if !app.full_disk_access {
         let warn = theme::kind_color(Kind::Archive);
-        col = col.push(Space::new().height(16)).push(
+        col = col.push(Space::new().height(START_SECTION_GAP)).push(
             container(
                 row![
                     text("Without Full Disk Access some folders can't be read, so some space shows up as hidden. Grant it to your terminal (or this app), then restart it.")
@@ -225,14 +205,169 @@ fn start_content(app: &App) -> Column<'_, Message> {
                 .align_y(Alignment::Center),
             )
             .padding(14)
-            .max_width(START_BLOCK_MAX_WIDTH)
+            .width(Fill)
             .style(move |_| rounded_box(warn.scale_alpha(0.15), 10.0).border(border::rounded(10).width(1).color(warn.scale_alpha(0.5)))),
         );
     }
     if let Some(err) = &app.error {
-        col = col.push(container(text(err.clone()).color(theme::DANGER).size(14)).max_width(START_BLOCK_MAX_WIDTH));
+        col = col.push(text(err.clone()).color(theme::DANGER).size(14));
     }
     col
+}
+
+fn disk_list(app: &App, width: f32) -> Element<'_, Message> {
+    let scan = app.scan.as_ref();
+    let text_width = disk_text_width(width);
+    let mut rows: Vec<Element<'_, Message>> = Vec::new();
+    match &app.volumes {
+        None => rows.push(
+            container(text("Loading disks…").size(14).color(theme::TEXT_DIM))
+                .height(DISK_ROW_HEIGHT)
+                .padding([0.0, DISK_ROW_PADDING_X])
+                .align_y(Alignment::Center)
+                .into(),
+        ),
+        Some(volumes) => {
+            for (i, v) in volumes.iter().enumerate() {
+                let identity = DiskIdentity {
+                    icon: icon::drive(DISK_ICON_SIZE, theme::TEXT_DIM),
+                    name: v.name.clone(),
+                    details: format!("{} · {}", format_size(v.total), volume_details(v)),
+                };
+                rows.push(match scan.filter(|job| job.scans_volume(v)) {
+                    Some(job) => scanning_row(identity, job, text_width),
+                    None => volume_row(identity, i, v, text_width),
+                });
+            }
+        }
+    }
+    let scans_a_listed_volume = |job: &ScanJob| app.volumes.iter().flatten().any(|v| job.scans_volume(v));
+    if let Some(job) = scan.filter(|job| !scans_a_listed_volume(job)) {
+        let identity = DiskIdentity {
+            icon: if job.opts.whole_disk {
+                icon::drive(DISK_ICON_SIZE, theme::TEXT_DIM)
+            } else {
+                icon::folder(DISK_ICON_SIZE, theme::TEXT_DIM)
+            },
+            name: job.opts.display_name(),
+            details: job.opts.root.display().to_string(),
+        };
+        rows.push(scanning_row(identity, job, text_width));
+    }
+    let shaded_rows = rows.into_iter().enumerate().map(|(n, content)| {
+        let shade =
+            if n % 2 == 1 { theme::mix(theme::PANEL, theme::PANEL_HI, ALTERNATE_ROW_SHADE) } else { theme::PANEL };
+        container(content).width(Fill).style(move |_| rounded_box(shade, DISK_ROW_RADIUS)).into()
+    });
+    container(Column::with_children(shaded_rows))
+        .padding(DISK_LIST_PADDING)
+        .width(Fill)
+        .style(|_| rounded_box(theme::PANEL, DISK_LIST_RADIUS))
+        .into()
+}
+
+fn disk_text_width(list_width: f32) -> f32 {
+    list_width
+        - 2.0 * DISK_LIST_PADDING
+        - 2.0 * DISK_ROW_PADDING_X
+        - DISK_ICON_SIZE
+        - 3.0 * DISK_ROW_SPACING
+        - METER_WIDTH
+        - SCAN_CONTROLS_WIDTH
+}
+
+struct DiskIdentity<'a> {
+    icon: Svg<'a, Theme>,
+    name: String,
+    details: String,
+}
+
+fn disk_row<'a>(
+    identity: DiskIdentity<'a>,
+    meter: Meter,
+    label: text::Text<'a, Theme>,
+    controls: impl Into<Element<'a, Message>>,
+    text_width: f32,
+) -> Element<'a, Message> {
+    row![
+        identity.icon,
+        column![
+            text(fit_width(&identity.name, text_width, DISK_NAME_SIZE)).size(DISK_NAME_SIZE).wrapping(Wrapping::None),
+            text(fit_width_keeping_both_ends(&identity.details, text_width, DISK_DETAILS_SIZE))
+                .size(DISK_DETAILS_SIZE)
+                .color(theme::TEXT_DIM)
+                .wrapping(Wrapping::None),
+        ]
+        .spacing(DISK_TEXT_SPACING)
+        .width(Fill)
+        .clip(true),
+        column![
+            canvas(meter).width(METER_WIDTH).height(METER_HEIGHT),
+            label.size(METER_LABEL_SIZE).wrapping(Wrapping::None)
+        ]
+        .spacing(METER_LABEL_GAP)
+        .width(METER_WIDTH)
+        .align_x(Alignment::End),
+        container(controls).width(SCAN_CONTROLS_WIDTH).align_x(Alignment::End),
+    ]
+    .spacing(DISK_ROW_SPACING)
+    .align_y(Alignment::Center)
+    .padding([0.0, DISK_ROW_PADDING_X])
+    .height(DISK_ROW_HEIGHT)
+    .into()
+}
+
+fn fullness_color(used_fraction: f32) -> Color {
+    let kind = if used_fraction >= NEARLY_FULL {
+        Kind::DiskImage
+    } else if used_fraction >= FILLING_UP {
+        Kind::Archive
+    } else {
+        Kind::Video
+    };
+    theme::kind_color(kind)
+}
+
+fn scan_button<'a>(label: &'a str, msg: Message) -> Element<'a, Message> {
+    button(text(label).size(SCAN_BUTTON_TEXT_SIZE).width(Fill).align_x(Alignment::Center).wrapping(Wrapping::None))
+        .padding([6.0, 0.0])
+        .width(SCAN_BUTTON_WIDTH)
+        .style(filled_white_text_button(theme::NEUTRAL_BUTTON))
+        .on_press(msg)
+        .into()
+}
+
+fn volume_row<'a>(identity: DiskIdentity<'a>, index: usize, v: &Volume, text_width: f32) -> Element<'a, Message> {
+    let used_fraction = if v.total > 0 { v.used as f32 / v.total as f32 } else { 0.0 };
+    let color = fullness_color(used_fraction);
+    let label = text(format!("{} free", format_size(v.available))).color(color);
+    let meter = Meter { fraction: used_fraction, color };
+    disk_row(identity, meter, label, scan_button(SCAN_LABEL, Message::ScanVolume(index)), text_width)
+}
+
+fn scanning_row<'a>(identity: DiskIdentity<'a>, job: &ScanJob, text_width: f32) -> Element<'a, Message> {
+    let s = &job.snapshot;
+    let fraction =
+        s.expected.map_or(0.0, |expected| (s.bytes as f32 / expected as f32).min(SCAN_SHOWN_COMPLETE_ONLY_WHEN_DONE));
+    let paused = job.cancel.is_paused();
+    let (meter, label) = if paused {
+        let dimmed = theme::mix(theme::BG, theme::ACCENT, PAUSED_SCAN_STRENGTH);
+        (Meter { fraction, color: dimmed }, format!("Paused · {}", format_size(s.bytes)))
+    } else {
+        (Meter { fraction, color: theme::ACCENT }, format!("{} · {} files", format_size(s.bytes), thousands(s.files)))
+    };
+    let (pause_icon, pause_tooltip) = if paused {
+        (icon::resume(PAUSE_ICON_SIZE, theme::TEXT), "Resume")
+    } else {
+        (icon::pause(PAUSE_ICON_SIZE, theme::TEXT), "Pause")
+    };
+    let controls = row![
+        icon_button(pause_icon, pause_tooltip, Message::TogglePause),
+        scan_button(STOP_LABEL, Message::CancelScan)
+    ]
+    .spacing(SCAN_CONTROLS_SPACING)
+    .align_y(Alignment::Center);
+    disk_row(identity, meter, text(label).color(theme::TEXT), controls, text_width)
 }
 
 const NETWORK_VOLUME_NOTE: &str = "network";
@@ -321,62 +456,15 @@ fn open_result_rows(app: &App, list_width: f32) -> Element<'_, Message> {
                     let bg = if matches!(s, button::Status::Hovered) { theme::PANEL_HI } else { theme::PANEL };
                     button::Style {
                         background: Some(bg.into()),
-                        text_color: theme::TEXT,
+                        text_color: if matches!(s, button::Status::Disabled) { theme::TEXT_DIM } else { theme::TEXT },
                         border: border::rounded(10),
                         ..button::secondary(t, s)
                     }
                 })
-                .on_press(Message::ResumeParked(i)),
+                .on_press_maybe((!app.is_scanning()).then_some(Message::ResumeParked(i))),
         );
     }
     scrollable(list).height(Fill).spacing(RESULT_LIST_SCROLLBAR_GAP).into()
-}
-
-const SCAN_TITLE_SIZE: f32 = 26.0;
-const SCAN_PROGRESS_MAX_WIDTH: f32 = 420.0;
-
-fn scanning(job: &ScanJob) -> Element<'_, Message> {
-    responsive(move |viewport| scanning_sized(job, viewport.width - 2.0 * START_PADDING)).into()
-}
-
-fn scanning_sized(job: &ScanJob, content_width: f32) -> Element<'_, Message> {
-    let s = &job.snapshot;
-    let stat = |label, n| {
-        row![text(label).size(15).color(theme::TEXT_DIM), Space::new().width(Fill), text(thousands(n)).size(15)]
-            .width(220)
-    };
-    let paused = job.cancel.is_paused();
-    let title = if paused {
-        format!("Paused: {}", job.opts.display_name())
-    } else {
-        format!("Scanning {}…", job.opts.display_name())
-    };
-    let mut col = column![
-        text(fit_width(&title, content_width, SCAN_TITLE_SIZE)).size(SCAN_TITLE_SIZE).wrapping(Wrapping::None),
-        Space::new().height(8),
-        text(format_size(s.bytes)).size(44).color(theme::kind_color(Kind::Video)),
-        column![stat("Files", s.files), stat("Folders", s.dirs)].spacing(4),
-    ]
-    .spacing(8)
-    .align_x(Alignment::Center);
-    if let Some(expected) = s.expected {
-        let frac = (s.bytes as f32 / expected as f32).min(0.99);
-        col =
-            col.push(container(progress_bar(0.0..=1.0, frac).girth(6)).width(Fill).max_width(SCAN_PROGRESS_MAX_WIDTH));
-    }
-    let buttons = row![
-        button(text(if paused { "Resume" } else { "Pause" }).size(14).wrapping(Wrapping::None))
-            .padding([8, 18])
-            .style(filled_white_text_button(theme::ACCENT))
-            .on_press(Message::TogglePause),
-        button(text("Cancel").size(14))
-            .padding([8, 18])
-            .style(filled_white_text_button(theme::NEUTRAL_BUTTON))
-            .on_press(Message::CancelScan),
-    ]
-    .spacing(10);
-    col = col.push(Space::new().height(12)).push(buttons);
-    center(col).padding(START_PADDING).into()
 }
 
 const PANEL_GAP: f32 = 12.0;

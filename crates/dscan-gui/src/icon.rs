@@ -20,6 +20,9 @@ static CLOSE: LazyLock<Handle> = LazyLock::new(|| black_line_icon_svg(r#"<path d
 static CHEVRON_LEFT: LazyLock<Handle> = LazyLock::new(|| black_line_icon_svg(r#"<path d="M15 18 9 12l6-6"/>"#));
 static CHEVRON_RIGHT: LazyLock<Handle> = LazyLock::new(|| black_line_icon_svg(r#"<path d="m9 18 6-6-6-6"/>"#));
 
+static PAUSE: LazyLock<Handle> = LazyLock::new(|| black_line_icon_svg(r#"<path d="M9 5v14M15 5v14"/>"#));
+static RESUME: LazyLock<Handle> = LazyLock::new(|| black_line_icon_svg(r#"<path d="M8 5.5v13l10-6.5z"/>"#));
+
 static DRIVE: LazyLock<Handle> = LazyLock::new(|| {
     black_line_icon_svg(
         r#"<rect x="3" y="13" width="18" height="7" rx="2"/><path d="M5 13 7.5 5h9l2.5 8"/><path d="M7 16.5h.01"/>"#,
@@ -61,4 +64,12 @@ pub fn drive<'a>(size: f32, color: Color) -> Svg<'a, Theme> {
 
 pub fn folder<'a>(size: f32, color: Color) -> Svg<'a, Theme> {
     tinted(&FOLDER, size, color)
+}
+
+pub fn pause<'a>(size: f32, color: Color) -> Svg<'a, Theme> {
+    tinted(&PAUSE, size, color)
+}
+
+pub fn resume<'a>(size: f32, color: Color) -> Svg<'a, Theme> {
+    tinted(&RESUME, size, color)
 }
