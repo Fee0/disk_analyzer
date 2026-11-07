@@ -13,6 +13,7 @@ use crate::theme;
 
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 const SLIVER_MAX_ARC_LENGTH: f32 = 3.0;
+const SEPARATOR_GAP: f32 = 1.0;
 const CENTER_LABEL_WIDTH_PER_HOLE_RADIUS: f32 = 1.6;
 
 pub struct Sunburst<'a> {
@@ -54,13 +55,16 @@ impl Geo {
     }
 
     fn sector(&self, inner_ring: f64, outer_ring: f64, start: f64, end: f64) -> Path {
-        annular_sector_as_one_polygon(
-            self.center,
-            self.radius(inner_ring),
-            self.radius(outer_ring),
-            Self::angle(start),
-            Self::angle(end),
-        )
+        let half_gap = SEPARATOR_GAP / 2.0;
+        let inner_radius = self.radius(inner_ring) + half_gap;
+        let outer_radius = (self.radius(outer_ring) - half_gap).max(inner_radius);
+        let (a0, a1) = (Self::angle(start), Self::angle(end));
+        let gaps_would_hide_the_color = (a1 - a0) * inner_radius <= SEPARATOR_GAP + SLIVER_MAX_ARC_LENGTH;
+        let edge = |radius: f32| {
+            let angular_half_gap = if gaps_would_hide_the_color { 0.0 } else { half_gap / radius };
+            ArcEdge { radius, start: a0 + angular_half_gap, end: a1 - angular_half_gap }
+        };
+        annular_sector_as_one_polygon(self.center, edge(inner_radius), edge(outer_radius))
     }
 
     fn arc_path(&self, ring: usize, arc: &Arc) -> Path {
@@ -91,19 +95,34 @@ enum Hit<'a> {
     Nothing,
 }
 
-fn annular_sector_as_one_polygon(c: Point, r_in: f32, r_out: f32, a0: f32, a1: f32) -> Path {
-    let sweep = a1 - a0;
-    let steps = ((sweep.abs() * r_out) / 3.0).ceil().clamp(1.0, 720.0) as usize;
-    let dirs: Vec<(f32, f32)> =
-        (0..=steps).map(|i| (a0 + sweep * i as f32 / steps as f32).sin_cos()).map(|(s, c)| (c, s)).collect();
+#[derive(Clone, Copy)]
+struct ArcEdge {
+    radius: f32,
+    start: f32,
+    end: f32,
+}
+
+const ARC_STEP_LENGTH: f32 = 3.0;
+const MAX_ARC_STEPS: f32 = 720.0;
+
+impl ArcEdge {
+    fn points(self, center: Point) -> impl DoubleEndedIterator<Item = Point> {
+        let sweep = self.end - self.start;
+        let steps = ((sweep.abs() * self.radius) / ARC_STEP_LENGTH).ceil().clamp(1.0, MAX_ARC_STEPS) as usize;
+        (0..=steps).map(move |i| {
+            let (sin, cos) = (self.start + sweep * i as f32 / steps as f32).sin_cos();
+            Point::new(center.x + cos * self.radius, center.y + sin * self.radius)
+        })
+    }
+}
+
+fn annular_sector_as_one_polygon(center: Point, inner: ArcEdge, outer: ArcEdge) -> Path {
     Path::new(|b| {
-        b.move_to(Point::new(c.x + dirs[0].0 * r_out, c.y + dirs[0].1 * r_out));
-        for &(dx, dy) in &dirs[1..] {
-            b.line_to(Point::new(c.x + dx * r_out, c.y + dy * r_out));
+        let mut outline = outer.points(center).chain(inner.points(center).rev());
+        if let Some(first) = outline.next() {
+            b.move_to(first);
         }
-        for &(dx, dy) in dirs.iter().rev() {
-            b.line_to(Point::new(c.x + dx * r_in, c.y + dy * r_in));
-        }
+        outline.for_each(|p| b.line_to(p));
         b.close();
     })
 }
@@ -125,15 +144,8 @@ impl Sunburst<'_> {
     }
 
     fn draw_chart(&self, frame: &mut Frame, geo: &Geo, arcs: &[FrameArc], style_progress: f64) {
-        let separator = Stroke::default().with_color(theme::BG).with_width(1.0);
         for a in arcs {
-            let path = geo.sector(a.inner_ring, a.outer_ring, a.start, a.end);
-            frame.fill(&path, frame_arc_color(a, style_progress));
-            let inner_arc_length = a.span() as f32 * TAU * geo.radius(a.inner_ring);
-            let separator_would_hide_the_color = inner_arc_length <= SLIVER_MAX_ARC_LENGTH;
-            if !separator_would_hide_the_color {
-                frame.stroke(&path, separator);
-            }
+            frame.fill(&geo.sector(a.inner_ring, a.outer_ring, a.start, a.end), frame_arc_color(a, style_progress));
         }
         self.draw_center_disc_with_focus_size(frame, geo);
     }
@@ -338,8 +350,9 @@ mod tests {
             b.close();
         });
         assert!(subpath_count(&with_iced_arcs) > 1, "iced's arc builder splits a sector into several sub-paths");
+        let edge = |radius| ArcEdge { radius, start: a0, end: a1 };
         assert_eq!(
-            subpath_count(&annular_sector_as_one_polygon(center, r_in, r_out, a0, a1)),
+            subpath_count(&annular_sector_as_one_polygon(center, edge(r_in), edge(r_out))),
             1,
             "a hand-tessellated sector is one closed polygon"
         );
