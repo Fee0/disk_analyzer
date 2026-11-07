@@ -2,8 +2,8 @@ use dscan_core::{Kind, Metric, NodeId, Segment, TRASH_NAME, format_size};
 use iced::border;
 use iced::widget::text::Wrapping;
 use iced::widget::{
-    Column, Space, button, canvas, center, column, container, mouse_area, pin, progress_bar, row, scrollable, stack,
-    text, text_input, tooltip,
+    Column, Space, Svg, button, canvas, center, column, container, mouse_area, pin, progress_bar, row, scrollable,
+    stack, text, text_input, tooltip,
 };
 use iced::{Alignment, Color, Element, Fill, Length, Shrink, Theme};
 
@@ -52,10 +52,35 @@ fn segmented_toggle<'a, T: Copy + PartialEq + 'a>(
             .on_press(on_select(value))
             .into()
     });
-    container(row(segments).spacing(2))
-        .padding(2)
-        .style(|_| rounded_box(theme::PANEL, 8.0).border(border::rounded(8).width(1).color(theme::PANEL_HI)))
-        .into()
+    framed_group(row(segments).spacing(2)).into()
+}
+
+const TOOLBAR_CONTROL_HEIGHT: f32 = 29.0;
+const FRAME_INSET: f32 = 2.0;
+const FRAME_RADIUS: f32 = 8.0;
+const INNER_BUTTON_SIDE: f32 = TOOLBAR_CONTROL_HEIGHT - 2.0 * FRAME_INSET;
+
+fn framed_group<'a>(content: impl Into<Element<'a, Message>>) -> container::Container<'a, Message> {
+    container(content)
+        .padding(FRAME_INSET)
+        .height(TOOLBAR_CONTROL_HEIGHT)
+        .align_y(iced::alignment::Vertical::Center)
+        .style(|_| {
+            rounded_box(theme::PANEL, FRAME_RADIUS)
+                .border(border::rounded(FRAME_RADIUS).width(1).color(theme::PANEL_HI))
+        })
+}
+
+fn quiet_button_style(text_when_idle: Color) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_, status| {
+        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        button::Style {
+            background: hovered.then(|| theme::PANEL_HI.into()),
+            text_color: if hovered { theme::TEXT } else { text_when_idle },
+            border: border::rounded(FRAME_RADIUS - FRAME_INSET),
+            ..button::Style::default()
+        }
+    }
 }
 
 fn filled_white_text_button(bg: Color) -> impl Fn(&Theme, button::Status) -> button::Style {
@@ -103,7 +128,7 @@ fn outlined_text_button(label: &str, msg: Message) -> Element<'_, Message> {
             button::Style {
                 background: Some(bg.into()),
                 text_color: theme::TEXT,
-                border: border::rounded(8).width(1).color(theme::PANEL_HI),
+                border: border::rounded(FRAME_RADIUS).width(1).color(theme::PANEL_HI),
                 ..button::Style::default()
             }
         })
@@ -336,12 +361,37 @@ const METRIC_EXPLANATION: [&str; 2] = [
      tiny files take more.",
 ];
 
+const BACK_TOOLTIP: &str = if cfg!(target_os = "macos") { "Back  ⌘[" } else { "Back  Ctrl+[" };
+const FORWARD_TOOLTIP: &str = if cfg!(target_os = "macos") { "Forward  ⌘]" } else { "Forward  Ctrl+]" };
+
+const NAV_ICON_SIZE: f32 = 16.0;
+const DISABLED_ICON_STRENGTH: f32 = 0.4;
+
+fn nav_icon_button<'a>(
+    icon: fn(f32, Color) -> Svg<'a, Theme>,
+    tooltip_label: &'a str,
+    msg: Option<Message>,
+) -> Element<'a, Message> {
+    let tint =
+        if msg.is_some() { theme::TEXT } else { theme::mix(theme::PANEL, theme::TEXT_DIM, DISABLED_ICON_STRENGTH) };
+    let button = button(center(icon(NAV_ICON_SIZE, tint)))
+        .width(INNER_BUTTON_SIDE)
+        .height(INNER_BUTTON_SIDE)
+        .padding(0)
+        .style(quiet_button_style(theme::TEXT))
+        .on_press_maybe(msg);
+    with_tooltip(button, [tooltip_label])
+}
+
 fn toolbar(b: &Browser) -> Element<'_, Message> {
-    let nav = row![
-        subtle_button(text("‹").size(18), b.can_back().then_some(Message::Back)),
-        subtle_button(text("›").size(18), b.can_forward().then_some(Message::Forward)),
-    ]
-    .spacing(2);
+    let nav = framed_group(
+        row![
+            nav_icon_button(icon::home, "Start page", Some(Message::GoHome)),
+            nav_icon_button(icon::chevron_left, BACK_TOOLTIP, b.can_back().then_some(Message::Back)),
+            nav_icon_button(icon::chevron_right, FORWARD_TOOLTIP, b.can_forward().then_some(Message::Forward)),
+        ]
+        .spacing(2),
+    );
 
     let metric = with_tooltip(
         segmented_toggle(&[("On disk", Metric::Allocated), ("Logical", Metric::Logical)], b.metric, Message::SetMetric),
@@ -351,45 +401,70 @@ fn toolbar(b: &Browser) -> Element<'_, Message> {
     let search = text_input(SEARCH_PLACEHOLDER_WITH_SHORTCUT, &b.search_text)
         .id(SEARCH_ID)
         .on_input(Message::SearchChanged)
-        .padding([5, 10])
+        .padding([6, 10])
         .size(13)
-        .width(220);
+        .width(220)
+        .style(framed_text_input);
 
-    row![
-        icon_button(icon::home(16.0, theme::TEXT), "Start page", Message::GoHome),
-        nav,
-        container(root_and_last_ancestors_breadcrumbs(b)).width(Fill).clip(true),
-        outlined_text_button("Rescan", Message::Rescan),
-        metric,
-        search,
-    ]
-    .spacing(10)
-    .align_y(Alignment::Center)
-    .into()
+    row![nav, path_bar(b), outlined_text_button("Rescan", Message::Rescan), metric, search]
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into()
 }
 
+fn framed_text_input(t: &Theme, status: text_input::Status) -> text_input::Style {
+    let focused = matches!(status, text_input::Status::Focused { .. });
+    text_input::Style {
+        background: theme::PANEL.into(),
+        border: border::rounded(FRAME_RADIUS).width(1).color(if focused { theme::ACCENT } else { theme::PANEL_HI }),
+        ..text_input::default(t, status)
+    }
+}
+
+const PATH_ROOT_ICON_SIZE: f32 = 14.0;
+const PATH_SEPARATOR_SIZE: f32 = 12.0;
+const PATH_SEPARATOR_STRENGTH: f32 = 0.6;
+const CRUMB_NAME_MAX_CHARS: usize = 28;
 const BREADCRUMBS_AFTER_ELLIPSIS: usize = 5;
+
+fn path_bar(b: &Browser) -> Element<'_, Message> {
+    let root_icon = if b.opts.whole_disk { icon::drive } else { icon::folder };
+    let content = row![
+        container(root_icon(PATH_ROOT_ICON_SIZE, theme::TEXT_DIM)).padding([0, 6]),
+        root_and_last_ancestors_breadcrumbs(b),
+    ]
+    .align_y(Alignment::Center);
+    framed_group(content).padding([FRAME_INSET, 2.0 * FRAME_INSET]).width(Fill).clip(true).into()
+}
+
+fn path_separator<'a>() -> Element<'a, Message> {
+    icon::chevron_right(PATH_SEPARATOR_SIZE, theme::mix(theme::PANEL, theme::TEXT_DIM, PATH_SEPARATOR_STRENGTH)).into()
+}
+
+fn crumb<'a>(label: String, msg: Option<Message>) -> Element<'a, Message> {
+    let idle_text = if msg.is_some() { theme::TEXT_DIM } else { theme::TEXT };
+    button(text(label).size(13).wrapping(Wrapping::None))
+        .padding([3, 6])
+        .style(quiet_button_style(idle_text))
+        .on_press_maybe(msg)
+        .into()
+}
 
 fn root_and_last_ancestors_breadcrumbs(b: &Browser) -> Element<'_, Message> {
     let mut root_to_focus: Vec<NodeId> = b.tree.ancestors(b.focus).collect();
     root_to_focus.reverse();
-    let mut crumbs = row![].spacing(2).align_y(Alignment::Center);
-    let first_after_ellipsis = root_to_focus.len().saturating_sub(BREADCRUMBS_AFTER_ELLIPSIS);
-    for (i, &id) in root_to_focus.iter().enumerate() {
-        let is_root = i == 0;
-        if !is_root && i < first_after_ellipsis {
-            if i == 1 {
-                crumbs = crumbs.push(text("› …").size(13).color(theme::TEXT_DIM));
-            }
-            continue;
-        }
-        if !is_root {
-            crumbs = crumbs.push(text("›").size(13).color(theme::TEXT_DIM));
-        }
-        let last = id == b.focus;
-        let label =
-            text(truncate(&b.tree.name(id), 28)).size(13).color(if last { theme::TEXT } else { theme::TEXT_DIM });
-        crumbs = crumbs.push(subtle_button(label, (!last).then_some(Message::Navigate(id))));
+    let crumb_for = |id: NodeId| {
+        crumb(truncate(&b.tree.name(id), CRUMB_NAME_MAX_CHARS), (id != b.focus).then_some(Message::Navigate(id)))
+    };
+
+    let first_after_ellipsis = root_to_focus.len().saturating_sub(BREADCRUMBS_AFTER_ELLIPSIS).max(1);
+    let mut crumbs = row![crumb_for(root_to_focus[0])].align_y(Alignment::Center);
+    if first_after_ellipsis > 1 {
+        let deepest_hidden = root_to_focus[first_after_ellipsis - 1];
+        crumbs = crumbs.push(path_separator()).push(crumb("…".to_string(), Some(Message::Navigate(deepest_hidden))));
+    }
+    for &id in &root_to_focus[first_after_ellipsis..] {
+        crumbs = crumbs.push(path_separator()).push(crumb_for(id));
     }
     crumbs.into()
 }

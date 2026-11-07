@@ -128,6 +128,51 @@ fn toolbar_rescan_is_a_text_button_left_of_the_metric_toggle() -> Result<(), Err
     Ok(())
 }
 
+fn descend(tree: &dscan_core::Tree, names: &[&str]) -> dscan_core::NodeId {
+    names.iter().fold(tree.root(), |at, name| {
+        tree.children(at, dscan_core::Metric::Allocated).find(|&c| tree.name(c) == *name).expect(name)
+    })
+}
+
+#[test]
+fn deep_path_bar_shows_root_ellipsis_and_last_folders_and_the_ellipsis_steps_into_the_hidden_part() -> Result<(), Error>
+{
+    let dir = tempfile::tempdir().unwrap();
+    let chain = ["Projects", "clients", "acme", "website", "build", "assets", "images"];
+    let deepest = chain.iter().fold(dir.path().to_path_buf(), |p, name| p.join(name));
+    std::fs::create_dir_all(&deepest).unwrap();
+    std::fs::write(deepest.join("hero.png"), vec![0u8; 50_000]).unwrap();
+    let mut app = browser_app(dir.path());
+    let images = descend(&browser(&app).tree, &chain);
+    let _ = app.update(Message::Navigate(images));
+
+    let msgs: Vec<Message> = {
+        let mut ui = sim(&app);
+        println!("{}", ui_inspect::report(&mut ui, VIEW));
+        println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, "path-bar-deep")?.display());
+        for hidden in ["Projects", "clients"] {
+            assert!(ui.find(hidden).is_err(), "{hidden} is folded into the ellipsis");
+        }
+        ui.click("…")?;
+        ui.into_messages().collect()
+    };
+    let clients = descend(&browser(&app).tree, &chain[..2]);
+    assert!(
+        matches!(msgs[..], [Message::Navigate(id)] if id == clients),
+        "the ellipsis opens the deepest folder it hides: {msgs:?}"
+    );
+
+    let mut ui = sim(&app);
+    let back_button = ui_inspect::nodes(&mut ui)
+        .into_iter()
+        .find(|n| n.text.as_deref() == Some("acme"))
+        .map(|acme| iced::Point::new(54.0, acme.bounds.center_y()))
+        .unwrap();
+    ui_inspect::hover(&mut ui, back_button);
+    println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, "path-bar-back-hover")?.display());
+    Ok(())
+}
+
 fn browser(app: &App) -> &Browser {
     match &app.screen {
         Screen::Browse(b) => b,
