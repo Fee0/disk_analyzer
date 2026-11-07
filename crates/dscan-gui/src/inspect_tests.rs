@@ -268,7 +268,7 @@ fn inspect_open_results() -> Result<(), Error> {
         println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, "home-results")?.display());
     }
 
-    let newest = dirs[5].path().canonicalize().unwrap();
+    let newest = dscan_core::canonical_path(dirs[5].path()).unwrap();
     assert_eq!(app.parked_newest_first[0].tree.root_path(), newest, "most recently viewed result is listed first");
     let name = app.parked_newest_first[0].tree.name(app.parked_newest_first[0].tree.root()).into_owned();
     let msgs: Vec<Message> = {
@@ -297,7 +297,9 @@ fn inspect_open_results() -> Result<(), Error> {
     let _ = app.update(Message::CloseParked(1));
     assert_eq!(app.parked_newest_first.len(), 5, "closing removes just that one result");
     assert!(
-        app.parked_newest_first.iter().all(|b| b.tree.root_path() != dirs[4].path().canonicalize().unwrap()),
+        app.parked_newest_first
+            .iter()
+            .all(|b| b.tree.root_path() != dscan_core::canonical_path(dirs[4].path()).unwrap()),
         "the closed result is gone"
     );
 

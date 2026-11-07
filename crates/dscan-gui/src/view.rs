@@ -297,6 +297,9 @@ fn browse(b: &Browser) -> Element<'_, Message> {
     }
 }
 
+const SEARCH_PLACEHOLDER_WITH_SHORTCUT: &str =
+    if cfg!(target_os = "macos") { "Search  ⌘F" } else { "Search  Ctrl+F" };
+
 fn toolbar(b: &Browser) -> Element<'_, Message> {
     let nav = row![
         subtle_button(text("‹").size(18), b.can_back().then_some(Message::Back)),
@@ -307,7 +310,7 @@ fn toolbar(b: &Browser) -> Element<'_, Message> {
     let metric =
         segmented_toggle(&[("On disk", Metric::Allocated), ("Logical", Metric::Logical)], b.metric, Message::SetMetric);
 
-    let search = text_input("Search  ⌘F", &b.search_text)
+    let search = text_input(SEARCH_PLACEHOLDER_WITH_SHORTCUT, &b.search_text)
         .id(SEARCH_ID)
         .on_input(Message::SearchChanged)
         .padding([5, 10])

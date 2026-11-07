@@ -18,6 +18,11 @@ pub use search::{SearchResult, search};
 pub use tree::{Metric, NodeId, ScanStats, Tree};
 pub use volumes::{TRASH_NAME, Volume, has_full_disk_access, list_volumes};
 
+pub fn canonical_path(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    use platform::{Current, Platform};
+    Current::canonical_root(path)
+}
+
 pub fn format_size(bytes: u64) -> String {
     use humansize::{DECIMAL, FormatSizeOptions, format_size as fs};
     fs(bytes, FormatSizeOptions::from(DECIMAL).decimal_places(1).space_after_value(true))
