@@ -141,6 +141,7 @@ pub struct Browser {
     pub exclusions: Exclusions,
     pub animation: Option<ChartAnimation>,
     pub over_collector: bool,
+    pub collected_list_open: bool,
     pub confirm_trash: bool,
     removal_waiting_for_tree: Option<PendingRemoval>,
     pub(crate) delete_hold_started: Option<Instant>,
@@ -180,6 +181,7 @@ pub enum Message {
     MouseReleased,
     CollectorEnter,
     CollectorExit,
+    ToggleCollectedList,
     CollectSelected,
     Uncollect(NodeId),
     ClearCollector,
@@ -460,6 +462,7 @@ impl Browser {
             exclusions: Exclusions::default(),
             animation: None,
             over_collector: false,
+            collected_list_open: false,
             confirm_trash: false,
             removal_waiting_for_tree: None,
             delete_hold_started: None,
@@ -684,6 +687,7 @@ impl Browser {
     }
 
     fn collector_changed(&mut self) {
+        self.collected_list_open &= !self.collector.is_empty();
         self.exclusions = self.collector.exclusions(&self.tree);
         if self.selected.is_some_and(|s| self.collector.covers(&self.tree, s)) {
             self.selected = None;
@@ -829,6 +833,8 @@ impl Browser {
                     Key::Named(Named::Escape) => {
                         if self.confirm_trash {
                             self.confirm_trash = false;
+                        } else if self.collected_list_open {
+                            self.collected_list_open = false;
                         } else if !self.search_text.is_empty() {
                             return self.handle(Message::ClearSearch);
                         } else {
@@ -862,6 +868,9 @@ impl Browser {
             }
             Message::CollectorEnter => self.over_collector = true,
             Message::CollectorExit => self.over_collector = false,
+            Message::ToggleCollectedList => {
+                self.collected_list_open = !self.collected_list_open && !self.collector.is_empty();
+            }
             Message::CollectSelected => {
                 if let Some(s) = self.selected {
                     self.collect(s);

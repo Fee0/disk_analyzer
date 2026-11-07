@@ -664,8 +664,17 @@ fn chart_panel(b: &Browser) -> Element<'_, Message> {
     .width(Fill)
     .height(Fill);
 
-    column![chart, collector(b)].spacing(10).width(Length::FillPortion(CHART_SIDE_PORTION)).into()
+    let chart_above_the_collector =
+        column![chart, Space::new().height(COLLECTOR_FIXED_HEIGHT)].spacing(CHART_COLLECTOR_GAP);
+    let collector_floating_over_the_chart =
+        responsive(move |size| column![Space::new().height(Fill), collector(b, size)].into());
+    stack![chart_above_the_collector, collector_floating_over_the_chart]
+        .width(Length::FillPortion(CHART_SIDE_PORTION))
+        .height(Fill)
+        .into()
 }
+
+const CHART_COLLECTOR_GAP: f32 = 10.0;
 
 const COLLECTOR_FIXED_HEIGHT: f32 = 72.0;
 const COLLECTOR_PADDING: f32 = 10.0;
@@ -677,14 +686,18 @@ const COLLECTOR_RING_WIDTH: f32 = COLLECTOR_RING_DOT + 2.0 * COLLECTOR_RING_PADD
 const COLLECTOR_TEXT_SIZE: f32 = 14.0;
 const COLLECTOR_BUTTON_TEXT_SIZE: f32 = 13.0;
 const DEFAULT_BUTTON_PADDING_X: f32 = 10.0;
-const COLLECTED_CHIPS_SHOWN: usize = 2;
-const COLLECTED_CHIP_NAME_CHARS: usize = 16;
-const CHIP_TEXT_SIZE: f32 = 12.0;
-const CHIP_DOT: f32 = 8.0;
-const CHIP_PADDING_X: f32 = 8.0;
-const CHIP_INNER_SPACING: f32 = 5.0;
-const CHIP_REMOVE_PADDING_X: f32 = 4.0;
-const CHIP_GAP: f32 = 6.0;
+const COLLECTOR_RADIUS: f32 = 12.0;
+const COLLECTOR_CHEVRON_SIZE: f32 = 14.0;
+const COLLECTOR_CHEVRON_SPACING: f32 = 6.0;
+const COLLECTOR_CHEVRON_WIDTH: f32 = COLLECTOR_CHEVRON_SIZE + COLLECTOR_CHEVRON_SPACING;
+const COLLECTED_LIST_PADDING: f32 = 6.0;
+const COLLECTED_LIST_ROOM_LEFT_ABOVE: f32 = 12.0;
+const COLLECTED_ROW_TEXT_SIZE: f32 = 13.0;
+const COLLECTED_ROW_REMOVE_ICON: f32 = 12.0;
+const COLLECTED_ROW_REMOVE_PADDING: f32 = 5.0;
+const COLLECTED_ROW_REMOVE_WIDTH: f32 = COLLECTED_ROW_REMOVE_ICON + 2.0 * COLLECTED_ROW_REMOVE_PADDING;
+const OPEN_COLLECTOR_SHADOW_BLUR: f32 = 24.0;
+const OPEN_COLLECTOR_SHADOW_ALPHA: f32 = 0.5;
 const HOLD_BUTTON_FULL_WIDTH: f32 = 228.0;
 const HOLD_BUTTON_COMPACT_WIDTH: f32 = 120.0;
 const HOLD_BUTTON_HEIGHT: f32 = 29.0;
@@ -763,19 +776,105 @@ fn hold_to_delete_button(b: &Browser, fit: CollectorFit) -> Element<'_, Message>
     }
 }
 
-fn collector(b: &Browser) -> Element<'_, Message> {
+fn collector(b: &Browser, layer: iced::Size) -> Element<'_, Message> {
     let dragging = b.drag.as_ref().is_some_and(|d| d.dragging);
     let hot = dragging && b.over_collector;
-    let zone = container(responsive(move |size| collector_content(b, size.width)))
+    let list_open = b.collected_list_open && !b.collector.is_empty();
+
+    let bar = container(responsive(move |size| collector_content(b, size.width)))
         .padding(COLLECTOR_PADDING)
         .width(Fill)
-        .height(COLLECTOR_FIXED_HEIGHT)
-        .style(move |_| {
-            let bg = if hot { theme::ACCENT.scale_alpha(0.18) } else { theme::PANEL };
-            let edge = if dragging { 1.5 } else { 0.0 };
-            rounded_box(bg, 12.0).border(border::rounded(12).width(edge).color(theme::ACCENT.scale_alpha(0.8)))
-        });
+        .height(COLLECTOR_FIXED_HEIGHT);
+    let bar = if b.collector.is_empty() {
+        mouse_area(bar)
+    } else {
+        mouse_area(bar).on_press(Message::ToggleCollectedList).interaction(iced::mouse::Interaction::Pointer)
+    };
+
+    let mut panel = Column::new().width(Fill);
+    if list_open {
+        let list_height = layer.height - COLLECTOR_FIXED_HEIGHT - COLLECTED_LIST_ROOM_LEFT_ABOVE;
+        panel = panel
+            .push(collected_list(b, iced::Size::new(layer.width, list_height)))
+            .push(container(separator()).padding([0.0, COLLECTOR_PADDING]));
+    }
+    let zone = container(panel.push(bar)).width(Fill).style(move |_| {
+        let bg = if hot { theme::mix(theme::BG, theme::ACCENT, 0.18) } else { theme::PANEL };
+        let edge = if dragging { 1.5 } else { 0.0 };
+        let style = rounded_box(bg, COLLECTOR_RADIUS)
+            .border(border::rounded(COLLECTOR_RADIUS).width(edge).color(theme::ACCENT.scale_alpha(0.8)));
+        if list_open { style.shadow(open_collector_shadow()) } else { style }
+    });
     mouse_area(zone).on_enter(Message::CollectorEnter).on_exit(Message::CollectorExit).into()
+}
+
+fn open_collector_shadow() -> iced::Shadow {
+    iced::Shadow {
+        color: Color::BLACK.scale_alpha(OPEN_COLLECTOR_SHADOW_ALPHA),
+        offset: iced::Vector::ZERO,
+        blur_radius: OPEN_COLLECTOR_SHADOW_BLUR,
+    }
+}
+
+fn collected_list(b: &Browser, room: iced::Size) -> Element<'_, Message> {
+    let row_width = room.width - 2.0 * COLLECTED_LIST_PADDING - DEFAULT_SCROLLBAR_WIDTH - LIST_SCROLLBAR_GAP;
+    let mut rows = Column::new().spacing(1);
+    for &id in b.collector.items() {
+        rows = rows.push(collected_row(b, id, row_width));
+    }
+    let list = container(scrollable(rows).spacing(LIST_SCROLLBAR_GAP))
+        .padding(COLLECTED_LIST_PADDING)
+        .width(Fill)
+        .max_height(room.height.max(0.0));
+    mouse_area(list).interaction(iced::mouse::Interaction::Idle).into()
+}
+
+fn collected_row(b: &Browser, id: NodeId, row_width: f32) -> Element<'_, Message> {
+    let node = b.tree.node(id);
+    let mut name = b.tree.name(id).into_owned();
+    if node.is_dir() {
+        name.push('/');
+    }
+    let name_width = row_width
+        - 2.0 * LIST_ROW_PADDING_X
+        - LIST_ROW_DOT
+        - 3.0 * LIST_ROW_SPACING
+        - LIST_SIZE_COLUMN_WIDTH
+        - COLLECTED_ROW_REMOVE_WIDTH;
+    let remove = button(icon::close(COLLECTED_ROW_REMOVE_ICON, theme::TEXT_DIM))
+        .padding(COLLECTED_ROW_REMOVE_PADDING)
+        .style(quiet_button_style(theme::TEXT_DIM))
+        .on_press(Message::Uncollect(id));
+    let content = row![
+        dot(theme::kind_color(node.kind()), LIST_ROW_DOT),
+        clipped(
+            text(fit_width(&name, name_width, COLLECTED_ROW_TEXT_SIZE))
+                .size(COLLECTED_ROW_TEXT_SIZE)
+                .wrapping(Wrapping::None)
+        ),
+        text(format_size(b.tree.size(id)))
+            .size(COLLECTED_ROW_TEXT_SIZE)
+            .color(theme::TEXT_DIM)
+            .width(LIST_SIZE_COLUMN_WIDTH)
+            .align_x(Alignment::End)
+            .wrapping(Wrapping::None),
+        remove,
+    ]
+    .spacing(LIST_ROW_SPACING)
+    .align_y(Alignment::Center);
+    container(content).padding([2.0, LIST_ROW_PADDING_X]).width(Fill).into()
+}
+
+fn collector_chevron<'a>(b: &Browser) -> Element<'a, Message> {
+    if b.collected_list_open {
+        icon::chevron_down(COLLECTOR_CHEVRON_SIZE, theme::TEXT_DIM).into()
+    } else {
+        icon::chevron_up(COLLECTOR_CHEVRON_SIZE, theme::TEXT_DIM).into()
+    }
+}
+
+fn with_chevron<'a>(b: &Browser, label: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    row![label.into(), collector_chevron(b)].spacing(COLLECTOR_CHEVRON_SPACING).align_y(Alignment::Center).into()
 }
 
 fn collector_ring<'a>(b: &Browser) -> Element<'a, Message> {
@@ -864,8 +963,9 @@ fn collected_items(b: &Browser, width: f32) -> (CollectorFit, Element<'_, Messag
             + 3.0 * COLLECTOR_BUTTON_SPACING
     };
     let summary_needs = |fit: CollectorFit| match fit {
-        CollectorFit::Full => generous_text_width(&full_summary, COLLECTOR_TEXT_SIZE),
-        _ => generous_text_width(&count, COLLECTOR_TEXT_SIZE).max(generous_text_width(&size, COLLECTOR_TEXT_SIZE)),
+        CollectorFit::Full => generous_text_width(&full_summary, COLLECTOR_TEXT_SIZE) + COLLECTOR_CHEVRON_WIDTH,
+        _ => (generous_text_width(&count, COLLECTOR_TEXT_SIZE) + COLLECTOR_CHEVRON_WIDTH)
+            .max(generous_text_width(&size, COLLECTOR_TEXT_SIZE)),
     };
     let fit = CollectorFit::WIDEST_FIRST
         .into_iter()
@@ -873,20 +973,22 @@ fn collected_items(b: &Browser, width: f32) -> (CollectorFit, Element<'_, Messag
         .unwrap_or(CollectorFit::CompactWithoutRing);
     let summary_width = width - fit.ring_width() - buttons(fit);
 
+    let label_width = summary_width - COLLECTOR_CHEVRON_WIDTH;
     let summary: Element<'_, Message> = if fit == CollectorFit::Full {
-        column![
-            text(fit_width(&full_summary, summary_width, COLLECTOR_TEXT_SIZE))
+        with_chevron(
+            b,
+            text(fit_width(&full_summary, label_width, COLLECTOR_TEXT_SIZE))
                 .size(COLLECTOR_TEXT_SIZE)
                 .wrapping(Wrapping::None),
-            collected_chips(b, summary_width),
-        ]
-        .spacing(4)
-        .into()
+        )
     } else {
         column![
-            text(fit_width(&count, summary_width, COLLECTOR_TEXT_SIZE))
-                .size(COLLECTOR_TEXT_SIZE)
-                .wrapping(Wrapping::None),
+            with_chevron(
+                b,
+                text(fit_width(&count, label_width, COLLECTOR_TEXT_SIZE))
+                    .size(COLLECTOR_TEXT_SIZE)
+                    .wrapping(Wrapping::None)
+            ),
             text(fit_width(&size, summary_width, COLLECTOR_BUTTON_TEXT_SIZE))
                 .size(COLLECTOR_BUTTON_TEXT_SIZE)
                 .color(theme::TEXT_DIM)
@@ -905,63 +1007,6 @@ fn collected_items(b: &Browser, width: f32) -> (CollectorFit, Element<'_, Messag
     .align_y(Alignment::Center)
     .into();
     (fit, body)
-}
-
-fn generous_chip_width(name: &str) -> f32 {
-    let remove_button = generous_text_width("×", CHIP_TEXT_SIZE) + 2.0 * CHIP_REMOVE_PADDING_X;
-    2.0 * CHIP_PADDING_X
-        + CHIP_DOT
-        + 2.0 * CHIP_INNER_SPACING
-        + generous_text_width(name, CHIP_TEXT_SIZE)
-        + remove_button
-        + CHIP_GAP
-}
-
-fn more_items_label(hidden: usize) -> String {
-    format!("+{hidden} more")
-}
-
-fn collected_chips(b: &Browser, width: f32) -> Element<'_, Message> {
-    let collected = b.collector.items();
-    let mut chips = row![].spacing(CHIP_GAP).align_y(Alignment::Center);
-    let mut used = 0.0;
-    let mut shown = 0;
-    for &id in collected.iter().take(COLLECTED_CHIPS_SHOWN) {
-        let name = truncate(&b.tree.name(id), COLLECTED_CHIP_NAME_CHARS);
-        let hidden_after_this = collected.len() - shown - 1;
-        let more_label = if hidden_after_this > 0 {
-            generous_text_width(&more_items_label(hidden_after_this), CHIP_TEXT_SIZE)
-        } else {
-            0.0
-        };
-        let chip_width = generous_chip_width(&name);
-        if used + chip_width + more_label > width {
-            break;
-        }
-        used += chip_width;
-        shown += 1;
-        chips = chips.push(
-            container(
-                row![
-                    dot(theme::kind_color(b.tree.node(id).kind()), CHIP_DOT),
-                    text(name).size(CHIP_TEXT_SIZE).wrapping(Wrapping::None),
-                    button(text("×").size(CHIP_TEXT_SIZE))
-                        .padding([0.0, CHIP_REMOVE_PADDING_X])
-                        .style(button::text)
-                        .on_press(Message::Uncollect(id)),
-                ]
-                .spacing(CHIP_INNER_SPACING)
-                .align_y(Alignment::Center),
-            )
-            .padding([2.0, CHIP_PADDING_X])
-            .style(|_| rounded_box(theme::PANEL_HI, 10.0)),
-        );
-    }
-    if collected.len() > shown {
-        let label = if shown == 0 { items_phrase(collected.len()) } else { more_items_label(collected.len() - shown) };
-        chips = chips.push(text(label).size(CHIP_TEXT_SIZE).color(theme::TEXT_DIM).wrapping(Wrapping::None));
-    }
-    chips.into()
 }
 
 const LIST_PANEL_PADDING: f32 = 14.0;

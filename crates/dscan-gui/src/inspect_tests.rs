@@ -636,6 +636,116 @@ fn collector_fixed_height_fits_every_state_without_clipping() -> Result<(), Erro
     Ok(())
 }
 
+fn list_panel_left(ui: &mut Simulator<'_, Message>) -> f32 {
+    ui_inspect::nodes(ui)
+        .into_iter()
+        .find(|n| n.id.as_deref() == Some(view::LIST_PANEL_ID))
+        .expect("the list panel is on screen")
+        .bounds
+        .x
+}
+
+fn collected_rows_over_the_chart(ui: &mut Simulator<'_, Message>, names: &[&str]) -> Vec<String> {
+    let chart_side = list_panel_left(ui);
+    texts_on_screen_left_of(ui, chart_side).into_iter().filter(|t| names.contains(&t.as_str())).collect()
+}
+
+fn texts_on_screen_left_of(ui: &mut Simulator<'_, Message>, x: f32) -> Vec<String> {
+    ui_inspect::nodes(ui).into_iter().filter(|n| n.bounds.x < x).filter_map(|n| n.text).collect()
+}
+
+fn remove_button_beside(ui: &mut Simulator<'_, Message>, label: &str) -> (f32, f32) {
+    let nodes = ui_inspect::nodes(ui);
+    let name_at = nodes
+        .iter()
+        .position(|n| n.text.as_deref() == Some(label))
+        .unwrap_or_else(|| panic!("no text {label:?} on screen"));
+    let name_right = nodes[name_at].bounds.x + nodes[name_at].bounds.width;
+    nodes[name_at..]
+        .iter()
+        .find(|n| n.kind != "text" && n.bounds.x > name_right)
+        .map(|n| (n.bounds.center_x(), n.bounds.center_y()))
+        .unwrap_or_else(|| panic!("no remove button beside {label:?}"))
+}
+
+fn clicks_only(msgs: impl Iterator<Item = Message>) -> Vec<Message> {
+    msgs.filter(|m| !matches!(m, Message::CollectorEnter | Message::CollectorExit | Message::Hover(_))).collect()
+}
+
+#[test]
+fn collected_items_are_listed_only_after_clicking_the_collector() -> Result<(), Error> {
+    use iced::keyboard::{Key, key::Named};
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = browser_app(dir.path());
+    collect_through_the_ui(&mut app, &["Movies", "Downloads", "Pictures"]);
+    let names = ["Movies/", "Downloads/", "Pictures/"];
+
+    let summary = {
+        let mut ui = sim(&app);
+        assert!(collected_rows_over_the_chart(&mut ui, &names).is_empty(), "the collector starts closed");
+        let summary = ui_inspect::nodes(&mut ui)
+            .into_iter()
+            .find(|n| n.text.as_deref().is_some_and(|t| t.starts_with("3 collected")))
+            .expect("the collector sums up what it holds")
+            .bounds;
+        ui_inspect::click_at(&mut ui, (summary.center_x(), summary.center_y()));
+        let msgs = clicks_only(ui.into_messages());
+        assert!(matches!(msgs[..], [Message::ToggleCollectedList]), "clicking the collector opens its list: {msgs:?}");
+        summary
+    };
+    let _ = app.update(Message::ToggleCollectedList);
+
+    {
+        let mut ui = sim(&app);
+        let report = ui_inspect::report(&mut ui, VIEW);
+        println!("{report}");
+        assert_eq!(
+            collected_rows_over_the_chart(&mut ui, &names),
+            names,
+            "the open list shows every collected item, oldest first"
+        );
+        let chart_side = list_panel_left(&mut ui);
+        assert!(
+            texts_on_screen_left_of(&mut ui, chart_side).iter().any(|t| t == "1.7 MB"),
+            "each row shows the item's size"
+        );
+        let still_in_place = ui_inspect::nodes(&mut ui)
+            .into_iter()
+            .find(|n| n.text.as_deref().is_some_and(|t| t.starts_with("3 collected")))
+            .expect("the summary stays")
+            .bounds;
+        assert_eq!(still_in_place.y, summary.y, "opening the list grows it upward, the bar stays put");
+        println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, "collector-list-open")?.display());
+    }
+
+    let msgs: Vec<Message> = {
+        let mut ui = sim(&app);
+        let remove = remove_button_beside(&mut ui, "Downloads/");
+        ui_inspect::click_at(&mut ui, remove);
+        clicks_only(ui.into_messages())
+    };
+    let downloads = descend(&browser(&app).tree, &["Downloads"]);
+    assert!(
+        matches!(msgs[..], [Message::Uncollect(id)] if id == downloads),
+        "a row's close button takes only that item out: {msgs:?}"
+    );
+    for m in msgs {
+        let _ = app.update(m);
+    }
+    assert!(browser(&app).collected_list_open, "removing one item keeps the list open");
+    assert_eq!(collected_rows_over_the_chart(&mut sim(&app), &names), ["Movies/", "Pictures/"]);
+
+    key(&mut app, Key::Named(Named::Escape), false);
+    assert!(!browser(&app).collected_list_open, "Escape closes the list");
+
+    let _ = app.update(Message::ToggleCollectedList);
+    let _ = app.update(Message::ClearCollector);
+    assert!(!browser(&app).collected_list_open, "an emptied collector closes its list");
+    let _ = app.update(Message::ToggleCollectedList);
+    assert!(!browser(&app).collected_list_open, "an empty collector has no list to open");
+    Ok(())
+}
+
 fn collect_through_the_ui(app: &mut App, names: &[&str]) {
     for name in names {
         let id = descend(&browser(app).tree, &[name]);
@@ -700,6 +810,13 @@ fn every_screen_stays_readable_from_the_default_window_down_to_the_minimum_size(
     collect_through_the_ui(&mut confirming_trash, &["Movies"]);
     let _ = confirming_trash.update(Message::AskTrash);
 
+    let mut collected_list_open = browser_app(other_results[2].path());
+    collect_through_the_ui(
+        &mut collected_list_open,
+        &["Movies", "Downloads", "Pictures", "Music", "Code", "Documents"],
+    );
+    let _ = collected_list_open.update(Message::ToggleCollectedList);
+
     let mut long_file_selected = browser_app(dir.path());
     let long_folder = descend(&browser(&long_file_selected).tree, &[long_name]);
     select(&mut long_file_selected, long_folder);
@@ -716,6 +833,7 @@ fn every_screen_stays_readable_from_the_default_window_down_to_the_minimum_size(
         ("holding", &holding_delete),
         ("long", &long_folder_with_unreadable_parts),
         ("confirm", &confirming_trash),
+        ("collected-list", &collected_list_open),
         ("selected", &long_file_selected),
         ("hidden", &hidden_space_explained),
     ];
