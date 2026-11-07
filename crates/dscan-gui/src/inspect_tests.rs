@@ -401,7 +401,7 @@ const MID_SCAN: dscan_core::ProgressSnapshot =
     dscan_core::ProgressSnapshot { files: 673_862, dirs: 163_187, bytes: 86_624_714_752, expected: Some(2 * TB) };
 
 #[test]
-fn scanning_a_disk_turns_its_row_into_a_moving_line_with_pause_and_stop() -> Result<(), Error> {
+fn scanning_a_disk_turns_its_scan_button_into_pause_and_resume() -> Result<(), Error> {
     let mounts = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
     let (mut app, _) = App::new(None);
     app.volumes = Some(vec![
@@ -434,33 +434,36 @@ fn scanning_a_disk_turns_its_row_into_a_moving_line_with_pause_and_stop() -> Res
     let mut ui = sim(&app);
     let texts = texts_on_screen(&mut ui);
     assert!(texts.contains(&progress_label), "the scanned size and file count replace the free space: {texts:?}");
-    assert_eq!(count_of(&texts, "Stop"), 1, "only the scanned disk can be stopped");
+    assert_eq!(count_of(&texts, "Pause"), 1, "the scanned disk's Scan button became Pause");
     assert_eq!(count_of(&texts, "Scan"), 2, "the other disks keep their scan button");
+    assert_eq!(count_of(&texts, "Stop"), 0, "a scan is replaced by starting another, not stopped by a button");
     assert!(texts.contains(&"Backup".to_string()) && texts.contains(&"Archive".to_string()), "the list stays");
-    ui.click("Stop")?;
+    let scan_button = bounds_of_text(&mut ui, "Scan");
+    let pause_button = bounds_of_text(&mut ui, "Pause");
+    assert_eq!(
+        (pause_button.x + pause_button.width, pause_button.width),
+        (scan_button.x + scan_button.width, scan_button.width),
+        "Pause takes the Scan button's place and size"
+    );
+    ui.click("Pause")?;
     let msgs: Vec<Message> = ui.into_messages().collect();
-    assert!(matches!(msgs[..], [Message::CancelScan]), "{msgs:?}");
+    assert!(matches!(msgs[..], [Message::TogglePause]), "{msgs:?}");
 
     let _ = app.update(Message::TogglePause);
     assert!(scan_job(&mut app).cancel.is_paused());
     {
         let mut ui = sim(&app);
         let paused_label = format!("Paused · {}", dscan_core::format_size(MID_SCAN.bytes));
-        assert!(texts_on_screen(&mut ui).contains(&paused_label));
+        let texts = texts_on_screen(&mut ui);
+        assert!(texts.contains(&paused_label));
+        assert_eq!(count_of(&texts, "Resume"), 1, "a paused scan offers Resume in the same place");
         println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, "paused")?.display());
+        ui.click("Resume")?;
+        let msgs: Vec<Message> = ui.into_messages().collect();
+        assert!(matches!(msgs[..], [Message::TogglePause]), "{msgs:?}");
     }
     let _ = app.update(Message::TogglePause);
-    let cancel = scan_job(&mut app).cancel.clone();
-    assert!(!cancel.is_paused());
-
-    let job_id = scan_job(&mut app).id;
-    let _ = app.update(Message::CancelScan);
-    assert!(cancel.is_cancelled(), "stopping cancels the scan thread");
-    assert!(app.scan().is_none(), "the row is back to normal at once, without waiting for the thread");
-    let _ = app.update(Message::ScanFinished { job_id, crash: None });
-    assert!(app.scan().is_none() && app.error.is_none(), "the stopped scan reporting back changes nothing");
-    let mut ui = sim(&app);
-    assert_eq!(count_of(&texts_on_screen(&mut ui), "Scan"), 3);
+    assert!(!scan_job(&mut app).cancel.is_paused());
     Ok(())
 }
 
@@ -482,7 +485,7 @@ fn a_folder_scan_gets_its_own_row_and_another_scan_replaces_it() -> Result<(), E
         println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, "scanning-folder")?.display());
         let texts = texts_on_screen(&mut ui);
         assert!(count_of(&texts, &folder_name) >= 1, "the folder is listed under the disks: {texts:?}");
-        assert_eq!((count_of(&texts, "Stop"), count_of(&texts, "Scan")), (1, 1), "{texts:?}");
+        assert_eq!((count_of(&texts, "Pause"), count_of(&texts, "Scan")), (1, 1), "{texts:?}");
     }
     let msgs: Vec<Message> = {
         let mut ui = sim(&app);
@@ -495,7 +498,7 @@ fn a_folder_scan_gets_its_own_row_and_another_scan_replaces_it() -> Result<(), E
         ui_inspect::click_at(&mut ui, (open_result.center_x(), open_result.center_y()));
         ui.into_messages().collect()
     };
-    assert!(msgs.is_empty(), "open results can't be resumed while a scan runs: {msgs:?}");
+    assert!(matches!(msgs[..], [Message::ResumeParked(0)]), "open results stay open-able during a scan: {msgs:?}");
 
     let (folder_job, folder_cancel) = (scan_job(&mut app).id, scan_job(&mut app).cancel.clone());
     let _scan_task_never_run = app.update(Message::ScanVolume(0));
@@ -504,6 +507,11 @@ fn a_folder_scan_gets_its_own_row_and_another_scan_replaces_it() -> Result<(), E
     let disk_job = app.scan().expect("the disk scan keeps running");
     assert_ne!(disk_job.id, folder_job);
     assert!(disk_job.opts.whole_disk);
+
+    let disk_cancel = disk_job.cancel.clone();
+    let _ = app.update(Message::ResumeParked(0));
+    assert!(matches!(app.screen, Screen::Browse(_)), "opening a result works while a scan runs");
+    assert!(disk_cancel.is_cancelled(), "opening a result stops the running scan");
     Ok(())
 }
 

@@ -154,11 +154,8 @@ const METER_WIDTH: f32 = 200.0;
 const METER_HEIGHT: f32 = 6.0;
 const METER_LABEL_SIZE: f32 = 13.0;
 const METER_LABEL_GAP: f32 = 10.0;
-const SCAN_CONTROLS_WIDTH: f32 = 116.0;
 const SCAN_BUTTON_WIDTH: f32 = 76.0;
 const SCAN_BUTTON_TEXT_SIZE: f32 = 14.0;
-const SCAN_CONTROLS_SPACING: f32 = 6.0;
-const PAUSE_ICON_SIZE: f32 = 14.0;
 const ALTERNATE_ROW_SHADE: f32 = 0.45;
 const FILLING_UP: f32 = 0.75;
 const NEARLY_FULL: f32 = 0.9;
@@ -166,7 +163,8 @@ const SCAN_SHOWN_COMPLETE_ONLY_WHEN_DONE: f32 = 0.99;
 const PAUSED_SCAN_STRENGTH: f32 = 0.5;
 const SCAN_FOLDER_LABEL: &str = "Scan Folder…";
 const SCAN_LABEL: &str = "Scan";
-const STOP_LABEL: &str = "Stop";
+const PAUSE_LABEL: &str = "Pause";
+const RESUME_LABEL: &str = "Resume";
 
 fn start(app: &App) -> Element<'_, Message> {
     responsive(move |viewport| {
@@ -271,7 +269,7 @@ fn disk_text_width(list_width: f32) -> f32 {
         - DISK_ICON_SIZE
         - 3.0 * DISK_ROW_SPACING
         - METER_WIDTH
-        - SCAN_CONTROLS_WIDTH
+        - SCAN_BUTTON_WIDTH
 }
 
 struct DiskIdentity<'a> {
@@ -313,7 +311,7 @@ fn disk_row<'a>(identity: DiskIdentity<'a>, meter: DiskMeter<'a>, text_width: f3
             .spacing(METER_LABEL_GAP)
             .width(METER_WIDTH)
             .align_x(Alignment::End),
-        container(meter.controls).width(SCAN_CONTROLS_WIDTH).align_x(Alignment::End),
+        container(meter.controls).width(SCAN_BUTTON_WIDTH).align_x(Alignment::End),
     ]
     .spacing(DISK_ROW_SPACING)
     .align_y(Alignment::Center)
@@ -359,28 +357,17 @@ fn scanning_row<'a>(identity: DiskIdentity<'a>, job: &ScanJob, text_width: f32) 
     let s = &job.snapshot;
     let fraction =
         s.expected.map_or(0.0, |expected| (s.bytes as f32 / expected as f32).min(SCAN_SHOWN_COMPLETE_ONLY_WHEN_DONE));
-    let (color, label, pause_icon, pause_tooltip) = if job.cancel.is_paused() {
+    let (color, label, pause_or_resume) = if job.cancel.is_paused() {
         (
             theme::mix(theme::BG, theme::ACCENT, PAUSED_SCAN_STRENGTH),
             format!("Paused · {}", format_size(s.bytes)),
-            icon::resume(PAUSE_ICON_SIZE, theme::TEXT),
-            "Resume",
+            RESUME_LABEL,
         )
     } else {
-        (
-            theme::ACCENT,
-            format!("{} · {} files", format_size(s.bytes), thousands(s.files)),
-            icon::pause(PAUSE_ICON_SIZE, theme::TEXT),
-            "Pause",
-        )
+        (theme::ACCENT, format!("{} · {} files", format_size(s.bytes), thousands(s.files)), PAUSE_LABEL)
     };
-    let controls = row![
-        icon_button(pause_icon, pause_tooltip, Message::TogglePause),
-        scan_button(STOP_LABEL, Message::CancelScan)
-    ]
-    .spacing(SCAN_CONTROLS_SPACING)
-    .align_y(Alignment::Center);
-    let meter = DiskMeter { fraction, color, label, label_color: theme::TEXT, controls: controls.into() };
+    let controls = scan_button(pause_or_resume, Message::TogglePause);
+    let meter = DiskMeter { fraction, color, label, label_color: theme::TEXT, controls };
     disk_row(identity, meter, text_width)
 }
 
@@ -475,7 +462,7 @@ fn open_result_rows(app: &App, list_width: f32) -> Element<'_, Message> {
                         ..button::secondary(t, s)
                     }
                 })
-                .on_press_maybe((!app.is_scanning()).then_some(Message::ResumeParked(i))),
+                .on_press(Message::ResumeParked(i)),
         );
     }
     scrollable(list).height(Fill).spacing(RESULT_LIST_SCROLLBAR_GAP).into()

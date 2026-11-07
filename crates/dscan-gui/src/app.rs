@@ -175,7 +175,6 @@ pub enum Message {
     RefreshVolumes,
     ScanProgressTick,
     AnimationFrame(Instant),
-    CancelScan,
     TogglePause,
     ScanFinished { job_id: u64, crash: Option<PanicMessage> },
     Hover(Option<Segment>),
@@ -289,10 +288,6 @@ impl App {
         }
     }
 
-    pub fn is_scanning(&self) -> bool {
-        self.scan().is_some()
-    }
-
     fn start_scan(&mut self, opts: ScanOptions) -> Task<Message> {
         let id = self.next_job;
         self.next_job += 1;
@@ -351,11 +346,6 @@ impl App {
                     job.cancel.set_paused(!job.cancel.is_paused());
                 }
             }
-            Message::CancelScan => {
-                if let Some(scan) = self.scan_slot() {
-                    *scan = None;
-                }
-            }
             Message::ScanFinished { job_id, crash } => {
                 let Some(job) = self.scan_slot().and_then(|scan| scan.take_if(|job| job.id == job_id)) else {
                     return Task::none();
@@ -384,7 +374,7 @@ impl App {
                 return Self::load_volumes();
             }
             Message::ResumeParked(i) => {
-                if matches!(self.screen, Screen::Start { scan: None }) && i < self.parked_newest_first.len() {
+                if matches!(self.screen, Screen::Start { .. }) && i < self.parked_newest_first.len() {
                     self.screen = Screen::Browse(Box::new(self.parked_newest_first.remove(i)));
                 }
             }
