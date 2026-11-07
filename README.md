@@ -6,7 +6,8 @@
 
 <p align="center">
   See what takes up space on your disk, and clean it up.<br>
-  For macOS, Windows and Linux. Fast, local, no network access.
+  For macOS, Windows and Linux. Fast, local, no network access.<br>
+  Inspired by <a href="https://daisydiskapp.com">DaisyDisk</a>.
 </p>
 
 <p align="center">
