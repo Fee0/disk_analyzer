@@ -28,7 +28,7 @@ Download the file for your system from the
 
 | System | File | First launch |
 |---|---|---|
-| macOS 11+ | `.dmg` | Drag the app to *Applications*. The app isn't signed: on first launch, go to System Settings → Privacy & Security and click **Open Anyway**. |
+| macOS 11+ | `.dmg` | Drag the app to *Applications*. It is signed and notarized, so it opens without a warning. |
 | Windows 10+ | `.zip` | Run `disk-analyzer.exe`. If SmartScreen appears, click **More info → Run anyway**. |
 | Linux | `.tar.gz` | Run `./install.sh` to add it to your app menu, or run `./disk-analyzer` directly. |
 

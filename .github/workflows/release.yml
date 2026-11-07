@@ -73,7 +73,45 @@ jobs:
       - run: |
           cargo build --release -p dscan-gui --locked --target aarch64-apple-darwin
           cargo build --release -p dscan-gui --locked --target x86_64-apple-darwin
-      - name: Bundle
+      - name: Import the signing identity and notary key
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          for secret in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_API_KEY_P8; do
+            if [[ -z "${!secret}" ]]; then
+              echo "::error::The $secret secret is not set"
+              exit 1
+            fi
+          done
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          keychain_password=$(openssl rand -base64 32)
+          certificate="$RUNNER_TEMP/devid.p12"
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$certificate"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$certificate" -k "$keychain" -f pkcs12 -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm "$certificate"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain" > /dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          identity=$(security find-identity -v -p codesigning "$keychain" | sed -n 's/.*"\(Developer ID Application: .*\)"$/\1/p' | head -n1)
+          if [[ -z "$identity" ]]; then
+            echo "::error::APPLE_CERTIFICATE holds no Developer ID Application identity"
+            security find-identity -v -p codesigning "$keychain"
+            exit 1
+          fi
+          echo "Signing as $identity"
+          echo "SIGNING_IDENTITY=$identity" >> "$GITHUB_ENV"
+          echo "SIGNING_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+          api_key="$RUNNER_TEMP/AuthKey.p8"
+          printf '%s\n' "$APPLE_API_KEY_P8" > "$api_key"
+          echo "APPLE_API_KEY_PATH=$api_key" >> "$GITHUB_ENV"
+      - name: Bundle, sign and notarize the app
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
         run: |
           app="$APP_NAME.app"
           mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
@@ -82,15 +120,31 @@ jobs:
             "target/x86_64-apple-darwin/release/$BIN"
           sed "s/__VERSION__/$VERSION/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
           cp assets/icon/icon.icns "$app/Contents/Resources/icon.icns"
-          codesign --force --deep --sign - "$app"
+          codesign --force --options runtime --timestamp --keychain "$SIGNING_KEYCHAIN" --sign "$SIGNING_IDENTITY" "$app"
+          codesign --verify --strict --verbose=2 "$app"
+          bash packaging/macos/notarize.sh "$app"
+          spctl --assess --type execute --verbose=2 "$app"
+      - name: Build, sign and notarize the disk image
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
           mkdir dmg
-          cp -R "$app" dmg/
+          cp -R "$APP_NAME.app" dmg/
           ln -s /Applications dmg/Applications
           for attempt in 1 2 3; do
             hdiutil create -volname "$APP_NAME" -srcfolder dmg -ov -format UDZO "$PACKAGE.dmg" && break
             sleep 5
           done
           test -f "$PACKAGE.dmg"
+          codesign --force --timestamp --keychain "$SIGNING_KEYCHAIN" --sign "$SIGNING_IDENTITY" "$PACKAGE.dmg"
+          bash packaging/macos/notarize.sh "$PACKAGE.dmg"
+          spctl --assess --type open --context context:primary-signature --verbose=2 "$PACKAGE.dmg"
+      - name: Remove the signing keychain and notary key
+        if: always()
+        run: |
+          if [[ -n "${SIGNING_KEYCHAIN:-}" ]]; then security delete-keychain "$SIGNING_KEYCHAIN"; fi
+          rm -f "$RUNNER_TEMP/devid.p12" "$RUNNER_TEMP/AuthKey.p8"
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ env.PACKAGE }}
