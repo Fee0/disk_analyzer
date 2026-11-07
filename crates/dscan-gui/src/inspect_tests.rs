@@ -98,6 +98,36 @@ fn inspect_browse() -> Result<(), Error> {
     Ok(())
 }
 
+fn bounds_of_text(ui: &mut Simulator<'_, Message>, label: &str) -> iced::Rectangle {
+    ui_inspect::nodes(ui)
+        .into_iter()
+        .find(|n| n.kind == "text" && n.text.as_deref() == Some(label))
+        .unwrap_or_else(|| panic!("no text {label:?} on screen"))
+        .bounds
+}
+
+#[test]
+fn toolbar_rescan_is_a_text_button_left_of_the_metric_toggle() -> Result<(), Error> {
+    let dir = tempfile::tempdir().unwrap();
+    let app = browser_app(dir.path());
+
+    let msgs: Vec<Message> = {
+        let mut ui = sim(&app);
+        let rescan = bounds_of_text(&mut ui, "Rescan");
+        let on_disk = bounds_of_text(&mut ui, "On disk");
+        assert!(rescan.x + rescan.width < on_disk.x, "Rescan sits left of the toggle: {rescan:?} vs {on_disk:?}");
+        ui.click("Rescan")?;
+        ui.into_messages().collect()
+    };
+    assert!(matches!(msgs[..], [Message::Rescan]), "the Rescan button rescans: {msgs:?}");
+
+    let mut ui = sim(&app);
+    let logical = bounds_of_text(&mut ui, "Logical");
+    ui_inspect::hover(&mut ui, logical.center());
+    println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, "metric-tooltip")?.display());
+    Ok(())
+}
+
 fn browser(app: &App) -> &Browser {
     match &app.screen {
         Screen::Browse(b) => b,

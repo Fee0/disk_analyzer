@@ -91,13 +91,43 @@ fn subtle_button<'a>(content: impl Into<Element<'a, Message>>, msg: Option<Messa
         .on_press_maybe(msg)
 }
 
+fn outlined_text_button(label: &str, msg: Message) -> Element<'_, Message> {
+    button(text(label).size(13))
+        .padding([6, 14])
+        .style(|_: &Theme, s| {
+            let bg = if matches!(s, button::Status::Hovered | button::Status::Pressed) {
+                theme::PANEL_HI
+            } else {
+                theme::PANEL
+            };
+            button::Style {
+                background: Some(bg.into()),
+                text_color: theme::TEXT,
+                border: border::rounded(8).width(1).color(theme::PANEL_HI),
+                ..button::Style::default()
+            }
+        })
+        .on_press(msg)
+        .into()
+}
+
+const TOOLTIP_MAX_WIDTH: f32 = 320.0;
+
+fn with_tooltip<'a>(
+    content: impl Into<Element<'a, Message>>,
+    lines: impl IntoIterator<Item = &'a str>,
+) -> Element<'a, Message> {
+    let body = column(lines.into_iter().map(|line| text(line).size(12).into())).spacing(4);
+    let tip = container(body).padding([4, 8]).max_width(TOOLTIP_MAX_WIDTH).style(|_| rounded_box(theme::PANEL_HI, 6.0));
+    tooltip(content, tip, tooltip::Position::Bottom).gap(4).into()
+}
+
 fn icon_button<'a>(
     icon: impl Into<Element<'a, Message>>,
     tooltip_label: &'a str,
     msg: Message,
 ) -> Element<'a, Message> {
-    let tip = container(text(tooltip_label).size(12)).padding([4, 8]).style(|_| rounded_box(theme::PANEL_HI, 6.0));
-    tooltip(subtle_button(icon, Some(msg)).padding(6), tip, tooltip::Position::Bottom).gap(4).into()
+    with_tooltip(subtle_button(icon, Some(msg)).padding(6), [tooltip_label])
 }
 
 fn start(app: &App) -> Element<'_, Message> {
@@ -139,9 +169,9 @@ fn start(app: &App) -> Element<'_, Message> {
 
     let disks_header = row![
         text("Disks").size(13).color(theme::TEXT_DIM),
-        Space::new().width(Fill),
         icon_button(icon::refresh(14.0, theme::TEXT_DIM), "Refresh disks", Message::RefreshVolumes),
     ]
+    .spacing(4)
     .align_y(Alignment::Center);
 
     let mut col = column![
@@ -300,6 +330,12 @@ fn browse(b: &Browser) -> Element<'_, Message> {
 const SEARCH_PLACEHOLDER_WITH_SHORTCUT: &str =
     if cfg!(target_os = "macos") { "Search  ⌘F" } else { "Search  Ctrl+F" };
 
+const METRIC_EXPLANATION: [&str; 2] = [
+    "On disk: the space the files take up on the disk. This is what deleting them frees.",
+    "Logical: the files' own sizes, as apps show them. Compressed, sparse and cloud-only files take less on disk; \
+     tiny files take more.",
+];
+
 fn toolbar(b: &Browser) -> Element<'_, Message> {
     let nav = row![
         subtle_button(text("‹").size(18), b.can_back().then_some(Message::Back)),
@@ -307,8 +343,10 @@ fn toolbar(b: &Browser) -> Element<'_, Message> {
     ]
     .spacing(2);
 
-    let metric =
-        segmented_toggle(&[("On disk", Metric::Allocated), ("Logical", Metric::Logical)], b.metric, Message::SetMetric);
+    let metric = with_tooltip(
+        segmented_toggle(&[("On disk", Metric::Allocated), ("Logical", Metric::Logical)], b.metric, Message::SetMetric),
+        METRIC_EXPLANATION,
+    );
 
     let search = text_input(SEARCH_PLACEHOLDER_WITH_SHORTCUT, &b.search_text)
         .id(SEARCH_ID)
@@ -321,9 +359,9 @@ fn toolbar(b: &Browser) -> Element<'_, Message> {
         icon_button(icon::home(16.0, theme::TEXT), "Start page", Message::GoHome),
         nav,
         container(root_and_last_ancestors_breadcrumbs(b)).width(Fill).clip(true),
+        outlined_text_button("Rescan", Message::Rescan),
         metric,
         search,
-        icon_button(icon::refresh(16.0, theme::TEXT), "Rescan", Message::Rescan),
     ]
     .spacing(10)
     .align_y(Alignment::Center)
