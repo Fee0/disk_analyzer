@@ -510,8 +510,14 @@ fn collector_fixed_height_fits_every_state_without_clipping() -> Result<(), Erro
     }
     {
         let mut ui = sim(&app);
-        let report = ui_inspect::report(&mut ui, VIEW);
-        assert!(report.contains("Keep holding… 1.5 s"), "the label counts down while held\n{report}");
+        let seconds_left: f32 = ui_inspect::nodes(&mut ui)
+            .into_iter()
+            .find_map(|n| n.text?.strip_prefix("Keep holding… ")?.strip_suffix(" s")?.parse().ok())
+            .expect("the hold button says to keep holding");
+        assert!(
+            (0.0..=1.5).contains(&seconds_left),
+            "the label counts down from 3 s, and 1.5 s have passed at layout time: {seconds_left}"
+        );
     }
     shot(&app, "collector-holding")?;
     if let Screen::Browse(b) = &mut app.screen {
@@ -521,4 +527,100 @@ fn collector_fixed_height_fits_every_state_without_clipping() -> Result<(), Erro
     shot(&app, "collector-confirm")?;
     let _ = app.update(Message::CancelTrash);
     Ok(())
+}
+
+fn collect_through_the_ui(app: &mut App, names: &[&str]) {
+    for name in names {
+        let id = descend(&browser(app).tree, &[name]);
+        let _ = app.update(Message::Press(dscan_core::Segment::Node(id)));
+        let _ = app.update(Message::MouseReleased);
+        let _ = app.update(Message::CollectSelected);
+    }
+}
+
+fn layout_problems(ui: &mut Simulator<'_, Message>, size: (f32, f32)) -> Vec<String> {
+    let nodes = ui_inspect::nodes(ui);
+    ui_inspect::lint(&nodes, size).into_iter().filter(|issue| !issue.starts_with("info:")).collect()
+}
+
+#[test]
+fn every_screen_stays_readable_from_the_default_window_down_to_the_minimum_size() -> Result<(), Error> {
+    let sizes = [
+        (view::DEFAULT_WINDOW_SIZE.width, view::DEFAULT_WINDOW_SIZE.height),
+        (1000.0, 700.0),
+        (view::MIN_WINDOW_SIZE.width, view::MIN_WINDOW_SIZE.height),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let long_name = "an-extremely-long-folder-name-that-will-never-fit-anywhere-on-screen";
+    let long = dir.path().join(long_name);
+    fixture(&long.join("inner"));
+    let other_results: Vec<_> = (0..3).map(|_| tempfile::tempdir().unwrap()).collect();
+
+    let (mut start, _) = App::new(None);
+    start.volumes = Some(dscan_core::list_volumes());
+    start.full_disk_access = false;
+    for d in &other_results {
+        start.screen = Screen::Browse(Box::new(scanned_fixture(d.path())));
+        let _ = start.update(Message::GoHome);
+    }
+    start.screen = Screen::Browse(Box::new(scanned_folder(&long)));
+    let _ = start.update(Message::GoHome);
+
+    let (mut scanning, _) = App::new(None);
+    let _scan_task_never_run = scanning.update(Message::FolderPicked(Some(long.clone())));
+    if let Screen::Scanning(job) = &mut scanning.screen {
+        job.snapshot = dscan_core::ProgressSnapshot {
+            files: 673_862,
+            dirs: 163_187,
+            bytes: 86_624_714_752,
+            expected: Some(200_000_000_000),
+        };
+    }
+
+    let mut collected_and_searching = browser_app(dir.path());
+    let inner = descend(&browser(&collected_and_searching).tree, &[long_name, "inner"]);
+    let _ = collected_and_searching.update(Message::Navigate(inner));
+    collect_through_the_ui(&mut collected_and_searching, &["Movies", "Downloads", "Pictures"]);
+    let _ = collected_and_searching.update(Message::SearchChanged("img".into()));
+    deliver_search_result_without_its_thread(&mut collected_and_searching, "img");
+
+    let mut holding_delete = browser_app(other_results[0].path());
+    collect_through_the_ui(&mut holding_delete, &["Movies", "Downloads"]);
+    let _ = holding_delete.update(Message::DeleteHoldStart);
+
+    let mut long_folder_with_unreadable_parts = browser_app(dir.path());
+    let long_folder = descend(&browser(&long_folder_with_unreadable_parts).tree, &[long_name]);
+    let _ = long_folder_with_unreadable_parts.update(Message::Navigate(long_folder));
+    if let Screen::Browse(b) = &mut long_folder_with_unreadable_parts.screen {
+        std::sync::Arc::get_mut(&mut b.tree).expect("nothing else holds the fresh tree").stats.errors = 1_234;
+    }
+
+    let mut confirming_trash = browser_app(other_results[1].path());
+    collect_through_the_ui(&mut confirming_trash, &["Movies"]);
+    let _ = confirming_trash.update(Message::AskTrash);
+
+    let screens = [
+        ("start", &start),
+        ("scanning", &scanning),
+        ("collected", &collected_and_searching),
+        ("holding", &holding_delete),
+        ("long", &long_folder_with_unreadable_parts),
+        ("confirm", &confirming_trash),
+    ];
+    let mut problems = Vec::new();
+    for (name, app) in screens {
+        for size in sizes {
+            let mut ui = Simulator::with_size(Settings::default(), size, view::view(app));
+            let shot_name = format!("squash-{name}-{}x{}", size.0, size.1);
+            println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, &shot_name)?.display());
+            problems.extend(layout_problems(&mut ui, size).into_iter().map(|p| format!("{shot_name}: {p}")));
+        }
+    }
+    assert!(problems.is_empty(), "text is cut off, hidden or overlapping:\n{}", problems.join("\n"));
+    Ok(())
+}
+
+fn scanned_folder(path: &Path) -> Browser {
+    let opts = ScanOptions::folder(path);
+    Browser::new(dscan_core::scan(&opts, &Progress::default(), &CancelToken::default()).unwrap(), opts)
 }

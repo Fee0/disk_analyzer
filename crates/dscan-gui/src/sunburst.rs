@@ -8,11 +8,12 @@ use iced::{Color, Pixels, Point, Rectangle, Renderer, Size, Theme, Vector, align
 
 use crate::animation::MovingChart;
 use crate::app::Message;
-use crate::fmt::truncate;
+use crate::fmt::{fit_width, generous_text_width, truncate};
 use crate::theme;
 
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 const SLIVER_MAX_ARC_LENGTH: f32 = 3.0;
+const CENTER_LABEL_WIDTH_PER_HOLE_RADIUS: f32 = 1.6;
 
 pub struct Sunburst<'a> {
     pub tree: &'a Tree,
@@ -140,20 +141,24 @@ impl Sunburst<'_> {
     fn draw_center_disc_with_focus_size(&self, frame: &mut Frame, geo: &Geo) {
         frame.fill(&Path::circle(geo.center, geo.r0 - 2.0), theme::PANEL);
         let focus = self.layout.focus;
+        let label_width = geo.r0 * CENTER_LABEL_WIDTH_PER_HOLE_RADIUS;
+        let total = format_size(self.moving.map_or(self.layout.total, |m| m.total));
+        let total_size = (geo.r0 * 0.28).clamp(10.0, 26.0).min(label_width / generous_text_width(&total, 1.0));
         frame.fill_text(Text {
-            content: format_size(self.moving.map_or(self.layout.total, |m| m.total)),
+            content: total,
             position: geo.center - Vector::new(0.0, 6.0),
             color: theme::kind_color(self.tree.node(focus).kind()),
-            size: Pixels((geo.r0 * 0.28).clamp(13.0, 26.0)),
+            size: Pixels(total_size),
             align_x: alignment::Horizontal::Center.into(),
             align_y: alignment::Vertical::Center,
             ..Text::default()
         });
+        let name_size = (geo.r0 * 0.15).clamp(10.0, 14.0);
         frame.fill_text(Text {
-            content: truncate(&self.tree.name(focus), 18),
+            content: fit_width(&self.tree.name(focus), label_width, name_size),
             position: geo.center + Vector::new(0.0, geo.r0 * 0.30),
             color: theme::TEXT_DIM,
-            size: Pixels((geo.r0 * 0.15).clamp(10.0, 14.0)),
+            size: Pixels(name_size),
             align_x: alignment::Horizontal::Center.into(),
             align_y: alignment::Vertical::Center,
             ..Text::default()

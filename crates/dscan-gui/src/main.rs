@@ -27,7 +27,11 @@ fn main() -> iced::Result {
         .title(app::App::title)
         .subscription(app::App::subscription)
         .theme(|_: &app::App| theme::app_theme())
-        .window_size((1280.0, 820.0))
+        .window(iced::window::Settings {
+            size: view::DEFAULT_WINDOW_SIZE,
+            min_size: Some(view::MIN_WINDOW_SIZE),
+            ..iced::window::Settings::default()
+        })
         .antialiasing(true)
         .run()
 }
