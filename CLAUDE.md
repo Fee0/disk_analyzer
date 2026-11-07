@@ -179,6 +179,7 @@ cargo test --workspace                                  # unit, layering and hea
 ```sh
 cargo run --release                                     # the app
 cargo run -p dscan-core --release --example scan -- / --disk   # benchmark a whole-disk scan
+cargo build --profile profiling                         # release + symbols, for profilers (release is stripped)
 ```
 
 ## No comments in code
