@@ -4,7 +4,7 @@ use dscan_core::{CancelToken, Progress, ScanOptions};
 use iced::Settings;
 use iced_test::{Error, Simulator};
 
-use crate::app::{App, Browser, Message, Screen};
+use crate::app::{App, Browser, Message, Notice, NoticeKind, Screen};
 use crate::iced_inspect as ui_inspect;
 use crate::{theme, view};
 
@@ -655,6 +655,11 @@ fn texts_on_screen_left_of(ui: &mut Simulator<'_, Message>, x: f32) -> Vec<Strin
 }
 
 fn remove_button_beside(ui: &mut Simulator<'_, Message>, label: &str) -> (f32, f32) {
+    let button = bounds_of_button_beside(ui, label);
+    (button.center_x(), button.center_y())
+}
+
+fn bounds_of_button_beside(ui: &mut Simulator<'_, Message>, label: &str) -> iced::Rectangle {
     let nodes = ui_inspect::nodes(ui);
     let name_at = nodes
         .iter()
@@ -664,12 +669,22 @@ fn remove_button_beside(ui: &mut Simulator<'_, Message>, label: &str) -> (f32, f
     nodes[name_at..]
         .iter()
         .find(|n| n.kind != "text" && n.bounds.x > name_right)
-        .map(|n| (n.bounds.center_x(), n.bounds.center_y()))
+        .map(|n| n.bounds)
         .unwrap_or_else(|| panic!("no remove button beside {label:?}"))
 }
 
 fn clicks_only(msgs: impl Iterator<Item = Message>) -> Vec<Message> {
-    msgs.filter(|m| !matches!(m, Message::CollectorEnter | Message::CollectorExit | Message::Hover(_))).collect()
+    msgs.filter(|m| {
+        !matches!(
+            m,
+            Message::CollectorEnter
+                | Message::CollectorExit
+                | Message::NoticeEnter
+                | Message::NoticeExit
+                | Message::Hover(_)
+        )
+    })
+    .collect()
 }
 
 #[test]
@@ -768,7 +783,7 @@ fn messages_float_over_the_chart_instead_of_a_status_line() -> Result<(), Error>
         let message = bounds_of_text(&mut ui, LONG_FAILURE);
         assert!(message.x + message.width < chart_side, "the notice floats over the chart: {message:?}");
         assert!(message.y < VIEW.1 / 4.0, "the notice sits at the top of the chart: {message:?}");
-        println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, "notice")?.display());
+        println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, "notice-error")?.display());
         let dismiss = remove_button_beside(&mut ui, LONG_FAILURE);
         ui_inspect::click_at(&mut ui, dismiss);
         clicks_only(ui.into_messages())
@@ -778,6 +793,50 @@ fn messages_float_over_the_chart_instead_of_a_status_line() -> Result<(), Error>
         let _ = app.update(m);
     }
     assert!(!texts_on_screen(&mut sim(&app)).iter().any(|t| t == LONG_FAILURE), "a dismissed notice is gone");
+
+    let _ = app.update(Message::DesktopActionFinished { failure: Some(LONG_FAILURE.to_string()) });
+    let (hovering, clicking_the_text) = {
+        let mut ui = sim(&app);
+        let message = bounds_of_text(&mut ui, LONG_FAILURE);
+        let on_the_text = (message.center_x(), message.center_y());
+        ui_inspect::hover(&mut ui, on_the_text);
+        let hovering: Vec<Message> = ui.into_messages().collect();
+        let mut ui = sim(&app);
+        ui_inspect::click_at(&mut ui, on_the_text);
+        (hovering, clicks_only(ui.into_messages()))
+    };
+    assert!(
+        hovering.iter().any(|m| matches!(m, Message::NoticeEnter)),
+        "hovering the notice holds it open: {hovering:?}"
+    );
+    assert!(clicking_the_text.is_empty(), "a click on the notice doesn't reach the chart below: {clicking_the_text:?}");
+
+    for (kind, label, text) in [
+        (
+            NoticeKind::Done,
+            "notice-done",
+            "Moved 3 items (9.0 MB) to the Recycle Bin. Empty the Recycle Bin to free the space.",
+        ),
+        (
+            NoticeKind::Warning,
+            "notice-warning",
+            "“System32” is a protected system location and can't be moved to the Recycle Bin.",
+        ),
+    ] {
+        if let Screen::Browse(b) = &mut app.screen {
+            b.notice = Some(Notice { kind, text: text.to_string() });
+        }
+        let mut ui = sim(&app);
+        println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, label)?.display());
+        let dismiss = bounds_of_button_beside(&mut ui, text);
+        assert!(
+            dismiss.width >= view::NOTICE_DISMISS_BUTTON_SIDE && dismiss.height >= view::NOTICE_DISMISS_BUTTON_SIDE,
+            "{label}: the long message leaves the close button its full size: {dismiss:?}"
+        );
+        ui_inspect::click_at(&mut ui, (dismiss.center_x(), dismiss.center_y()));
+        let msgs = clicks_only(ui.into_messages());
+        assert!(matches!(msgs[..], [Message::DismissNotice]), "{label}: the close button stays clickable: {msgs:?}");
+    }
     Ok(())
 }
 

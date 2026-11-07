@@ -22,6 +22,16 @@ static CHEVRON_RIGHT: LazyLock<Handle> = LazyLock::new(|| black_line_icon_svg(r#
 static CHEVRON_UP: LazyLock<Handle> = LazyLock::new(|| black_line_icon_svg(r#"<path d="m6 15 6-6 6 6"/>"#));
 static CHEVRON_DOWN: LazyLock<Handle> = LazyLock::new(|| black_line_icon_svg(r#"<path d="m6 9 6 6 6-6"/>"#));
 
+static CHECK_CIRCLE: LazyLock<Handle> =
+    LazyLock::new(|| black_line_icon_svg(r#"<circle cx="12" cy="12" r="9"/><path d="m8 12.5 2.8 2.8 5.7-5.8"/>"#));
+static WARNING_TRIANGLE: LazyLock<Handle> = LazyLock::new(|| {
+    black_line_icon_svg(
+        r#"<path d="M10.3 4 2.5 17.5a2 2 0 0 0 1.7 3h15.6a2 2 0 0 0 1.7-3L13.7 4a2 2 0 0 0-3.4 0z"/><path d="M12 9.5v4M12 17h.01"/>"#,
+    )
+});
+static ERROR_CIRCLE: LazyLock<Handle> =
+    LazyLock::new(|| black_line_icon_svg(r#"<circle cx="12" cy="12" r="9"/><path d="M12 7.5v5.5M12 16.5h.01"/>"#));
+
 static PAUSE: LazyLock<Handle> = LazyLock::new(|| black_line_icon_svg(r#"<path d="M9 5v14M15 5v14"/>"#));
 static RESUME: LazyLock<Handle> = LazyLock::new(|| black_line_icon_svg(r#"<path d="M8 5.5v13l10-6.5z"/>"#));
 
@@ -66,6 +76,18 @@ pub fn chevron_up<'a>(size: f32, color: Color) -> Svg<'a, Theme> {
 
 pub fn chevron_down<'a>(size: f32, color: Color) -> Svg<'a, Theme> {
     tinted(&CHEVRON_DOWN, size, color)
+}
+
+pub fn check_circle<'a>(size: f32, color: Color) -> Svg<'a, Theme> {
+    tinted(&CHECK_CIRCLE, size, color)
+}
+
+pub fn warning_triangle<'a>(size: f32, color: Color) -> Svg<'a, Theme> {
+    tinted(&WARNING_TRIANGLE, size, color)
+}
+
+pub fn error_circle<'a>(size: f32, color: Color) -> Svg<'a, Theme> {
+    tinted(&ERROR_CIRCLE, size, color)
 }
 
 pub fn drive<'a>(size: f32, color: Color) -> Svg<'a, Theme> {

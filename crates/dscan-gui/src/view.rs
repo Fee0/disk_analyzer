@@ -10,7 +10,7 @@ use iced::widget::{
 use iced::{Alignment, Color, Element, Fill, Length, Theme};
 
 use crate::animation::ChartAnimation;
-use crate::app::{App, Browser, HOLD_TO_DELETE, ListRow, Message, SEARCH_ID, ScanJob, Screen};
+use crate::app::{App, Browser, HOLD_TO_DELETE, ListRow, Message, Notice, NoticeKind, SEARCH_ID, ScanJob, Screen};
 use crate::fmt::{fit_width, fit_width_keeping_both_ends, generous_text_width, thousands, truncate};
 use crate::icon;
 use crate::sunburst::Sunburst;
@@ -670,7 +670,8 @@ fn chart_panel(b: &Browser) -> Element<'_, Message> {
         responsive(move |size| column![Space::new().height(Fill), collector(b, size)].into());
     let mut layers = stack![chart_above_the_collector, collector_floating_over_the_chart];
     if let Some(message) = &b.notice {
-        layers = layers.push(container(notice(message)).width(Fill).padding(NOTICE_MARGIN).align_x(Alignment::Center));
+        layers = layers
+            .push(container(notice_banner(message)).width(Fill).padding(NOTICE_MARGIN).align_x(Alignment::Center));
     }
     layers.width(Length::FillPortion(CHART_SIDE_PORTION)).height(Fill).into()
 }
@@ -682,27 +683,70 @@ const NOTICE_LINE_SPACING: f32 = 1.5;
 const NOTICE_PADDING: [f32; 2] = [8.0, 12.0];
 const NOTICE_SPACING: f32 = 10.0;
 const NOTICE_RADIUS: f32 = 10.0;
-const NOTICE_DISMISS_ICON: f32 = 12.0;
-const NOTICE_DISMISS_PADDING: f32 = 5.0;
+const NOTICE_DISMISS_ICON: f32 = 14.0;
+const NOTICE_DISMISS_PADDING: f32 = 6.0;
+pub const NOTICE_DISMISS_BUTTON_SIDE: f32 = NOTICE_DISMISS_ICON + 2.0 * NOTICE_DISMISS_PADDING;
+const NOTICE_SIGN_SIZE: f32 = 20.0;
+const NOTICE_BORDER_TINT: f32 = 0.45;
+const DISMISS_NOTICE_TOOLTIP: &str = "Dismiss";
 
-fn notice(message: &str) -> Element<'_, Message> {
-    let dismiss = button(icon::close(NOTICE_DISMISS_ICON, theme::TEXT_DIM))
+fn notice_color(kind: NoticeKind) -> Color {
+    match kind {
+        NoticeKind::Done => theme::SUCCESS,
+        NoticeKind::Warning => theme::WARNING,
+        NoticeKind::Error => theme::DANGER,
+    }
+}
+
+fn notice_sign<'a>(kind: NoticeKind) -> Element<'a, Message> {
+    let color = notice_color(kind);
+    match kind {
+        NoticeKind::Done => icon::check_circle(NOTICE_SIGN_SIZE, color).into(),
+        NoticeKind::Warning => icon::warning_triangle(NOTICE_SIGN_SIZE, color).into(),
+        NoticeKind::Error => icon::error_circle(NOTICE_SIGN_SIZE, color).into(),
+    }
+}
+
+fn dismiss_notice_button<'a>() -> Element<'a, Message> {
+    let dismiss = button(icon::close(NOTICE_DISMISS_ICON, theme::TEXT))
         .padding(NOTICE_DISMISS_PADDING)
-        .style(quiet_button_style(theme::TEXT_DIM))
+        .width(NOTICE_DISMISS_BUTTON_SIDE)
+        .height(NOTICE_DISMISS_BUTTON_SIDE)
+        .style(|_, status| {
+            let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+            button::Style {
+                background: hovered.then(|| theme::NEUTRAL_BUTTON.into()),
+                border: border::rounded(FRAME_RADIUS - FRAME_INSET),
+                ..button::Style::default()
+            }
+        })
         .on_press(Message::DismissNotice);
-    container(
-        row![text(message).size(NOTICE_TEXT_SIZE).line_height(NOTICE_LINE_SPACING), dismiss]
-            .spacing(NOTICE_SPACING)
-            .align_y(Alignment::Center),
+    tooltip(dismiss, tooltip_box(DISMISS_NOTICE_TOOLTIP), tooltip::Position::Bottom).gap(4).into()
+}
+
+fn notice_banner(notice: &Notice) -> Element<'_, Message> {
+    let tint = theme::mix(theme::NEUTRAL_BUTTON, notice_color(notice.kind), NOTICE_BORDER_TINT);
+    let banner = container(
+        row![
+            notice_sign(notice.kind),
+            text(notice.text.as_str()).size(NOTICE_TEXT_SIZE).line_height(NOTICE_LINE_SPACING).width(Fill),
+            dismiss_notice_button(),
+        ]
+        .spacing(NOTICE_SPACING)
+        .align_y(Alignment::Center),
     )
     .padding(NOTICE_PADDING)
     .max_width(NOTICE_MAX_WIDTH)
-    .style(|_| {
+    .style(move |_| {
         rounded_box(theme::PANEL_HI, NOTICE_RADIUS)
-            .border(border::rounded(NOTICE_RADIUS).width(1).color(theme::NEUTRAL_BUTTON))
+            .border(border::rounded(NOTICE_RADIUS).width(1).color(tint))
             .shadow(floating_shadow())
-    })
-    .into()
+    });
+    mouse_area(banner)
+        .on_enter(Message::NoticeEnter)
+        .on_exit(Message::NoticeExit)
+        .interaction(iced::mouse::Interaction::Idle)
+        .into()
 }
 
 const CHART_COLLECTOR_GAP: f32 = 10.0;

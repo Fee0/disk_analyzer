@@ -9,6 +9,8 @@ pub const TEXT_DIM: Color = Color::from_rgb8(0x9a, 0x9f, 0xab);
 pub const ACCENT: Color = Color::from_rgb8(0x4f, 0x8c, 0xf7);
 pub const DANGER: Color = Color::from_rgb8(0xe5, 0x5b, 0x5b);
 pub const NEUTRAL_BUTTON: Color = Color::from_rgb8(0x4a, 0x4f, 0x5a);
+pub const SUCCESS: Color = Color::from_rgb8(0x4c, 0xc3, 0x8a);
+pub const WARNING: Color = Color::from_rgb8(0xf0, 0xb4, 0x29);
 
 const LIGHTNESS_LOSS_PER_RING: f32 = 0.035;
 const MIN_SEGMENT_LIGHTNESS: f32 = 0.25;

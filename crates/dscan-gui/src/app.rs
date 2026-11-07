@@ -19,6 +19,7 @@ pub const SEARCH_ID: &str = "search";
 pub const MAX_LIST_ROWS: usize = 400;
 const DRAG_THRESHOLD: f32 = 4.0;
 pub const HOLD_TO_DELETE: Duration = Duration::from_secs(3);
+const NOTICE_LIFETIME: Duration = Duration::from_secs(4);
 const HOLD_PROGRESS_REFRESH: Duration = Duration::from_millis(33);
 const SCAN_PROGRESS_REFRESH: Duration = Duration::from_millis(100);
 
@@ -120,6 +121,19 @@ pub struct ListView {
     pub cut_off_rows_summary: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoticeKind {
+    Done,
+    Warning,
+    Error,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct Notice {
+    pub kind: NoticeKind,
+    pub text: String,
+}
+
 pub struct Browser {
     pub tree: Arc<Tree>,
     pub opts: ScanOptions,
@@ -146,7 +160,9 @@ pub struct Browser {
     removal_waiting_for_tree: Option<PendingRemoval>,
     pub(crate) delete_hold_started: Option<Instant>,
     pub drag: Option<PendingDrag>,
-    pub notice: Option<String>,
+    pub notice: Option<Notice>,
+    notice_expires_at: Option<Instant>,
+    notice_hovered: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -196,6 +212,9 @@ pub enum Message {
     ResumeParked(usize),
     CloseParked(usize),
     DismissNotice,
+    NoticeExpired,
+    NoticeEnter,
+    NoticeExit,
     Preview,
     Reveal,
     DesktopActionFinished { failure: Option<String> },
@@ -468,6 +487,8 @@ impl Browser {
             delete_hold_started: None,
             drag: None,
             notice: None,
+            notice_expires_at: None,
+            notice_hovered: false,
         };
         b.relayout();
         b.sync_list();
@@ -676,14 +697,30 @@ impl Browser {
     fn collect(&mut self, id: NodeId) {
         match self.collector.add(&self.tree, id) {
             Ok(()) => self.collector_changed(),
-            Err(Refusal::Protected) => {
-                self.notice = Some(format!(
+            Err(Refusal::Protected) => self.show_notice(
+                NoticeKind::Warning,
+                format!(
                     "“{}” is a protected system location and can't be moved to the {TRASH_NAME}.",
                     truncate(&self.tree.name(id), 40)
-                ))
-            }
+                ),
+            ),
             Err(Refusal::NotActionable | Refusal::AlreadyCoveredByCollectedFolder) => {}
         }
+    }
+
+    fn show_notice(&mut self, kind: NoticeKind, text: String) {
+        self.notice = Some(Notice { kind, text });
+        self.notice_expires_at = (!self.notice_hovered).then(|| Instant::now() + NOTICE_LIFETIME);
+    }
+
+    fn dismiss_notice(&mut self) {
+        self.notice = None;
+        self.notice_expires_at = None;
+        self.notice_hovered = false;
+    }
+
+    fn check_the_notice_again_once_its_lifetime_is_up() -> Task<Message> {
+        Task::perform(async { tokio::time::sleep(NOTICE_LIFETIME).await }, |_| Message::NoticeExpired)
     }
 
     fn collector_changed(&mut self) {
@@ -750,10 +787,14 @@ impl Browser {
                 format!("Deleted {items_phrase} permanently, freeing {}.", format_size(report.bytes))
             }
         };
-        if let Some((_, err)) = report.failed.first() {
-            msg.push_str(&format!(" {} failed: {err}", report.failed.len()));
-        }
-        self.notice = Some(msg);
+        let kind = match report.failed.first() {
+            None => NoticeKind::Done,
+            Some((_, err)) => {
+                msg.push_str(&format!(" {} failed: {err}", report.failed.len()));
+                if report.removed == 0 { NoticeKind::Error } else { NoticeKind::Warning }
+            }
+        };
+        self.show_notice(kind, msg);
         self.focus = self.tree.nearest_live(self.focus);
         self.selected = self.selected.filter(|&s| self.tree.is_live(s));
         self.search_gen += 1;
@@ -763,12 +804,18 @@ impl Browser {
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         let before = (self.hovered, self.selected);
+        let deadline_before = self.notice_expires_at;
         let task = self.handle(message);
         if (self.hovered, self.selected) != before {
             self.highlight_cache.clear();
         }
         self.sync_list();
-        task
+        match self.notice_expires_at {
+            Some(deadline) if Some(deadline) != deadline_before => {
+                Task::batch([task, Self::check_the_notice_again_once_its_lifetime_is_up()])
+            }
+            _ => task,
+        }
     }
 
     fn handle(&mut self, message: Message) -> Task<Message> {
@@ -899,10 +946,23 @@ impl Browser {
                 self.delete_hold_started = None;
                 return self.remove_collected(Removal::DeletePermanently);
             }
-            Message::DismissNotice => self.notice = None,
+            Message::DismissNotice => self.dismiss_notice(),
+            Message::NoticeExpired if self.notice_expires_at.is_some_and(|deadline| Instant::now() >= deadline) => {
+                self.dismiss_notice()
+            }
+            Message::NoticeEnter => {
+                self.notice_hovered = true;
+                self.notice_expires_at = None;
+            }
+            Message::NoticeExit => {
+                self.notice_hovered = false;
+                if self.notice.is_some() {
+                    self.notice_expires_at = Some(Instant::now() + NOTICE_LIFETIME);
+                }
+            }
             Message::Preview => return self.hand_selection_to_desktop(PREVIEW_ACTION, desktop::preview),
             Message::Reveal => return self.hand_selection_to_desktop(REVEAL_ACTION, desktop::reveal),
-            Message::DesktopActionFinished { failure: Some(why) } => self.notice = Some(why),
+            Message::DesktopActionFinished { failure: Some(why) } => self.show_notice(NoticeKind::Error, why),
             _ => {}
         }
         Task::none()
@@ -979,7 +1039,13 @@ mod tests {
         assert!(!dir.path().join("Movies").exists());
         assert!(!b.tree.is_live(movies) && b.collector.is_empty());
         assert!(b.delete_hold_started.is_none());
-        assert!(b.notice.as_deref().is_some_and(|s| s.starts_with("Deleted 1 item permanently")), "{:?}", b.notice);
+        assert!(
+            b.notice
+                .as_ref()
+                .is_some_and(|n| n.kind == NoticeKind::Done && n.text.starts_with("Deleted 1 item permanently")),
+            "{:?}",
+            b.notice
+        );
     }
 
     #[test]
@@ -1055,10 +1121,54 @@ mod tests {
         let mut b = browser(dir.path());
         let failure = Some("Quick Look failed for “a.mov”: not found".to_string());
         let _ = b.update(Message::DesktopActionFinished { failure: failure.clone() });
-        assert_eq!(b.notice, failure);
+        assert_eq!(
+            b.notice,
+            failure.map(|text| Notice { kind: NoticeKind::Error, text }),
+            "a failure shows as an error"
+        );
         let _ = b.update(Message::DismissNotice);
         let _ = b.update(Message::DesktopActionFinished { failure: None });
         assert_eq!(b.notice, None, "success needs no message");
+    }
+
+    fn pretend_the_notice_lifetime_passed(b: &mut Browser) {
+        if let Some(deadline) = &mut b.notice_expires_at {
+            *deadline = Instant::now() - Duration::from_millis(1);
+        }
+    }
+
+    #[test]
+    fn a_notice_disappears_after_its_lifetime_but_not_while_hovered() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut b = browser(dir.path());
+        let failed = |why: &str| Message::DesktopActionFinished { failure: Some(why.to_string()) };
+
+        let timer = b.update(failed("first"));
+        assert!(timer.units() > 0, "showing a notice starts its timer");
+        let _ = b.update(Message::NoticeExpired);
+        assert!(b.notice.is_some(), "a notice stays for its whole lifetime");
+
+        let _ = b.update(Message::NoticeEnter);
+        pretend_the_notice_lifetime_passed(&mut b);
+        let _ = b.update(Message::NoticeExpired);
+        assert!(b.notice.is_some(), "a hovered notice stays");
+        let _ = b.update(failed("second"));
+        pretend_the_notice_lifetime_passed(&mut b);
+        let _ = b.update(Message::NoticeExpired);
+        assert_eq!(
+            b.notice.as_ref().map(|n| n.text.as_str()),
+            Some("second"),
+            "a notice replaced under the mouse stays"
+        );
+
+        let restarted = b.update(Message::NoticeExit);
+        assert!(restarted.units() > 0, "leaving the notice starts its lifetime again");
+        let _ = b.update(Message::NoticeExpired);
+        assert!(b.notice.is_some(), "after the mouse leaves, the notice gets a full lifetime again");
+        pretend_the_notice_lifetime_passed(&mut b);
+        let _ = b.update(Message::NoticeExpired);
+        assert_eq!(b.notice, None, "the notice goes once its time is up");
+        assert_eq!(b.update(Message::NoticeExit).units(), 0, "no notice, no timer");
     }
 
     #[test]
