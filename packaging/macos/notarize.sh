@@ -10,7 +10,7 @@ fi
 
 credentials=(--key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER")
 
-result=$(xcrun notarytool submit "$submission" "${credentials[@]}" --wait --timeout 30m --output-format json)
+result=$(xcrun notarytool submit "$submission" "${credentials[@]}" --wait --timeout 2h --output-format json)
 echo "$result"
 
 if [[ "$(jq -r .status <<<"$result")" != Accepted ]]; then
