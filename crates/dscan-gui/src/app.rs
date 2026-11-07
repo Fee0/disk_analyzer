@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use dscan_core::{
-    CancelToken, Collection, Exclusions, Layout, LayoutParams, Metric, NodeId, Progress, ProgressSnapshot, Refusal,
-    Removal, ScanError, ScanOptions, SearchResult, Segment, TRASH_NAME, Transition, Tree, Volume, actions, format_size,
+    CancelToken, Collection, Exclusions, Layout, LayoutParams, NodeId, Progress, ProgressSnapshot, Refusal, Removal,
+    ScanError, ScanOptions, SearchResult, Segment, TRASH_NAME, Transition, Tree, Volume, actions, format_size,
 };
 use iced::keyboard::{self, Key, key::Named};
 use iced::widget::canvas::Cache;
@@ -110,7 +110,6 @@ pub struct ListView {
 pub struct Browser {
     pub tree: Arc<Tree>,
     pub opts: ScanOptions,
-    pub metric: Metric,
     pub focus: NodeId,
     history: Vec<NodeId>,
     forward: Vec<NodeId>,
@@ -158,7 +157,6 @@ pub enum Message {
     Navigate(NodeId),
     Back,
     Forward,
-    SetMetric(Metric),
     SearchChanged(String),
     SearchFire(u64),
     SearchDone(u64, Option<Arc<SearchResult>>),
@@ -293,9 +291,9 @@ impl App {
             }
             Message::FolderPicked(Some(path)) => return self.start_scan(ScanOptions::folder(path)),
             Message::OpenFdaSettings => {
-                let _ = std::process::Command::new("open")
-                    .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
-                    .spawn();
+                if let Some(settings) = dscan_core::FULL_DISK_ACCESS_SETTINGS {
+                    let _ = std::process::Command::new("open").arg(settings).spawn();
+                }
             }
             Message::RefreshVolumes => return Self::load_volumes(),
             Message::Tick => {
@@ -421,7 +419,6 @@ impl Browser {
         let mut b = Browser {
             tree: Arc::new(tree),
             opts,
-            metric: Metric::Allocated,
             focus: root,
             history: Vec::new(),
             forward: Vec::new(),
@@ -465,14 +462,7 @@ impl Browser {
     }
 
     fn computed_layout(&self) -> Layout {
-        dscan_core::sunburst(
-            &self.tree,
-            self.focus,
-            self.metric,
-            LayoutParams::default(),
-            self.search.as_deref(),
-            &self.exclusions,
-        )
+        dscan_core::sunburst(&self.tree, self.focus, LayoutParams::default(), self.search.as_deref(), &self.exclusions)
     }
 
     fn relayout(&mut self) {
@@ -493,7 +483,7 @@ impl Browser {
     }
 
     pub fn size(&self, id: NodeId) -> u64 {
-        self.exclusions.size(&self.tree, id, self.metric)
+        self.exclusions.size(&self.tree, id)
     }
 
     pub fn listed_folder(&self) -> NodeId {
@@ -504,9 +494,7 @@ impl Browser {
     }
 
     fn visible_children(&self, id: NodeId) -> impl Iterator<Item = NodeId> + '_ {
-        self.exclusions
-            .children(&self.tree, id, self.metric)
-            .filter(|&c| self.search.as_ref().is_none_or(|s| s.is_relevant(c)))
+        self.exclusions.children(&self.tree, id).filter(|&c| self.search.as_ref().is_none_or(|s| s.is_relevant(c)))
     }
 
     fn sync_list(&mut self) {
@@ -531,6 +519,8 @@ impl Browser {
                     name.push_str("  (no access)");
                 } else if node.is_clone_copy() {
                     name.push_str("  (clone)");
+                } else if node.shares_blocks_counted_elsewhere() {
+                    name.push_str("  (partly a clone)");
                 } else if node.is_hardlink_copy() {
                     name.push_str("  (hard link)");
                 }
@@ -751,10 +741,6 @@ impl Browser {
             Message::Navigate(id) => self.set_focus(id, true),
             Message::Back => self.back(),
             Message::Forward => self.forward(),
-            Message::SetMetric(m) if m != self.metric => {
-                self.metric = m;
-                self.relayout_animated();
-            }
             Message::AnimationFrame(now) => {
                 if let Some(Advance::Finished) = self.animation.as_mut().map(|a| a.advance(now)) {
                     self.animation = None;
@@ -884,7 +870,7 @@ mod tests {
     }
 
     fn child(b: &Browser, parent: NodeId, name: &str) -> NodeId {
-        b.tree.children(parent, b.metric).find(|&c| b.tree.name(c) == name).unwrap()
+        b.tree.children(parent).find(|&c| b.tree.name(c) == name).unwrap()
     }
 
     fn remove_focused_folder_as_trashing_does(b: &mut Browser) {

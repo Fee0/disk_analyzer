@@ -12,6 +12,7 @@ pub(crate) mod windows;
 use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::io;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -30,6 +31,19 @@ pub(crate) type Current = windows::Windows;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct DeviceId(pub u64);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct BlockSpace(pub u128);
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SharedBlocks<'a> {
+    pub space: BlockSpace,
+    pub ranges: &'a [Range<u64>],
+}
+
+impl SharedBlocks<'_> {
+    pub const NONE_KNOWN: SharedBlocks<'static> = SharedBlocks { space: BlockSpace(0), ranges: &[] };
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EntryType {
     File,
@@ -43,9 +57,9 @@ pub(crate) struct DirEntry<'a> {
     pub entry_type: Option<EntryType>,
     pub device: DeviceId,
     pub allocated: u64,
-    pub logical: u64,
     pub hard_link_id: Option<u64>,
     pub shared_data_stream_id: Option<u64>,
+    pub shared_blocks: SharedBlocks<'a>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,6 +78,7 @@ pub(crate) struct ScanBoundaries {
 pub(crate) trait Platform {
     const PATH_SEPARATOR: u8;
     const TRASH_NAME: &'static str;
+    const FULL_DISK_ACCESS_SETTINGS: Option<&'static str>;
     const PROTECTED: ProtectedLocations;
     const SYSTEM_FOLDERS_AT_SYSTEM_ROOT: &'static [&'static str];
 

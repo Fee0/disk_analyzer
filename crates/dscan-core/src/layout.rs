@@ -1,7 +1,7 @@
 use crate::exclusions::Exclusions;
 use crate::kind::Kind;
 use crate::search::SearchResult;
-use crate::tree::{Metric, NodeId, Tree};
+use crate::tree::{NodeId, Tree};
 
 pub const MAX_DEPTH: usize = 7;
 
@@ -95,15 +95,14 @@ impl Layout {
 pub fn sunburst(
     tree: &Tree,
     focus: NodeId,
-    metric: Metric,
     params: LayoutParams,
     search: Option<&SearchResult>,
     excluded: &Exclusions,
 ) -> Layout {
-    let total = excluded.size(tree, focus, metric);
+    let total = excluded.size(tree, focus);
     let mut layout = Layout { focus, total, rings: vec![Vec::new(); params.max_depth] };
     if total > 0 {
-        let mut placer = Placer { tree, metric, params, search, excluded, rings: &mut layout.rings };
+        let mut placer = Placer { tree, params, search, excluded, rings: &mut layout.rings };
         placer.place(focus, 0.0, 1.0, 0, 0);
     }
     while layout.rings.last().is_some_and(Vec::is_empty) {
@@ -114,7 +113,6 @@ pub fn sunburst(
 
 struct Placer<'a> {
     tree: &'a Tree,
-    metric: Metric,
     params: LayoutParams,
     search: Option<&'a SearchResult>,
     excluded: &'a Exclusions,
@@ -140,7 +138,7 @@ impl Placer<'_> {
             return;
         }
         let tree = self.tree;
-        let size = self.excluded.size(tree, node, self.metric);
+        let size = self.excluded.size(tree, node);
         if size == 0 {
             return;
         }
@@ -148,7 +146,7 @@ impl Placer<'_> {
         let mut cursor = start;
         let (mut small_size, mut small_count, mut small_relevant) = (0u64, 0u32, false);
         let mut last_small = None;
-        for (child, cs) in self.excluded.children_with_sizes(tree, node, self.metric) {
+        for (child, cs) in self.excluded.children_with_sizes(tree, node) {
             if cs == 0 {
                 continue;
             }
@@ -200,14 +198,7 @@ mod tests {
             F("tiny1", 1),
             F("tiny2", 1),
         ]);
-        let l = sunburst(
-            &t,
-            t.root(),
-            Metric::Allocated,
-            LayoutParams { max_depth: 4, min_span: 0.01 },
-            None,
-            &Exclusions::default(),
-        );
+        let l = sunburst(&t, t.root(), LayoutParams { max_depth: 4, min_span: 0.01 }, None, &Exclusions::default());
         assert_eq!(l.total, 1001);
         assert_eq!(l.rings.len(), 2);
         assert_eq!(l.rings[0].len(), 3, "ring 0 holds the focus's children: a, b and one bucket of small items");
@@ -244,9 +235,9 @@ mod tests {
         let t = tree(vec![D("a", vec![F("x.mov", 600), F("y.mov", 200)]), D("b", vec![F("w.png", 400)])]);
         let x = descend(&t, &["a", "x.mov"]);
         let params = LayoutParams { max_depth: 4, min_span: 0.01 };
-        let l = sunburst(&t, t.root(), Metric::Allocated, params, None, &Exclusions::new(&t, &[x]));
+        let l = sunburst(&t, t.root(), params, None, &Exclusions::new(&t, &[x]));
 
-        assert_eq!(l.total, t.size(t.root(), Metric::Allocated) - t.size(x, Metric::Allocated));
+        assert_eq!(l.total, t.size(t.root()) - t.size(x));
         assert!(l.find(Segment::Node(x)).is_none(), "an excluded file has no arc");
         let ring0: Vec<_> = l.rings[0].iter().map(|arc| t.name(arc.node().unwrap()).into_owned()).collect();
         assert_eq!(ring0, ["b", "a"], "the shrunken folder is re-ranked");
@@ -257,7 +248,7 @@ mod tests {
     fn small_items_keep_total() {
         let kids: Vec<_> = (0..1000).map(|_| F("f", 1)).collect();
         let t = tree(kids);
-        let l = sunburst(&t, t.root(), Metric::Allocated, LayoutParams::default(), None, &Exclusions::default());
+        let l = sunburst(&t, t.root(), LayoutParams::default(), None, &Exclusions::default());
         assert_eq!(l.rings[0].len(), 1);
         assert_eq!(l.rings[0][0].size, 1000);
         assert!((l.rings[0][0].span() - 1.0).abs() < 1e-9);
@@ -276,7 +267,7 @@ mod search_tests {
         kids.push(F("needle", 1));
         let t = tree(kids);
         let s = crate::search::search(&t, "needle", &Default::default()).unwrap();
-        let l = sunburst(&t, t.root(), Metric::Allocated, LayoutParams::default(), Some(&s), &Exclusions::default());
+        let l = sunburst(&t, t.root(), LayoutParams::default(), Some(&s), &Exclusions::default());
         let big = &l.rings[0][0];
         assert!(!big.relevant);
         let small = l.rings[0].iter().find(|a| matches!(a.segment, Segment::Small { .. })).unwrap();

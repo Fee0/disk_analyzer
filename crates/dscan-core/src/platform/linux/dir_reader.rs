@@ -1,11 +1,15 @@
 use std::ffi::CStr;
 use std::io;
 use std::mem::ManuallyDrop;
+use std::ops::Range;
 
-use crate::platform::unix::{entry_with_unreadable_attributes, open_dir_without_following_symlink};
-use crate::platform::{DeviceId, DirEntry, EntryType};
+use super::extents::{self, Batch, FIEMAP_BUFFER_WORDS, FileSystemBlocks};
+use crate::platform::unix::{Fd, entry_with_unreadable_attributes, open_dir_without_following_symlink};
+use crate::platform::{DeviceId, DirEntry, EntryType, SharedBlocks};
 
 const STAT_BLOCK_SIZE: u64 = 512;
+const FS_IOC_FIEMAP: u32 = 0xC020_660B;
+const BTRFS_IOC_FS_INFO: u32 = 0x8400_941F;
 const NO_ERROR: libc::c_int = 0;
 
 struct Dir(*mut libc::DIR);
@@ -67,9 +71,49 @@ fn entry_from_stat<'a>(name: &'a [u8], status: &libc::stat) -> DirEntry<'a> {
         }),
         device: DeviceId(status.st_dev),
         allocated: status.st_blocks as u64 * STAT_BLOCK_SIZE,
-        logical: status.st_size as u64,
         hard_link_id: (is_regular_file && status.st_nlink > 1).then_some(status.st_ino),
         shared_data_stream_id: None,
+        shared_blocks: SharedBlocks::NONE_KNOWN,
+    }
+}
+
+fn block_sharing_of(dir: libc::c_int, device: DeviceId) -> FileSystemBlocks {
+    let mut file_system: libc::statfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstatfs(dir, &mut file_system) } != 0 {
+        return FileSystemBlocks::NeverShared;
+    }
+    extents::block_sharing(file_system.f_type as i64, device.0, || btrfs_fs_info(dir))
+}
+
+fn btrfs_fs_info(dir: libc::c_int) -> Option<[u8; extents::BTRFS_FS_INFO_BYTES]> {
+    let mut info = [0u8; extents::BTRFS_FS_INFO_BYTES];
+    let answered = unsafe { libc::ioctl(dir, BTRFS_IOC_FS_INFO as _, info.as_mut_ptr()) } == 0;
+    answered.then_some(info)
+}
+
+fn has_data_blocks(status: &libc::stat) -> bool {
+    status.st_mode & libc::S_IFMT == libc::S_IFREG && status.st_blocks > 0
+}
+
+fn shared_extents_of(dir: libc::c_int, name: &CStr, shared: &mut Vec<Range<u64>>) {
+    shared.clear();
+    let flags = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC;
+    let fd = unsafe { libc::openat(dir, name.as_ptr(), flags) };
+    if fd < 0 {
+        return;
+    }
+    let file = Fd(fd);
+    let mut buffer = [0u64; FIEMAP_BUFFER_WORDS];
+    let mut from = 0;
+    loop {
+        extents::ask_for_extents_from(&mut buffer, from);
+        if unsafe { libc::ioctl(file.0, FS_IOC_FIEMAP as _, buffer.as_mut_ptr()) } != 0 {
+            return;
+        }
+        match extents::collect_shared_extents(&buffer, shared) {
+            Batch::Complete => return,
+            Batch::ContinueFrom(offset) => from = offset,
+        }
     }
 }
 
@@ -77,13 +121,24 @@ pub(super) fn read_dir(path: &[u8], mut visit: impl FnMut(DirEntry<'_>)) -> io::
     let mut dir = Dir::open(path)?;
     let dir_fd = dir.fd();
     let own_device = DeviceId(stat_at(dir_fd, c".")?.st_dev);
+    let sharing = block_sharing_of(dir_fd, own_device);
+    let mut shared = Vec::new();
     while let Some(name) = dir.next_name()? {
         let name_bytes = name.to_bytes();
         if is_self_or_parent(name_bytes) {
             continue;
         }
         match stat_at(dir_fd, name) {
-            Ok(status) => visit(entry_from_stat(name_bytes, &status)),
+            Ok(status) => {
+                let mut entry = entry_from_stat(name_bytes, &status);
+                if let FileSystemBlocks::MayBeShared(space) = sharing
+                    && has_data_blocks(&status)
+                {
+                    shared_extents_of(dir_fd, name, &mut shared);
+                    entry.shared_blocks = SharedBlocks { space, ranges: &shared };
+                }
+                visit(entry)
+            }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(_) => visit(entry_with_unreadable_attributes(name_bytes, own_device)),
         }
@@ -108,19 +163,16 @@ mod tests {
 
         let mut seen = std::collections::BTreeMap::new();
         read_dir(r.as_os_str().as_bytes(), |e| {
-            seen.insert(
-                String::from_utf8_lossy(e.name).into_owned(),
-                (e.entry_type, e.logical, e.allocated, e.hard_link_id),
-            );
+            seen.insert(String::from_utf8_lossy(e.name).into_owned(), (e.entry_type, e.allocated, e.hard_link_id));
         })
         .unwrap();
 
         assert_eq!(seen.keys().collect::<Vec<_>>(), ["a-link.bin", "a.bin", "single.txt", "sub", "sym"]);
-        let (entry_type, logical, allocated, hard_link_id) = seen["a.bin"];
-        assert_eq!((entry_type, logical), (Some(EntryType::File), 10_000));
+        let (entry_type, allocated, hard_link_id) = seen["a.bin"];
+        assert_eq!(entry_type, Some(EntryType::File));
         assert!(allocated >= 10_000);
-        assert!(hard_link_id.is_some() && hard_link_id == seen["a-link.bin"].3, "both names share one inode");
-        assert_eq!(seen["single.txt"].3, None, "a file with one name needs no hard-link bookkeeping");
+        assert!(hard_link_id.is_some() && hard_link_id == seen["a-link.bin"].2, "both names share one inode");
+        assert_eq!(seen["single.txt"].2, None, "a file with one name needs no hard-link bookkeeping");
         assert_eq!(seen["sub"].0, Some(EntryType::Directory));
         assert_eq!(seen["sym"].0, Some(EntryType::Symlink));
     }

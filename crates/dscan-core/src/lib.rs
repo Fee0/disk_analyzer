@@ -19,8 +19,8 @@ pub use protection::is_protected;
 pub use scan::{CancelToken, Progress, ProgressSnapshot, ScanError, ScanOptions, scan};
 pub use search::{SearchResult, search};
 pub use transition::{ArcStyle, FrameArc, Transition, TransitionKind};
-pub use tree::{Metric, NodeId, ScanStats, Tree};
-pub use volumes::{TRASH_NAME, Volume, has_full_disk_access, list_volumes};
+pub use tree::{NodeId, ScanStats, Tree};
+pub use volumes::{FULL_DISK_ACCESS_SETTINGS, TRASH_NAME, Volume, has_full_disk_access, list_volumes};
 
 pub fn canonical_path(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
     use platform::{Current, Platform};

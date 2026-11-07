@@ -449,8 +449,8 @@ mod tests {
     use super::*;
     use crate::exclusions::Exclusions;
     use crate::layout::{LayoutParams, sunburst};
+    use crate::tree::Tree;
     use crate::tree::test_util::{T::*, descend, tree};
-    use crate::tree::{Metric, Tree};
 
     const SHOW_EVERY_ARC: LayoutParams = LayoutParams { max_depth: MAX_DEPTH, min_span: 1e-9 };
     const SAME_PLACE: f64 = 1e-9;
@@ -464,7 +464,7 @@ mod tests {
     }
 
     fn layout(t: &Tree, focus: NodeId, excluded: &[NodeId]) -> Layout {
-        sunburst(t, focus, Metric::Allocated, SHOW_EVERY_ARC, None, &Exclusions::new(t, excluded))
+        sunburst(t, focus, SHOW_EVERY_ARC, None, &Exclusions::new(t, excluded))
     }
 
     fn assert_same_picture(actual: &[FrameArc], expected: &[FrameArc], what: &str) {

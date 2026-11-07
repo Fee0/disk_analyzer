@@ -43,8 +43,9 @@ the same way; run as root/administrator to see everything.
 
 ⌘ is Ctrl on Linux and Windows.
 
-*On disk* shows allocated bytes, which is what deleting actually frees; hard
-links count once. *Logical* shows file lengths, as Finder does. In a
+Sizes are always on disk: allocated bytes, which is what deleting actually
+frees. Hard links count once, and so do blocks shared between copies: unchanged APFS
+clones, and reflinked copies on btrfs and XFS (which `cp` makes by default). In a
 whole-volume scan, grey segments show *Purgeable space* (macOS) and *Hidden
 space*: usage the file walk can't see, such as snapshots, file system metadata
 and unreadable folders.

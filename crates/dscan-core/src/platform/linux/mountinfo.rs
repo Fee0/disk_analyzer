@@ -98,20 +98,35 @@ pub(super) fn same_file_system_mounts_below(mounts: &[Mount], root: &Path) -> Sa
     let mut found = SameFileSystemMounts::default();
     let Some(root_index) = mount_holding(mounts, root) else { return found };
     let root_mount = &mounts[root_index];
-    let mut visible_fs_roots = vec![root_mount.fs_root.clone()];
+    let mut shown: Vec<&Mount> = vec![root_mount];
     for (index, mount) in mounts.iter().enumerate() {
         let below_root = mount.mount_point.starts_with(root) && mount.mount_point != root;
         if index == root_index || !below_root || !mount.shows_the_same_file_system_as(root_mount) {
             continue;
         }
-        if visible_fs_roots.iter().any(|visible| mount.fs_root.starts_with(visible)) {
+        if shown.iter().any(|s| mount.fs_root.starts_with(&s.fs_root)) {
             found.duplicate_views.push(mount.mount_point.clone());
         } else {
-            visible_fs_roots.push(mount.fs_root.clone());
+            shown.push(mount);
             found.entered.push(mount.mount_point.clone());
         }
     }
+    found.duplicate_views.extend(places_inside_a_mount_that_show_another_shown_mount(&shown));
     found
+}
+
+fn places_inside_a_mount_that_show_another_shown_mount(shown: &[&Mount]) -> Vec<PathBuf> {
+    let mut places = Vec::new();
+    for outer in shown {
+        for inner in shown {
+            if let Ok(inside) = inner.fs_root.strip_prefix(&outer.fs_root)
+                && !inside.as_os_str().is_empty()
+            {
+                places.push(outer.mount_point.join(inside));
+            }
+        }
+    }
+    places
 }
 
 pub(super) fn volume_mounts(mounts: &[Mount], is_directory: impl Fn(&Path) -> bool) -> Vec<&Mount> {
@@ -192,6 +207,26 @@ mod tests {
         let found = same_file_system_mounts_below(&mounts(), Path::new("/"));
         assert_eq!(found.entered, [PathBuf::from("/home")], "@home is separate content on the same disk");
         assert_eq!(found.duplicate_views, [PathBuf::from("/srv/shared")], "a bind mount of /@/var/lib/shared");
+    }
+
+    #[test]
+    fn a_mount_of_the_whole_btrfs_pool_is_entered_but_subvolumes_already_shown_elsewhere_are_skipped_inside_it() {
+        let pool = format!(
+            "{BTRFS_LAPTOP}46 22 0:21 / /mnt/pool rw,relatime shared:36 - btrfs /dev/nvme0n1p2 rw,subvol=/
+"
+        );
+        let found = same_file_system_mounts_below(&parse(pool.as_bytes()), Path::new("/"));
+        assert_eq!(
+            found.entered,
+            [PathBuf::from("/home"), PathBuf::from("/mnt/pool")],
+            "the pool holds snapshots and other subvolumes"
+        );
+        for already_shown in ["/mnt/pool/@", "/mnt/pool/@home"] {
+            assert!(
+                found.duplicate_views.contains(&PathBuf::from(already_shown)),
+                "{already_shown} is / or /home again"
+            );
+        }
     }
 
     #[test]

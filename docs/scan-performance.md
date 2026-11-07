@@ -48,3 +48,29 @@ Three of about 35 runs found 12.07 M files instead of 15.6 M. The missing
 3.55 M files are `~/Library/Containers/com.apple.CoreDevice.CoreDeviceService`.
 macOS denies access to another app's container from time to time, and the scan
 then reports that one folder as unreadable, as intended.
+
+# Shared blocks on Linux (btrfs, XFS)
+
+Since coreutils 9, plain `cp` makes reflinks on btrfs and XFS, so copies share
+their blocks. To count each block once, the Linux reader asks FIEMAP for the
+shared extents of every regular file with data on those two file systems, and
+the scan counts each physical range once (`scan/shared_blocks.rs`). Other file
+systems skip this: one `fstatfs` per folder decides.
+
+Measured in WSL 2 (kernel 6.18) on 2 GB loop images, 200 k files, half of them a
+`cp -r` of the other half, 16 cores:
+
+| | before | with FIEMAP |
+|---|---|---|
+| btrfs, warm cache | 100 ms | 360–470 ms |
+| btrfs, cold cache | 1.2–1.4 s | 1.1–1.4 s |
+| XFS, warm cache | 75 ms | 1.6–2.3 s |
+| XFS, cold cache | 0.84 s | 1.9 s |
+| never reflinked files, warm (btrfs / XFS) | 14 / 50 ms | 37 / 110 ms |
+| never reflinked files, cold | unchanged | unchanged |
+| reported size | 2.8 GB (twice) | 1.4 GB, equal to `btrfs filesystem du` |
+
+The cost lands on files that really share blocks. XFS checks sharing under a
+per-allocation-group lock, so extra threads don't help there (1 thread 2.0 s,
+16 threads 1.6 s). A size threshold was considered and rejected: copied source
+trees are mostly small files, and they would be counted twice.

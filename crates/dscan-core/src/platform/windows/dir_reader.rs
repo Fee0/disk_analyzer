@@ -12,7 +12,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 use super::dir_info::{self, FILE_ID_BOTH_DIR_INFO_WITHOUT_UNIQUE_IDS, FILE_ID_EXTD_DIR_INFO, Layout, Record};
 use super::handle::{Handle, wide_nul_terminated};
 use super::paths;
-use crate::platform::{DeviceId, DirEntry};
+use crate::platform::{DeviceId, DirEntry, SharedBlocks};
 
 const BUFFER_BYTES: usize = 64 * 1024;
 
@@ -68,9 +68,9 @@ fn entry<'a>(record: &Record<'_>, name: &'a str, volume: DeviceId) -> DirEntry<'
         entry_type: Some(record.entry_type()),
         device: volume,
         allocated: record.allocation_size,
-        logical: record.end_of_file,
         hard_link_id: record.hard_link_id(),
         shared_data_stream_id: None,
+        shared_blocks: SharedBlocks::NONE_KNOWN,
     }
 }
 
@@ -116,14 +116,13 @@ mod tests {
     #[test]
     fn record_offsets_match_the_windows_definitions() {
         assert_eq!(dir_info::NEXT_ENTRY_OFFSET, offset_of!(Extd, NextEntryOffset));
-        assert_eq!(dir_info::END_OF_FILE, offset_of!(Extd, EndOfFile));
         assert_eq!(dir_info::ALLOCATION_SIZE, offset_of!(Extd, AllocationSize));
         assert_eq!(dir_info::FILE_ATTRIBUTES, offset_of!(Extd, FileAttributes));
         assert_eq!(dir_info::FILE_NAME_LENGTH, offset_of!(Extd, FileNameLength));
         assert_eq!(FILE_ID_EXTD_DIR_INFO.reparse_tag, offset_of!(Extd, ReparsePointTag));
         assert_eq!(FILE_ID_EXTD_DIR_INFO.unique_file_id, Some(offset_of!(Extd, FileId)));
         assert_eq!(FILE_ID_EXTD_DIR_INFO.file_name, offset_of!(Extd, FileName));
-        assert_eq!(dir_info::END_OF_FILE, offset_of!(FILE_ID_BOTH_DIR_INFO, EndOfFile));
+        assert_eq!(dir_info::ALLOCATION_SIZE, offset_of!(FILE_ID_BOTH_DIR_INFO, AllocationSize));
         assert_eq!(dir_info::FILE_NAME_LENGTH, offset_of!(FILE_ID_BOTH_DIR_INFO, FileNameLength));
         assert_eq!(FILE_ID_BOTH_DIR_INFO_WITHOUT_UNIQUE_IDS.reparse_tag, offset_of!(FILE_ID_BOTH_DIR_INFO, EaSize));
         assert_eq!(FILE_ID_BOTH_DIR_INFO_WITHOUT_UNIQUE_IDS.file_name, offset_of!(FILE_ID_BOTH_DIR_INFO, FileName));
@@ -141,13 +140,13 @@ mod tests {
         let mut seen = std::collections::BTreeMap::new();
         let root = r.to_string_lossy().into_owned();
         read_dir(root.as_bytes(), |e| {
-            seen.insert(String::from_utf8(e.name.to_vec()).unwrap(), (e.entry_type, e.logical, e.hard_link_id));
+            seen.insert(String::from_utf8(e.name.to_vec()).unwrap(), (e.entry_type, e.allocated, e.hard_link_id));
         })
         .unwrap();
 
         assert_eq!(seen.keys().collect::<Vec<_>>(), ["a-link.bin", "a.bin", "sub", "ünïcode.txt"]);
         assert_eq!(seen["a.bin"].0, Some(EntryType::File));
-        assert_eq!(seen["a.bin"].1, 10_000);
+        assert!(seen["a.bin"].1 >= 10_000, "a file takes at least its length on disk");
         assert_eq!(seen["sub"].0, Some(EntryType::Directory));
         assert!(seen["a.bin"].2.is_some(), "NTFS lists 128-bit file ids");
         assert_eq!(seen["a.bin"].2, seen["a-link.bin"].2, "both names of a hard link share a file id");

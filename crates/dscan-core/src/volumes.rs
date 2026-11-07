@@ -38,6 +38,8 @@ pub fn has_full_disk_access() -> bool {
 
 pub const TRASH_NAME: &str = Current::TRASH_NAME;
 
+pub const FULL_DISK_ACCESS_SETTINGS: Option<&str> = Current::FULL_DISK_ACCESS_SETTINGS;
+
 #[cfg(test)]
 mod tests {
     #[test]

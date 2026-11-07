@@ -4,6 +4,20 @@ A DaisyDisk-style disk usage explorer for macOS (APFS), Linux and Windows:
 Rust, with an iced 0.14 GUI. It is a personal tool: no licensing, no network, no caching (every launch
 scans fresh). Performance and UX both matter.
 
+## Supported platforms (enforced)
+
+We support **macOS, Linux and Windows**, and everything must work on each of
+them. No feature, button, shortcut, label or code path may assume one OS:
+
+- Every user-visible feature works on all three, or is hidden where the OS has
+  no equivalent (decided by core's platform layer, never by the GUI guessing).
+- Wording follows the platform: ⌘ vs Ctrl, Trash vs Recycle Bin, Finder vs
+  Explorer.
+- Size accounting is right on each file system: hard links, clones/reflinks
+  and snapshots are counted the way that OS stores them.
+- A change is not done until it builds, passes clippy and passes tests for all
+  three targets (see "After every change" below).
+
 ## Core / GUI split (enforced)
 
 The workspace has two crates, and the boundary between them is the main
@@ -85,10 +99,12 @@ Linux-only or unused here. `layering.rs` checks this too.
 ```
 crates/dscan-core/src/
   scan/mod.rs                  parallel walk (platform-neutral), progress, pause/cancel
+  scan/shared_blocks.rs        ledger that counts blocks shared by clones/reflinks once
   platform/mod.rs              Platform trait, DirEntry, DeviceId, WholeDiskBoundaries
   platform/unix.rs             helpers shared by macOS and Linux
   platform/macos/              getattrlistbulk reader, APFS container/firmlinks, NSURL space
   platform/linux/              readdir+fstatat reader, /proc/self/mountinfo, statvfs
+  platform/linux/extents.rs    FIEMAP layout: shared extents on btrfs and XFS
   platform/windows/            FileIdExtdDirectoryInfo reader, drive letters, verbatim paths
   platform/*/protected.rs      per-OS protected folders (matched by protection.rs)
   tree.rs                      arena tree (NodeId), sizes, remove(), sort orders
@@ -142,6 +158,12 @@ cargo test --workspace                                  # unit, layering and hea
     -e CARGO_HOME=/work/target/docker-cargo-wine -e CARGO_TARGET_DIR=/work/target/docker-wine \
     dscan-wine sh -c 'wineboot -i; cargo test -p dscan-core --target x86_64-pc-windows-gnu'
   ```
+
+  Without Docker, WSL 2 does the same job (run as your normal user). The
+  shared-block path (reflinks) is only exercised when the temp dir is on btrfs
+  or XFS: when touching it, mount a loop image of each, owned by your user, and
+  run `TMPDIR=/mnt/<fs> cargo test -p dscan-core` on both. The test prints
+  which case it checked.
 
   Wine is not Windows: it lacks `FileIdExtdDirectoryInfo`, so the reader
   takes its fallback and the two hard-link tests fail there. Every other test

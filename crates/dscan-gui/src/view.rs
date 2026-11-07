@@ -1,4 +1,4 @@
-use dscan_core::{Kind, Metric, NodeId, Segment, TRASH_NAME, format_size};
+use dscan_core::{Kind, NodeId, Segment, TRASH_NAME, format_size};
 use iced::border;
 use iced::widget::text::Wrapping;
 use iced::widget::{
@@ -29,31 +29,6 @@ fn rounded_box(bg: Color, radius: f32) -> container::Style {
 
 fn dot<'a>(color: Color, size: f32) -> Element<'a, Message> {
     container(Space::new()).width(size).height(size).style(move |_| rounded_box(color, size / 2.0)).into()
-}
-
-fn segmented_toggle<'a, T: Copy + PartialEq + 'a>(
-    options: &[(&'a str, T)],
-    selected: T,
-    on_select: impl Fn(T) -> Message,
-) -> Element<'a, Message> {
-    let segments = options.iter().map(|&(label, value)| {
-        let active = value == selected;
-        button(text(label).size(13))
-            .padding([4, 12])
-            .style(move |_: &Theme, s| {
-                let (bg, fg) = match (active, s) {
-                    (true, _) => (Some(theme::ACCENT.into()), Color::WHITE),
-                    (false, button::Status::Hovered | button::Status::Pressed) => {
-                        (Some(theme::PANEL_HI.into()), theme::TEXT)
-                    }
-                    (false, _) => (None, theme::TEXT_DIM),
-                };
-                button::Style { background: bg, text_color: fg, border: border::rounded(6), ..button::Style::default() }
-            })
-            .on_press(on_select(value))
-            .into()
-    });
-    framed_group(row(segments).spacing(2)).into()
 }
 
 const TOOLBAR_CONTROL_HEIGHT: f32 = 29.0;
@@ -139,12 +114,11 @@ fn outlined_text_button(label: &str, msg: Message) -> Element<'_, Message> {
 
 const TOOLTIP_MAX_WIDTH: f32 = 320.0;
 
-fn with_tooltip<'a>(
-    content: impl Into<Element<'a, Message>>,
-    lines: impl IntoIterator<Item = &'a str>,
-) -> Element<'a, Message> {
-    let body = column(lines.into_iter().map(|line| text(line).size(12).into())).spacing(4);
-    let tip = container(body).padding([4, 8]).max_width(TOOLTIP_MAX_WIDTH).style(|_| rounded_box(theme::PANEL_HI, 6.0));
+fn with_tooltip<'a>(content: impl Into<Element<'a, Message>>, label: &'a str) -> Element<'a, Message> {
+    let tip = container(text(label).size(12))
+        .padding([4, 8])
+        .max_width(TOOLTIP_MAX_WIDTH)
+        .style(|_| rounded_box(theme::PANEL_HI, 6.0));
     tooltip(content, tip, tooltip::Position::Bottom).gap(4).into()
 }
 
@@ -153,7 +127,7 @@ fn icon_button<'a>(
     tooltip_label: &'a str,
     msg: Message,
 ) -> Element<'a, Message> {
-    with_tooltip(subtle_button(icon, Some(msg)).padding(6), [tooltip_label])
+    with_tooltip(subtle_button(icon, Some(msg)).padding(6), tooltip_label)
 }
 
 fn start(app: &App) -> Element<'_, Message> {
@@ -263,7 +237,7 @@ fn open_results(app: &App) -> Element<'_, Message> {
             .spacing(2)
             .width(Fill),
             column![
-                text(format_size(t.size(root, Metric::Allocated))).size(14),
+                text(format_size(t.size(root))).size(14),
                 text(meta).size(12).color(theme::TEXT_DIM).wrapping(Wrapping::None),
             ]
             .spacing(2)
@@ -355,12 +329,6 @@ fn browse(b: &Browser) -> Element<'_, Message> {
 const SEARCH_PLACEHOLDER_WITH_SHORTCUT: &str =
     if cfg!(target_os = "macos") { "Search  ⌘F" } else { "Search  Ctrl+F" };
 
-const METRIC_EXPLANATION: [&str; 2] = [
-    "On disk: the space the files take up on the disk. This is what deleting them frees.",
-    "Logical: the files' own sizes, as apps show them. Compressed, sparse and cloud-only files take less on disk; \
-     tiny files take more.",
-];
-
 const BACK_TOOLTIP: &str = if cfg!(target_os = "macos") { "Back  ⌘[" } else { "Back  Ctrl+[" };
 const FORWARD_TOOLTIP: &str = if cfg!(target_os = "macos") { "Forward  ⌘]" } else { "Forward  Ctrl+]" };
 
@@ -380,7 +348,7 @@ fn nav_icon_button<'a>(
         .padding(0)
         .style(quiet_button_style(theme::TEXT))
         .on_press_maybe(msg);
-    with_tooltip(button, [tooltip_label])
+    with_tooltip(button, tooltip_label)
 }
 
 fn toolbar(b: &Browser) -> Element<'_, Message> {
@@ -393,11 +361,6 @@ fn toolbar(b: &Browser) -> Element<'_, Message> {
         .spacing(2),
     );
 
-    let metric = with_tooltip(
-        segmented_toggle(&[("On disk", Metric::Allocated), ("Logical", Metric::Logical)], b.metric, Message::SetMetric),
-        METRIC_EXPLANATION,
-    );
-
     let search = text_input(SEARCH_PLACEHOLDER_WITH_SHORTCUT, &b.search_text)
         .id(SEARCH_ID)
         .on_input(Message::SearchChanged)
@@ -406,7 +369,7 @@ fn toolbar(b: &Browser) -> Element<'_, Message> {
         .width(220)
         .style(framed_text_input);
 
-    row![nav, path_bar(b), outlined_text_button("Rescan", Message::Rescan), metric, search]
+    row![nav, path_bar(b), outlined_text_button("Rescan", Message::Rescan), search]
         .spacing(8)
         .align_y(Alignment::Center)
         .into()
@@ -616,17 +579,7 @@ fn list_panel(b: &Browser) -> Element<'_, Message> {
     let subject = b.listed_folder();
     let t = &b.tree;
 
-    let search_summary = text(match &b.search {
-        Some(s) => format!("{} matches for “{}”", thousands(s.matches as u64), s.query),
-        None => String::new(),
-    })
-    .size(12)
-    .color(theme::TEXT_DIM)
-    .wrapping(Wrapping::None);
-    let file_count_under_total =
-        text(format!("{} files", thousands(t.node(subject).items() as u64))).size(12).color(theme::TEXT_DIM);
-
-    let header = column![
+    let mut header = column![
         row![
             dot(theme::kind_color(t.node(subject).kind()), 14.0),
             text(truncate(&t.name(subject), 34)).size(22).wrapping(Wrapping::None),
@@ -635,9 +588,12 @@ fn list_panel(b: &Browser) -> Element<'_, Message> {
         ]
         .spacing(10)
         .align_y(Alignment::Center),
-        row![search_summary, Space::new().width(Fill), file_count_under_total],
     ]
     .spacing(4);
+    if let Some(s) = &b.search {
+        let search_summary = format!("{} matches for “{}”", thousands(s.matches as u64), s.query);
+        header = header.push(text(search_summary).size(12).color(theme::TEXT_DIM).wrapping(Wrapping::None));
+    }
 
     let mut rows = Column::new().spacing(1);
     for r in &b.list.rows {
@@ -737,16 +693,18 @@ fn status_bar(b: &Browser) -> Element<'_, Message> {
     };
     let mut bar = row![info].spacing(12).align_y(Alignment::Center).height(Shrink);
     if t.stats.errors > 0 {
-        bar = bar.push(Space::new().width(Fill)).push(
-            row![
-                text(format!("{} folders couldn't be read", thousands(t.stats.errors)))
-                    .size(12)
-                    .color(theme::kind_color(Kind::Archive)),
-                subtle_button(text("Full Disk Access…").size(12), Some(Message::OpenFdaSettings)),
-            ]
-            .spacing(6)
-            .align_y(Alignment::Center),
-        );
+        let mut unreadable = row![
+            text(format!("{} folders couldn't be read", thousands(t.stats.errors)))
+                .size(12)
+                .color(theme::kind_color(Kind::Archive)),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center);
+        if dscan_core::FULL_DISK_ACCESS_SETTINGS.is_some() {
+            unreadable =
+                unreadable.push(subtle_button(text("Full Disk Access…").size(12), Some(Message::OpenFdaSettings)));
+        }
+        bar = bar.push(Space::new().width(Fill)).push(unreadable);
     }
     bar.into()
 }

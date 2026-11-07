@@ -1,5 +1,6 @@
 #[cfg(target_os = "linux")]
 mod dir_reader;
+mod extents;
 mod mountinfo;
 mod protected;
 #[cfg(target_os = "linux")]
@@ -28,6 +29,7 @@ mod system {
     impl Platform for Linux {
         const PATH_SEPARATOR: u8 = b'/';
         const TRASH_NAME: &'static str = "Trash";
+        const FULL_DISK_ACCESS_SETTINGS: Option<&'static str> = None;
         const PROTECTED: ProtectedLocations = protected::PROTECTED;
         const SYSTEM_FOLDERS_AT_SYSTEM_ROOT: &'static [&'static str] =
             &["bin", "boot", "etc", "lib", "lib32", "lib64", "libx32", "sbin", "usr"];

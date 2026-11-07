@@ -30,6 +30,8 @@ mod system {
     impl Platform for MacOs {
         const PATH_SEPARATOR: u8 = b'/';
         const TRASH_NAME: &'static str = "Trash";
+        const FULL_DISK_ACCESS_SETTINGS: Option<&'static str> =
+            Some("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles");
         const PROTECTED: ProtectedLocations = protected::PROTECTED;
         const SYSTEM_FOLDERS_AT_SYSTEM_ROOT: &'static [&'static str] =
             &["System", "usr", "bin", "sbin", "private", "cores", "etc", "var"];

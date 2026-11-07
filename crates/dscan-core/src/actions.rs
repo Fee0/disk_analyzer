@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use crate::exclusions::Exclusions;
 use crate::platform::{Current, Platform};
 use crate::protection::is_protected;
-use crate::tree::{Metric, NodeId, Tree};
+use crate::tree::{NodeId, Tree};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refusal {
@@ -67,7 +67,7 @@ impl Collection {
     }
 
     pub fn size(&self, tree: &Tree) -> u64 {
-        self.items.iter().map(|&c| tree.size(c, Metric::Allocated)).sum()
+        self.items.iter().map(|&c| tree.size(c)).sum()
     }
 }
 
@@ -96,7 +96,7 @@ pub fn remove_from_disk(tree: &mut Tree, items: &[NodeId], removal: Removal) -> 
             report.failed.push((path, "protected system location".into()));
             continue;
         }
-        let size = tree.size(id, Metric::Allocated);
+        let size = tree.size(id);
         let outcome = match removal {
             Removal::MoveToTrash => trash.delete(&path).map_err(|e| e.to_string()),
             Removal::DeletePermanently => delete_permanently(&path).map_err(|e| e.to_string()),
@@ -126,8 +126,8 @@ mod tests {
     #[test]
     fn collection_never_holds_an_item_inside_another_collected_item() {
         let t = tree(vec![D("a", vec![F("x", 5), D("b", vec![F("y", 3)])]), F("z", 1)]);
-        let a = t.children(t.root(), Metric::Allocated).next().unwrap();
-        let x = t.children(a, Metric::Allocated).next().unwrap();
+        let a = t.children(t.root()).next().unwrap();
+        let x = t.children(a).next().unwrap();
         let mut c = Collection::default();
         assert_eq!(c.add(&t, t.root()), Err(Refusal::NotActionable));
         assert_eq!(c.add(&t, x), Ok(()));
@@ -139,7 +139,7 @@ mod tests {
     }
 
     fn child(t: &Tree, name: &str) -> NodeId {
-        t.children(t.root(), Metric::Allocated).find(|&c| t.name(c) == name).unwrap()
+        t.children(t.root()).find(|&c| t.name(c) == name).unwrap()
     }
 
     fn scan_folder(root: &Path) -> Tree {
@@ -156,14 +156,14 @@ mod tests {
         std::fs::write(root.join("keep.txt"), b"keep").unwrap();
         let mut t = scan_folder(root);
         let items = [child(&t, "old"), child(&t, "big.bin")];
-        let total_before = t.size(t.root(), Metric::Allocated);
+        let total_before = t.size(t.root());
 
         let report = remove_from_disk(&mut t, &items, Removal::DeletePermanently);
 
         assert_eq!(report.removed, 2, "{:?}", report.failed);
         assert!(!root.join("old").exists() && !root.join("big.bin").exists());
         assert!(root.join("keep.txt").exists());
-        assert_eq!(t.size(t.root(), Metric::Allocated), total_before - report.bytes);
+        assert_eq!(t.size(t.root()), total_before - report.bytes);
         assert!(items.iter().all(|&id| !t.is_live(id)));
     }
 
@@ -192,7 +192,7 @@ mod tests {
             "/",
             vec![D("usr", vec![D("lib", vec![F("libc", 9)])]), D("opt", vec![D("tool", vec![F("bin", 5)])])],
         );
-        let child = |p: NodeId, name: &str| t.children(p, Metric::Allocated).find(|&c| t.name(c) == name).unwrap();
+        let child = |p: NodeId, name: &str| t.children(p).find(|&c| t.name(c) == name).unwrap();
         let usr = child(t.root(), "usr");
         let opt = child(t.root(), "opt");
         let mut c = Collection::default();
@@ -205,7 +205,7 @@ mod tests {
     #[test]
     fn prune_drops_removed_items() {
         let mut t = tree(vec![D("a", vec![F("x", 5)]), F("z", 1)]);
-        let [a, z] = [0, 1].map(|i| t.children(t.root(), Metric::Allocated).nth(i).unwrap());
+        let [a, z] = [0, 1].map(|i| t.children(t.root()).nth(i).unwrap());
         let mut c = Collection::default();
         c.add(&t, z).unwrap();
         c.add(&t, a).unwrap();

@@ -5,7 +5,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
-use super::{DeviceId, DirEntry};
+use super::{DeviceId, DirEntry, SharedBlocks};
 
 pub(super) struct Fd(pub libc::c_int);
 
@@ -21,9 +21,9 @@ pub(super) fn entry_with_unreadable_attributes(name: &[u8], device: DeviceId) ->
         entry_type: None,
         device,
         allocated: 0,
-        logical: 0,
         hard_link_id: None,
         shared_data_stream_id: None,
+        shared_blocks: SharedBlocks::NONE_KNOWN,
     }
 }
 

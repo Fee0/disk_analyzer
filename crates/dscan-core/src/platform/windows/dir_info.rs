@@ -1,7 +1,6 @@
 use crate::platform::EntryType;
 
 pub(super) const NEXT_ENTRY_OFFSET: usize = 0;
-pub(super) const END_OF_FILE: usize = 40;
 pub(super) const ALLOCATION_SIZE: usize = 48;
 pub(super) const FILE_ATTRIBUTES: usize = 56;
 pub(super) const FILE_NAME_LENGTH: usize = 60;
@@ -31,7 +30,6 @@ pub(super) struct Record<'a> {
     name_utf16le: &'a [u8],
     pub attributes: u32,
     pub reparse_tag: u32,
-    pub end_of_file: u64,
     pub allocation_size: u64,
     pub file_id: Option<u128>,
 }
@@ -97,7 +95,6 @@ pub(super) fn records(buffer: &[u8], layout: Layout) -> impl Iterator<Item = Rec
             name_utf16le,
             attributes: u32_at(record, FILE_ATTRIBUTES),
             reparse_tag: u32_at(record, layout.reparse_tag),
-            end_of_file: u64_at(record, END_OF_FILE),
             allocation_size: u64_at(record, ALLOCATION_SIZE),
             file_id: layout.unique_file_id.map(|at| u128_at(record, at)),
         })
@@ -118,13 +115,12 @@ mod tests {
         name: &'a str,
         attributes: u32,
         reparse_tag: u32,
-        end_of_file: u64,
         allocation_size: u64,
         file_id: u128,
     }
 
     fn fake(name: &str, attributes: u32, reparse_tag: u32) -> Fake<'_> {
-        Fake { name, attributes, reparse_tag, end_of_file: 0, allocation_size: 0, file_id: 0 }
+        Fake { name, attributes, reparse_tag, allocation_size: 0, file_id: 0 }
     }
 
     fn buffer_with(layout: Layout, records: &[Fake<'_>]) -> Vec<u8> {
@@ -135,7 +131,6 @@ mod tests {
             let is_last = i + 1 == records.len();
             let next = if is_last { LAST_RECORD } else { record.len() as u32 };
             record[NEXT_ENTRY_OFFSET..][..4].copy_from_slice(&next.to_le_bytes());
-            record[END_OF_FILE..][..8].copy_from_slice(&fake.end_of_file.to_le_bytes());
             record[ALLOCATION_SIZE..][..8].copy_from_slice(&fake.allocation_size.to_le_bytes());
             record[FILE_ATTRIBUTES..][..4].copy_from_slice(&fake.attributes.to_le_bytes());
             record[FILE_NAME_LENGTH..][..4].copy_from_slice(&(name.len() as u32).to_le_bytes());
@@ -160,7 +155,6 @@ mod tests {
                     name: "Ünïcode.bin",
                     attributes: FILE_ATTRIBUTE_NORMAL,
                     reparse_tag: 0,
-                    end_of_file: 10_000,
                     allocation_size: 12_288,
                     file_id: refs_style_id,
                 },
@@ -171,21 +165,14 @@ mod tests {
         assert!(parsed[0].is_self_or_parent());
         let file = parsed[1];
         assert_eq!(String::from_utf16(&file.name_units().collect::<Vec<_>>()).unwrap(), "Ünïcode.bin");
-        assert_eq!((file.end_of_file, file.allocation_size), (10_000, 12_288));
+        assert_eq!(file.allocation_size, 12_288);
         assert_eq!(file.file_id, Some(refs_style_id));
         assert_eq!(file.entry_type(), EntryType::File);
         assert!(!file.is_self_or_parent());
     }
 
     fn record(attributes: u32, file_id: u128) -> Record<'static> {
-        Record {
-            name_utf16le: &[],
-            attributes,
-            reparse_tag: 0,
-            end_of_file: 0,
-            allocation_size: 0,
-            file_id: Some(file_id),
-        }
+        Record { name_utf16le: &[], attributes, reparse_tag: 0, allocation_size: 0, file_id: Some(file_id) }
     }
 
     #[test]

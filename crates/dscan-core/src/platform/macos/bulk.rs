@@ -2,7 +2,7 @@ use std::ffi::CString;
 use std::io;
 
 use crate::platform::unix::{Fd, entry_with_unreadable_attributes, open_dir_without_following_symlink};
-use crate::platform::{DeviceId, DirEntry, EntryType};
+use crate::platform::{DeviceId, DirEntry, EntryType, SharedBlocks};
 
 const ATTR_CMN_ERROR: u32 = 0x2000_0000;
 const BUF_SIZE: usize = 256 * 1024;
@@ -25,7 +25,6 @@ struct RawEntry<'a> {
     ino: u64,
     links: u32,
     alloc: u64,
-    logical: u64,
     data_stream: Option<u64>,
     may_share_blocks: bool,
     sizes_reported: bool,
@@ -51,9 +50,9 @@ impl<'a> RawEntry<'a> {
             }),
             device,
             allocated: self.alloc,
-            logical: self.logical,
             hard_link_id: (is_regular_file && self.links > 1).then_some(self.ino),
             shared_data_stream_id: self.data_stream.filter(|_| is_regular_file && self.may_share_blocks),
+            shared_blocks: SharedBlocks::NONE_KNOWN,
         }
     }
 
@@ -66,7 +65,6 @@ impl<'a> RawEntry<'a> {
         let mut status: libc::stat = unsafe { std::mem::zeroed() };
         let found = unsafe { libc::fstatat(directory.0, name.as_ptr(), &mut status, libc::AT_SYMLINK_NOFOLLOW) } == 0;
         if found {
-            self.logical = status.st_size as u64;
             self.alloc = status.st_blocks as u64 * STAT_BLOCK_SIZE;
             self.links = status.st_nlink as u32;
             self.ino = status.st_ino;
@@ -112,7 +110,7 @@ fn attribute_list(request: AttributeRequest) -> (libc::attrlist, u64) {
         | libc::ATTR_CMN_DEVID
         | libc::ATTR_CMN_OBJTYPE
         | libc::ATTR_CMN_FILEID;
-    attrs.fileattr = libc::ATTR_FILE_LINKCOUNT | libc::ATTR_FILE_TOTALSIZE | libc::ATTR_FILE_ALLOCSIZE;
+    attrs.fileattr = libc::ATTR_FILE_LINKCOUNT | libc::ATTR_FILE_ALLOCSIZE;
     let options = match request {
         AttributeRequest::WithCloneInfo => request_extended_common_attributes(&mut attrs, CLONE_INFO_ATTRIBUTES),
         AttributeRequest::Basic => 0,
@@ -233,7 +231,6 @@ fn parse_entry(record: &[u8]) -> RawEntry<'_> {
         ino: 0,
         links: 1,
         alloc: 0,
-        logical: 0,
         data_stream: None,
         may_share_blocks: false,
         sizes_reported: false,
@@ -255,9 +252,6 @@ fn parse_entry(record: &[u8]) -> RawEntry<'_> {
     }
     if returned.file & libc::ATTR_FILE_LINKCOUNT != 0 {
         e.links = cursor.u32();
-    }
-    if returned.file & libc::ATTR_FILE_TOTALSIZE != 0 {
-        e.logical = cursor.u64();
     }
     if returned.file & libc::ATTR_FILE_ALLOCSIZE != 0 {
         e.alloc = cursor.u64();
@@ -283,16 +277,13 @@ mod tests {
         std::fs::write(dir.path().join("a.txt"), vec![1u8; 10_000]).unwrap();
         std::fs::create_dir(dir.path().join("sub")).unwrap();
         let mut seen = Vec::new();
-        read_dir(dir.path().as_os_str().as_bytes(), |e| {
-            seen.push((e.name.to_vec(), e.entry_type, e.logical, e.allocated))
-        })
-        .unwrap();
+        read_dir(dir.path().as_os_str().as_bytes(), |e| seen.push((e.name.to_vec(), e.entry_type, e.allocated)))
+            .unwrap();
         seen.sort_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(seen.len(), 2);
         assert_eq!(seen[0].0, b"a.txt");
         assert_eq!(seen[0].1, Some(EntryType::File));
-        assert_eq!(seen[0].2, 10_000);
-        assert!(seen[0].3 >= 10_000);
+        assert!(seen[0].2 >= 10_000);
         assert_eq!(seen[1].0, b"sub");
         assert_eq!(seen[1].1, Some(EntryType::Directory));
     }
@@ -300,7 +291,6 @@ mod tests {
     #[derive(Clone, Copy)]
     struct Entry {
         entry_type: Option<EntryType>,
-        logical: u64,
         allocated: u64,
         shared_data_stream_id: Option<u64>,
     }
@@ -310,7 +300,6 @@ mod tests {
         read_dir(dir.as_os_str().as_bytes(), |e| {
             let entry = Entry {
                 entry_type: e.entry_type,
-                logical: e.logical,
                 allocated: e.allocated,
                 shared_data_stream_id: e.shared_data_stream_id,
             };
@@ -346,7 +335,6 @@ mod tests {
         let dir = original_clone_and_unrelated_file();
         for (name, e) in entries(dir.path()) {
             assert_eq!(e.entry_type, Some(EntryType::File), "{name}");
-            assert_eq!(e.logical, 200_000, "{name}");
             assert!(e.allocated >= 200_000, "{name}");
         }
     }

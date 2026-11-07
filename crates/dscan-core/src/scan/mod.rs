@@ -7,10 +7,13 @@ use parking_lot::{Condvar, Mutex};
 use rayon::prelude::*;
 use rustc_hash::FxHashSet;
 
+mod shared_blocks;
+
 use crate::hidden;
 use crate::kind::Kind;
 use crate::platform::{Current, DeviceId, DirEntry, EntryType, Platform, ScanBoundaries, ScanExtent};
 use crate::tree::{self, DirNode, ScanStats, Synthetic, Tree, flags};
+use shared_blocks::SharedBlockLedger;
 
 #[derive(Clone, Debug)]
 pub struct ScanOptions {
@@ -155,6 +158,7 @@ struct Ctx<'a> {
     system_top_level_dirs: FxHashSet<&'static [u8]>,
     hard_linked_inodes: ShardedSeenSet,
     shared_data_streams: ShardedSeenSet,
+    shared_blocks: SharedBlockLedger,
     errors: AtomicU64,
     error_samples: Mutex<Vec<PathBuf>>,
     progress: &'a Progress,
@@ -171,6 +175,21 @@ impl Ctx<'_> {
         match e.shared_data_stream_id {
             Some(stream) if !self.shared_data_streams.first_sight(e.device, stream) => Some(Duplicate::PureClone),
             _ => None,
+        }
+    }
+
+    fn counted_allocation_and_flags(&self, e: &DirEntry<'_>) -> (u64, u8) {
+        match self.already_counted(e) {
+            Some(Duplicate::HardLink) => return (0, flags::HARDLINK_DUP),
+            Some(Duplicate::PureClone) => return (0, flags::CLONE_DUP),
+            None => {}
+        }
+        let counted_before = self.shared_blocks.claim_returning_bytes_counted_before(e.shared_blocks);
+        let not_counted_yet = e.allocated.saturating_sub(counted_before);
+        match (counted_before, not_counted_yet) {
+            (0, _) => (e.allocated, 0),
+            (_, 0) => (0, flags::CLONE_DUP),
+            _ => (not_counted_yet, flags::SHARES_COUNTED_BLOCKS),
         }
     }
 
@@ -241,6 +260,7 @@ pub fn scan(opts: &ScanOptions, progress: &Progress, cancel: &CancelToken) -> Re
         system_top_level_dirs,
         hard_linked_inodes: ShardedSeenSet::new(),
         shared_data_streams: ShardedSeenSet::new(),
+        shared_blocks: SharedBlockLedger::new(),
         errors: AtomicU64::new(0),
         error_samples: Mutex::new(Vec::new()),
         progress,
@@ -313,23 +333,11 @@ fn scan_dir(ctx: &Ctx<'_>, path: Vec<u8>, name: Box<[u8]>, dev: DeviceId, depth:
     let res = Current::read_dir(path, |e| match e.entry_type {
         None => {
             ctx.record_error(&join(path, e.name));
-            node.push_file(e.name, Kind::Other, flags::UNREADABLE, 0, 0);
+            node.push_file(e.name, Kind::Other, flags::UNREADABLE, 0);
         }
         Some(EntryType::Directory) => subdirs.push((e.name.into(), e.device)),
         Some(EntryType::File | EntryType::Symlink) => {
-            let (mut alloc, mut logical, mut fl) = (e.allocated, e.logical, 0u8);
-            match ctx.already_counted(&e) {
-                Some(Duplicate::HardLink) => {
-                    alloc = 0;
-                    logical = 0;
-                    fl |= flags::HARDLINK_DUP;
-                }
-                Some(Duplicate::PureClone) => {
-                    alloc = 0;
-                    fl |= flags::CLONE_DUP;
-                }
-                None => {}
-            }
+            let (alloc, mut fl) = ctx.counted_allocation_and_flags(&e);
             let kind = if e.entry_type == Some(EntryType::Symlink) {
                 fl |= flags::SYMLINK;
                 Kind::Other
@@ -337,7 +345,7 @@ fn scan_dir(ctx: &Ctx<'_>, path: Vec<u8>, name: Box<[u8]>, dev: DeviceId, depth:
                 Kind::of_file(e.name)
             };
             file_bytes += alloc;
-            node.push_file(e.name, kind, fl, alloc, logical);
+            node.push_file(e.name, kind, fl, alloc);
         }
     });
     match res {
@@ -385,15 +393,11 @@ fn subdirs_to_descend(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tree::Metric;
 
     fn find(t: &Tree, path: &str) -> crate::NodeId {
         let mut cur = t.root();
         for part in path.split('/') {
-            cur = t
-                .children(cur, Metric::Allocated)
-                .find(|&c| t.name(c) == part)
-                .unwrap_or_else(|| panic!("{part} missing"));
+            cur = t.children(cur).find(|&c| t.name(c) == part).unwrap_or_else(|| panic!("{part} missing"));
         }
         cur
     }
@@ -415,15 +419,15 @@ mod tests {
         let t = scan(&ScanOptions::folder(r), &progress, &CancelToken::default()).unwrap();
 
         let names = [find(&t, "a/one.bin"), find(&t, "link.bin")];
-        let sizes = names.map(|id| t.size(id, Metric::Allocated));
+        let sizes = names.map(|id| t.size(id));
         assert!(sizes.contains(&0) && sizes.iter().any(|&s| s >= 100_000), "exactly one hard link carries the size");
         let marked_as_copies = names.iter().filter(|&&id| t.node(id).flags() & flags::HARDLINK_DUP != 0).count();
         assert_eq!(marked_as_copies, 1, "the name met second is marked as the copy");
-        assert_eq!(scan_folder(r).size(t.root(), Metric::Allocated), t.size(t.root(), Metric::Allocated));
+        assert_eq!(scan_folder(r).size(t.root()), t.size(t.root()));
         let a = find(&t, "a");
-        let sum: u64 = t.children(a, Metric::Allocated).map(|c| t.size(c, Metric::Allocated)).sum();
-        assert_eq!(sum, t.size(a, Metric::Allocated), "a folder's size is the sum of its children");
-        assert_eq!(t.size(find(&t, "a/b/two.bin"), Metric::Logical), 50_000);
+        let sum: u64 = t.children(a).map(|c| t.size(c)).sum();
+        assert_eq!(sum, t.size(a), "a folder's size is the sum of its children");
+        assert!(t.size(find(&t, "a/b/two.bin")) >= 50_000, "a file takes at least its length on disk");
         let root_as_the_platform_spells_it = Current::canonical_root(r).unwrap();
         assert_eq!(t.path(find(&t, "a/b/two.bin")), root_as_the_platform_spells_it.join("a").join("b").join("two.bin"));
         assert_eq!(t.stats.errors, 0);
@@ -448,8 +452,7 @@ mod tests {
 
         assert!(!t.node(find(&t, "sym")).is_dir());
         let sparse = find(&t, "sparse.img");
-        assert_eq!(t.size(sparse, Metric::Logical), 1 << 30);
-        assert!(t.size(sparse, Metric::Allocated) < 1 << 20, "a sparse file allocates little");
+        assert!(t.size(sparse) < 1 << 20, "a sparse file allocates little");
         assert_eq!(t.stats.errors, 1, "run the tests as a normal user: root can read a mode 000 folder");
         assert!(t.node(find(&t, "locked")).flags() & flags::UNREADABLE != 0);
     }
@@ -476,16 +479,65 @@ mod tests {
 
         let t = scan_folder(r);
         let (orig, pure, edited) = (find(&t, "orig.bin"), find(&t, "copies/pure.bin"), find(&t, "copies/edited.bin"));
-        let alloc = |id| t.size(id, Metric::Allocated);
+        let alloc = |id| t.size(id);
         assert!(alloc(orig) >= 1_000_000 || alloc(pure) >= 1_000_000);
         assert_eq!(alloc(orig).min(alloc(pure)), 0, "pure clone counted once");
         assert!(t.node(orig).is_clone_copy() ^ t.node(pure).is_clone_copy());
         assert!(alloc(edited) >= 1_000_000, "edited clones count in full");
-        for id in [orig, pure, edited] {
-            assert_eq!(t.size(id, Metric::Logical), 1_000_000, "logical size is the apparent size of every copy");
-        }
-        let total = t.size(t.root(), Metric::Allocated);
+        let total = t.size(t.root());
         assert!((2_000_000..2_100_000).contains(&total), "two streams on disk, not three: {total}");
+    }
+
+    #[cfg(target_os = "linux")]
+    fn reflink(from: &Path, to: &Path) -> bool {
+        use std::os::fd::AsRawFd;
+        const FICLONE: u32 = 0x4004_9409;
+        let source = std::fs::File::open(from).unwrap();
+        let clone = std::fs::File::create(to).unwrap();
+        let cloned = unsafe { libc::ioctl(clone.as_raw_fd(), FICLONE as _, source.as_raw_fd()) } == 0;
+        if !cloned {
+            std::fs::remove_file(to).unwrap();
+            std::fs::copy(from, to).unwrap();
+        }
+        cloned
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn reflinked_copies_count_shared_blocks_once_where_the_file_system_shares_blocks_and_in_full_elsewhere() {
+        use std::io::{Seek, Write};
+        const LENGTH: u64 = 1 << 20;
+        const EDITED: u64 = 16 << 10;
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        std::fs::create_dir(r.join("copies")).unwrap();
+        let data: Vec<u8> = (0..LENGTH).map(|i| (i * 31 % 251) as u8).collect();
+        std::fs::write(r.join("orig.bin"), &data).unwrap();
+        let shares_blocks = reflink(&r.join("orig.bin"), &r.join("copies/pure.bin"))
+            & reflink(&r.join("orig.bin"), &r.join("copies/edited.bin"));
+        let mut edited = std::fs::OpenOptions::new().write(true).open(r.join("copies/edited.bin")).unwrap();
+        edited.seek(std::io::SeekFrom::Start(0)).unwrap();
+        edited.write_all(&vec![9u8; EDITED as usize]).unwrap();
+        edited.sync_all().unwrap();
+        drop(edited);
+
+        let t = scan_folder(r);
+        let files = [find(&t, "orig.bin"), find(&t, "copies/pure.bin"), find(&t, "copies/edited.bin")];
+        let total = t.size(t.root());
+        if shares_blocks {
+            println!("reflinks: the temp dir shares blocks");
+            let one_copy_and_the_edit = LENGTH + EDITED..LENGTH + EDITED + LENGTH / 4;
+            assert!(one_copy_and_the_edit.contains(&total), "one copy of the data plus the edited blocks: {total}");
+            let marked =
+                files.iter().filter(|&&id| t.node(id).is_clone_copy() || t.node(id).shares_blocks_counted_elsewhere());
+            assert!(marked.count() >= 2, "the copies counted second are marked");
+        } else {
+            println!("reflinks: the temp dir can't share blocks, so every copy is its own");
+            assert!(total >= 3 * LENGTH, "three full copies: {total}");
+            assert!(
+                files.iter().all(|&id| !t.node(id).is_clone_copy() && !t.node(id).shares_blocks_counted_elsewhere())
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -498,7 +550,7 @@ mod tests {
         std::os::unix::fs::symlink(r.join("real"), r.join("link")).unwrap();
         let t = scan_folder(&r.join("link"));
         assert_eq!(t.stats.errors, 0);
-        assert_eq!(t.size(find(&t, "f.bin"), Metric::Logical), 10_000);
+        assert!(t.size(find(&t, "f.bin")) >= 10_000, "the target of the symlinked root is scanned");
     }
 
     #[test]

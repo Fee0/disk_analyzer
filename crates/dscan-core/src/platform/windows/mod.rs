@@ -33,6 +33,7 @@ mod system {
     impl Platform for Windows {
         const PATH_SEPARATOR: u8 = b'\\';
         const TRASH_NAME: &'static str = "Recycle Bin";
+        const FULL_DISK_ACCESS_SETTINGS: Option<&'static str> = None;
         const PROTECTED: ProtectedLocations = protected::PROTECTED;
         const SYSTEM_FOLDERS_AT_SYSTEM_ROOT: &'static [&'static str] =
             &["Windows", "Recovery", "System Volume Information", "$Recycle.Bin", "Boot"];

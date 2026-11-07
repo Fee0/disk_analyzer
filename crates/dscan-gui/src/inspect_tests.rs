@@ -11,7 +11,7 @@ use crate::theme;
 const VIEW: (f32, f32) = (1280.0, 820.0);
 const OUT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/iced-inspect");
 const A_CHART_SEGMENT: (f32, f32) = (440.0, 320.0);
-const CLOSE_BUTTON_OF_NEWEST_RESULT: (f32, f32) = (900.0, 518.0);
+const CLOSE_BUTTON_COLUMN_X: f32 = 900.0;
 
 fn fixture(root: &Path) {
     let files: &[(&str, usize)] = &[
@@ -99,7 +99,7 @@ fn chart_reveals_zooms_and_lets_collected_items_shrink_away() -> Result<(), Erro
     let _ = app.update(Message::CollectSelected);
     let b = browser(&app);
     assert_eq!(b.collector.items(), &[pictures]);
-    assert_eq!(b.layout.total, size_before - b.tree.size(pictures, b.metric), "the chart leaves out what is collected");
+    assert_eq!(b.layout.total, size_before - b.tree.size(pictures), "the chart leaves out what is collected");
     assert!(b.layout.find(dscan_core::Segment::Node(pictures)).is_none(), "the collected folder has no arc");
     assert!(b.list.rows.iter().all(|r| r.id != pictures), "nor a row in the list");
     shoot_chart_animation(&mut app, "anim-collect", TransitionKind::Morph)?;
@@ -138,6 +138,12 @@ fn inspect_browse() -> Result<(), Error> {
         let mut ui = sim(&app);
         println!("{}", ui_inspect::report(&mut ui, VIEW));
         println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, "browse")?.display());
+        let file_count =
+            |text: &str| text.strip_suffix(" files").is_some_and(|n| n.chars().all(|c| c.is_ascii_digit() || c == ','));
+        assert!(
+            !ui_inspect::nodes(&mut ui).iter().any(|n| n.text.as_deref().is_some_and(file_count)),
+            "the folder header shows its size without a file count"
+        );
     }
     let msgs: Vec<Message> = {
         let mut ui = sim(&app);
@@ -162,6 +168,25 @@ fn inspect_browse() -> Result<(), Error> {
     Ok(())
 }
 
+#[test]
+fn toolbar_shows_only_on_disk_sizes_with_a_rescan_text_button() -> Result<(), Error> {
+    let dir = tempfile::tempdir().unwrap();
+    let app = browser_app(dir.path());
+
+    let mut ui = sim(&app);
+    let texts: Vec<String> = ui_inspect::nodes(&mut ui).into_iter().filter_map(|n| n.text).collect();
+    for size_choice in ["On disk", "Logical"] {
+        assert!(
+            !texts.iter().any(|t| t == size_choice),
+            "sizes are always on disk, so there is no {size_choice:?} choice"
+        );
+    }
+    ui.click("Rescan")?;
+    let msgs: Vec<Message> = ui.into_messages().collect();
+    assert!(matches!(msgs[..], [Message::Rescan]), "the Rescan button rescans: {msgs:?}");
+    Ok(())
+}
+
 fn bounds_of_text(ui: &mut Simulator<'_, Message>, label: &str) -> iced::Rectangle {
     ui_inspect::nodes(ui)
         .into_iter()
@@ -170,32 +195,8 @@ fn bounds_of_text(ui: &mut Simulator<'_, Message>, label: &str) -> iced::Rectang
         .bounds
 }
 
-#[test]
-fn toolbar_rescan_is_a_text_button_left_of_the_metric_toggle() -> Result<(), Error> {
-    let dir = tempfile::tempdir().unwrap();
-    let app = browser_app(dir.path());
-
-    let msgs: Vec<Message> = {
-        let mut ui = sim(&app);
-        let rescan = bounds_of_text(&mut ui, "Rescan");
-        let on_disk = bounds_of_text(&mut ui, "On disk");
-        assert!(rescan.x + rescan.width < on_disk.x, "Rescan sits left of the toggle: {rescan:?} vs {on_disk:?}");
-        ui.click("Rescan")?;
-        ui.into_messages().collect()
-    };
-    assert!(matches!(msgs[..], [Message::Rescan]), "the Rescan button rescans: {msgs:?}");
-
-    let mut ui = sim(&app);
-    let logical = bounds_of_text(&mut ui, "Logical");
-    ui_inspect::hover(&mut ui, logical.center());
-    println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, "metric-tooltip")?.display());
-    Ok(())
-}
-
 fn descend(tree: &dscan_core::Tree, names: &[&str]) -> dscan_core::NodeId {
-    names.iter().fold(tree.root(), |at, name| {
-        tree.children(at, dscan_core::Metric::Allocated).find(|&c| tree.name(c) == *name).expect(name)
-    })
+    names.iter().fold(tree.root(), |at, name| tree.children(at).find(|&c| tree.name(c) == *name).expect(name))
 }
 
 #[test]
@@ -295,7 +296,7 @@ fn drag_to_collector() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = browser_app(dir.path());
     let b = browser(&app);
-    let movies = b.tree.children(b.tree.root(), b.metric).next().unwrap();
+    let movies = b.tree.children(b.tree.root()).next().unwrap();
 
     let _ = app.update(Message::Press(Segment::Node(movies)));
     let _ = app.update(Message::CollectorEnter);
@@ -313,7 +314,7 @@ fn drag_to_collector() {
     assert!(browser(&app).drag.is_none(), "releasing ends the drag");
 
     let b = browser(&app);
-    let child = b.tree.children(movies, b.metric).next().unwrap();
+    let child = b.tree.children(movies).next().unwrap();
     let _ = app.update(Message::Press(Segment::Node(child)));
     let _ = app.update(Message::CollectSelected);
     assert_eq!(browser(&app).collector.items(), &[movies], "collecting a child of a collected folder is a no-op");
@@ -325,28 +326,6 @@ fn drag_to_collector() {
     let _ = app.update(Message::CursorMoved(Point::new(50.0, 0.0)));
     let _ = app.update(Message::MouseReleased);
     assert!(browser(&app).collector.is_empty(), "a drag released outside the collector collects nothing");
-}
-
-#[test]
-fn metric_toggle_relayouts() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut app = browser_app(dir.path());
-    let msgs: Vec<Message> = {
-        let mut ui = sim(&app);
-        ui.click("Logical").unwrap();
-        ui.into_messages().collect()
-    };
-    assert!(
-        matches!(msgs[..], [Message::SetMetric(dscan_core::Metric::Logical)]),
-        "the toggle emits the metric it shows: {msgs:?}"
-    );
-    for m in msgs {
-        let _ = app.update(m);
-    }
-    let b = browser(&app);
-    assert_eq!(b.layout.total, b.tree.size(b.tree.root(), dscan_core::Metric::Logical));
-    let mut ui = sim(&app);
-    println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, "logical").unwrap().display());
 }
 
 #[test]
@@ -425,7 +404,8 @@ fn inspect_open_results() -> Result<(), Error> {
 
     let msgs: Vec<Message> = {
         let mut ui = sim(&app);
-        ui_inspect::click_at(&mut ui, CLOSE_BUTTON_OF_NEWEST_RESULT);
+        let row_of_newest = bounds_of_text(&mut ui, &name).center_y();
+        ui_inspect::click_at(&mut ui, (CLOSE_BUTTON_COLUMN_X, row_of_newest));
         ui.into_messages().collect()
     };
     assert!(
@@ -457,7 +437,7 @@ fn collector_fixed_height_fits_every_state_without_clipping() -> Result<(), Erro
     let dir = tempfile::tempdir().unwrap();
     let mut app = browser_app(dir.path());
     let root = browser(&app).tree.root();
-    let movies = browser(&app).tree.children(root, browser(&app).metric).next().unwrap();
+    let movies = browser(&app).tree.children(root).next().unwrap();
     let _ = app.update(Message::Press(dscan_core::Segment::Node(movies)));
     let _ = app.update(Message::MouseReleased);
 
@@ -471,7 +451,7 @@ fn collector_fixed_height_fits_every_state_without_clipping() -> Result<(), Erro
     shot(&app, "collector-empty")?;
     let _ = app.update(Message::CollectSelected);
     shot(&app, "collector-one")?;
-    let kids: Vec<_> = browser(&app).tree.children(root, browser(&app).metric).skip(1).collect();
+    let kids: Vec<_> = browser(&app).tree.children(root).skip(1).collect();
     for id in kids {
         if let Screen::Browse(b) = &mut app.screen {
             b.collector.add(&b.tree, id).unwrap();
