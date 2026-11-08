@@ -87,7 +87,3 @@ Requires [Rust](https://rustup.rs).
 ```sh
 cargo run --release
 ```
-
-## License
-
-[MIT](LICENSE)
