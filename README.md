@@ -11,12 +11,13 @@
 </p>
 
 <p align="center">
-  <img src="assets/screenshot.png" alt="Disk Analyzer showing a sunburst chart of drive C: next to a list of the largest folders">
+  <img src="assets/screenshot-sunburst.png" width="49%" alt="Disk Analyzer showing a sunburst chart of drive C: next to a list of the largest folders">
+  <img src="assets/screenshot-disks.png" width="49%" alt="The start page listing each disk with its free space and a Scan button">
 </p>
 
 ## Features
 
-- Scans a whole disk or any folder in parallel and shows it as an interactive sunburst chart.
+- Scans a whole disk or any folder in parallel, several at once, and shows each as an interactive sunburst chart.
 - Counts what a file really uses on disk. Hard links and cloned or reflinked copies count once.
 - Shows the space a scan can't see, such as snapshots and purgeable space, as its own segment.
 - Lets you search by name, collect files and move them to the Trash (Recycle Bin on Windows).
