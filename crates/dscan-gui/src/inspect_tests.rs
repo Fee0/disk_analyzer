@@ -148,6 +148,7 @@ fn inspect_browse() -> Result<(), Error> {
     let msgs: Vec<Message> = {
         let mut ui = sim(&app);
         ui_inspect::hover(&mut ui, A_CHART_SEGMENT);
+        println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, "chart-tooltip")?.display());
         ui_inspect::click_at(&mut ui, A_CHART_SEGMENT);
         ui.click("Pictures/")?;
         ui.into_messages().collect()

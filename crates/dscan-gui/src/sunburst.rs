@@ -3,11 +3,12 @@ use std::time::{Duration, Instant};
 
 use dscan_core::transition::at_rest;
 use dscan_core::{Arc, ArcStyle, FrameArc, Layout, MAX_DEPTH, NodeId, Segment, Tree, format_size};
-use iced::widget::canvas::{self, Cache, Event, Frame, Geometry, Path, Stroke, Text};
+use iced::widget::canvas::{self, Cache, Event, Frame, Geometry, Path, Stroke, Text, gradient};
 use iced::{Color, Pixels, Point, Rectangle, Renderer, Size, Theme, Vector, alignment, mouse};
 
 use crate::animation::MovingChart;
 use crate::app::Message;
+use crate::depth::{self, Shading};
 use crate::fmt::{fit_width, generous_text_width, truncate};
 use crate::theme;
 
@@ -15,6 +16,12 @@ const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 const SLIVER_MAX_ARC_LENGTH: f32 = 3.0;
 const SEPARATOR_GAP: f32 = 1.0;
 const CENTER_LABEL_WIDTH_PER_HOLE_RADIUS: f32 = 1.6;
+const CENTER_DISC_INSET: f32 = 2.0;
+const SOFT_SHADOW_LAYERS: usize = 6;
+const SOFT_SHADOW_LAYER_ALPHA: f32 = 0.05;
+const SOFT_SHADOW_DROP: f32 = 2.0;
+const TOOLTIP_RADIUS: f32 = 6.0;
+const TOOLTIP_SHADOW_DROP: f32 = 4.0;
 
 pub struct Sunburst<'a> {
     pub tree: &'a Tree,
@@ -127,6 +134,21 @@ fn annular_sector_as_one_polygon(center: Point, inner: ArcEdge, outer: ArcEdge) 
     })
 }
 
+fn fill_soft_shadow(frame: &mut Frame, outset_shape: impl Fn(f32) -> Path) {
+    for outset in 0..SOFT_SHADOW_LAYERS {
+        frame.fill(&outset_shape(outset as f32), Color::BLACK.scale_alpha(SOFT_SHADOW_LAYER_ALPHA));
+    }
+}
+
+fn lit_from_above(base: Color, top: f32, bottom: f32) -> gradient::Linear {
+    let Shading { top: lit, bottom: shaded } = depth::lit_shading(base);
+    gradient::Linear::new(Point::new(0.0, top), Point::new(0.0, bottom)).add_stop(0.0, lit).add_stop(1.0, shaded)
+}
+
+fn rim() -> Stroke<'static> {
+    Stroke::default().with_color(Color::WHITE.scale_alpha(depth::RIM_ALPHA)).with_width(1.0)
+}
+
 impl Sunburst<'_> {
     fn locate(&self, geo: &Geo, p: Point) -> Hit<'_> {
         let dist = p.distance(geo.center);
@@ -151,7 +173,12 @@ impl Sunburst<'_> {
     }
 
     fn draw_center_disc_with_focus_size(&self, frame: &mut Frame, geo: &Geo) {
-        frame.fill(&Path::circle(geo.center, geo.r0 - 2.0), theme::PANEL);
+        let radius = geo.r0 - CENTER_DISC_INSET;
+        let dropped = geo.center + Vector::new(0.0, SOFT_SHADOW_DROP);
+        fill_soft_shadow(frame, |outset| Path::circle(dropped, radius + outset));
+        let disc = Path::circle(geo.center, radius);
+        frame.fill(&disc, lit_from_above(theme::PANEL, geo.center.y - radius, geo.center.y + radius));
+        frame.stroke(&disc, rim());
         let focus = self.layout.focus;
         let label_width = geo.r0 * CENTER_LABEL_WIDTH_PER_HOLE_RADIUS;
         let total = format_size(self.moving.map_or(self.layout.total, |m| m.total));
@@ -216,7 +243,15 @@ impl Sunburst<'_> {
         if pos.y + h > bounds.height {
             pos.y = p.y - h - 8.0;
         }
-        frame.fill(&Path::rounded_rectangle(pos, Size::new(w, h), 6.0.into()), theme::PANEL_HI.scale_alpha(0.96));
+        let size = Size::new(w, h);
+        let dropped = pos + Vector::new(0.0, TOOLTIP_SHADOW_DROP);
+        fill_soft_shadow(frame, |outset| {
+            let grown = Size::new(size.width + 2.0 * outset, size.height + 2.0 * outset);
+            Path::rounded_rectangle(dropped - Vector::new(outset, outset), grown, (TOOLTIP_RADIUS + outset).into())
+        });
+        let card = Path::rounded_rectangle(pos, size, TOOLTIP_RADIUS.into());
+        frame.fill(&card, lit_from_above(theme::PANEL_HI, pos.y, pos.y + h));
+        frame.stroke(&card, rim());
         for (content, dy, color, size) in [(line1, 7.0, theme::TEXT, 13.0), (line2, 24.0, theme::TEXT_DIM, 12.0)] {
             frame.fill_text(Text {
                 content,
@@ -239,7 +274,7 @@ impl Sunburst<'_> {
         if let Some(p) = cursor.position_in(bounds) {
             match self.locate(geo, p) {
                 Hit::Center if self.can_go_up() => overlay.stroke(
-                    &Path::circle(geo.center, geo.r0 - 2.0),
+                    &Path::circle(geo.center, geo.r0 - CENTER_DISC_INSET),
                     Stroke::default().with_color(Color::WHITE.scale_alpha(0.5)).with_width(2.0),
                 ),
                 Hit::Arc(a) => self.draw_tooltip(&mut overlay, bounds, p, a),

@@ -2,6 +2,7 @@
 
 mod animation;
 mod app;
+mod depth;
 mod fmt;
 #[cfg(test)]
 mod iced_inspect;

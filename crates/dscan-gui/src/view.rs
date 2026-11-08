@@ -11,6 +11,7 @@ use iced::{Alignment, Color, Element, Fill, Length, Theme};
 
 use crate::animation::ChartAnimation;
 use crate::app::{App, Browser, HOLD_TO_DELETE, ListRow, Message, Notice, NoticeKind, SEARCH_ID, ScanJob, Screen};
+use crate::depth::{self, Elevation};
 use crate::fmt::{fit_width, fit_width_keeping_both_ends, generous_text_width, thousands, truncate};
 use crate::icon;
 use crate::sunburst::Sunburst;
@@ -40,44 +41,50 @@ const FRAME_INSET: f32 = 2.0;
 const FRAME_RADIUS: f32 = 8.0;
 const INNER_BUTTON_SIDE: f32 = TOOLBAR_CONTROL_HEIGHT - 2.0 * FRAME_INSET;
 
+const FILLED_BUTTON_RADIUS: f32 = 6.0;
+const HOVER_TINT: Color = Color::from_rgba(1.0, 1.0, 1.0, 0.02);
+const PRESS_TINT: Color = Color::from_rgba(0.0, 0.0, 0.0, 0.18);
+
 fn framed_group<'a>(content: impl Into<Element<'a, Message>>) -> container::Container<'a, Message> {
-    container(content)
-        .padding(FRAME_INSET)
-        .height(TOOLBAR_CONTROL_HEIGHT)
-        .align_y(iced::alignment::Vertical::Center)
-        .style(|_| {
-            rounded_box(theme::PANEL, FRAME_RADIUS)
-                .border(border::rounded(FRAME_RADIUS).width(1).color(theme::PANEL_HI))
-        })
+    container(content).padding(FRAME_INSET).height(TOOLBAR_CONTROL_HEIGHT).align_y(iced::alignment::Vertical::Center)
+}
+
+fn raised_group<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    depth::casting_shadow(
+        framed_group(content).style(|_| depth::surface(theme::PANEL_HI, FRAME_RADIUS)),
+        FRAME_RADIUS,
+        Elevation::Control,
+    )
+    .into()
 }
 
 fn quiet_button_style(text_when_idle: Color) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |_, status| {
-        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        let tint = match status {
+            button::Status::Hovered => Some(HOVER_TINT),
+            button::Status::Pressed => Some(PRESS_TINT),
+            button::Status::Active | button::Status::Disabled => None,
+        };
         button::Style {
-            background: hovered.then(|| theme::PANEL_HI.into()),
-            text_color: if hovered { theme::TEXT } else { text_when_idle },
+            background: tint.map(Into::into),
+            text_color: if tint.is_some() { theme::TEXT } else { text_when_idle },
             border: border::rounded(FRAME_RADIUS - FRAME_INSET),
             ..button::Style::default()
         }
     }
 }
 
-fn filled_white_text_button(bg: Color) -> impl Fn(&Theme, button::Status) -> button::Style {
-    move |_, status| {
-        let bg = match status {
-            button::Status::Hovered => theme::mix(bg, Color::WHITE, 0.12),
-            button::Status::Pressed => theme::mix(bg, Color::BLACK, 0.12),
-            button::Status::Active => bg,
-            button::Status::Disabled => bg.scale_alpha(0.5),
-        };
-        button::Style {
-            background: Some(bg.into()),
-            text_color: Color::WHITE,
-            border: border::rounded(6),
-            ..button::Style::default()
-        }
-    }
+fn filled_button<'a>(
+    content: impl Into<Element<'a, Message>>,
+    bg: Color,
+    shape: impl FnOnce(button::Button<'a, Message>) -> button::Button<'a, Message>,
+) -> Element<'a, Message> {
+    depth::casting_shadow(
+        shape(button(content).style(depth::raised_button(bg, Color::WHITE, FILLED_BUTTON_RADIUS))),
+        FILLED_BUTTON_RADIUS,
+        Elevation::Control,
+    )
+    .into()
 }
 
 fn subtle_button<'a>(content: impl Into<Element<'a, Message>>, msg: Option<Message>) -> button::Button<'a, Message> {
@@ -85,9 +92,11 @@ fn subtle_button<'a>(content: impl Into<Element<'a, Message>>, msg: Option<Messa
         .padding([4.0, SUBTLE_BUTTON_PADDING_X])
         .style(|t: &Theme, s| {
             let mut st = button::text(t, s);
-            if matches!(s, button::Status::Hovered) {
-                st.background = Some(theme::PANEL_HI.into());
-            }
+            st.background = match s {
+                button::Status::Hovered => Some(HOVER_TINT.into()),
+                button::Status::Pressed => Some(PRESS_TINT.into()),
+                button::Status::Active | button::Status::Disabled => None,
+            };
             st.text_color =
                 if matches!(s, button::Status::Disabled) { theme::TEXT_DIM.scale_alpha(0.4) } else { theme::TEXT };
             st.border = st.border.rounded(6);
@@ -97,32 +106,29 @@ fn subtle_button<'a>(content: impl Into<Element<'a, Message>>, msg: Option<Messa
 }
 
 fn outlined_text_button(label: &str, msg: Message) -> Element<'_, Message> {
-    button(text(label).size(13).wrapping(Wrapping::None))
-        .padding([6, 14])
-        .style(|_: &Theme, s| {
-            let bg = if matches!(s, button::Status::Hovered | button::Status::Pressed) {
-                theme::PANEL_HI
-            } else {
-                theme::PANEL
-            };
-            button::Style {
-                background: Some(bg.into()),
-                text_color: theme::TEXT,
-                border: border::rounded(FRAME_RADIUS).width(1).color(theme::PANEL_HI),
-                ..button::Style::default()
-            }
-        })
-        .on_press(msg)
-        .into()
+    depth::casting_shadow(
+        button(text(label).size(13).wrapping(Wrapping::None))
+            .padding([6, 14])
+            .style(depth::raised_button(theme::PANEL_HI, theme::TEXT, FRAME_RADIUS))
+            .on_press(msg),
+        FRAME_RADIUS,
+        Elevation::Control,
+    )
+    .into()
 }
 
 const TOOLTIP_MAX_WIDTH: f32 = 320.0;
+const TOOLTIP_RADIUS: f32 = 6.0;
 
 fn tooltip_box<'a>(label: impl text::IntoFragment<'a>) -> container::Container<'a, Message> {
-    container(text(label).size(12))
-        .padding([4, 8])
-        .max_width(TOOLTIP_MAX_WIDTH)
-        .style(|_| rounded_box(theme::PANEL_HI, 6.0))
+    depth::casting_shadow(
+        container(text(label).size(12))
+            .padding([4, 8])
+            .max_width(TOOLTIP_MAX_WIDTH)
+            .style(|_| depth::surface(theme::PANEL_HI, TOOLTIP_RADIUS)),
+        TOOLTIP_RADIUS,
+        Elevation::Floating,
+    )
 }
 
 fn with_tooltip<'a>(content: impl Into<Element<'a, Message>>, label: &'a str) -> Element<'a, Message> {
@@ -142,7 +148,6 @@ const START_BLOCK_MAX_WIDTH: f32 = 720.0;
 const START_SECTION_GAP: f32 = 14.0;
 const DISK_LIST_PADDING: f32 = 4.0;
 const DISK_LIST_RADIUS: f32 = 12.0;
-const DISK_ROW_RADIUS: f32 = DISK_LIST_RADIUS - DISK_LIST_PADDING;
 const DISK_ROW_HEIGHT: f32 = 76.0;
 const DISK_ROW_PADDING_X: f32 = 18.0;
 const DISK_ROW_SPACING: f32 = 18.0;
@@ -156,7 +161,6 @@ const METER_LABEL_SIZE: f32 = 13.0;
 const METER_LABEL_GAP: f32 = 10.0;
 const SCAN_BUTTON_WIDTH: f32 = 76.0;
 const SCAN_BUTTON_TEXT_SIZE: f32 = 14.0;
-const ALTERNATE_ROW_SHADE: f32 = 0.45;
 const FILLING_UP: f32 = 0.75;
 const NEARLY_FULL: f32 = 0.9;
 const SCAN_SHOWN_COMPLETE_ONLY_WHEN_DONE: f32 = 0.99;
@@ -169,7 +173,11 @@ const RESUME_LABEL: &str = "Resume";
 fn start(app: &App) -> Element<'_, Message> {
     responsive(move |viewport| {
         let width = (viewport.width - 2.0 * START_PADDING).min(START_BLOCK_MAX_WIDTH);
-        scrollable(center(start_content(app, width)).padding(START_PADDING)).width(Fill).height(viewport.height).into()
+        scrollable(center(start_content(app, width)).padding(START_PADDING))
+            .width(Fill)
+            .height(viewport.height)
+            .style(depth::slim_scrollbar)
+            .into()
     })
     .into()
 }
@@ -196,7 +204,7 @@ fn start_content(app: &App, width: f32) -> Column<'_, Message> {
                     text("Without Full Disk Access some folders can't be read, so some space shows up as hidden. Grant it to your terminal (or this app), then restart it.")
                         .size(13)
                         .width(Fill),
-                    button(text("Open Settings").size(13).wrapping(Wrapping::None)).style(filled_white_text_button(theme::ACCENT)).on_press(Message::OpenFdaSettings),
+                    filled_button(text("Open Settings").size(13).wrapping(Wrapping::None), theme::ACCENT, |b| b.on_press(Message::OpenFdaSettings)),
                 ]
                 .spacing(16)
                 .align_y(Alignment::Center),
@@ -250,16 +258,15 @@ fn disk_list(app: &App, width: f32) -> Element<'_, Message> {
         };
         rows.push(scanning_row(identity, job, text_width));
     }
-    let shaded_rows = rows.into_iter().enumerate().map(|(n, content)| {
-        let shade =
-            if n % 2 == 1 { theme::mix(theme::PANEL, theme::PANEL_HI, ALTERNATE_ROW_SHADE) } else { theme::PANEL };
-        container(content).width(Fill).style(move |_| rounded_box(shade, DISK_ROW_RADIUS)).into()
-    });
-    container(Column::with_children(shaded_rows))
-        .padding(DISK_LIST_PADDING)
-        .width(Fill)
-        .style(|_| rounded_box(theme::PANEL, DISK_LIST_RADIUS))
-        .into()
+    depth::casting_shadow(
+        container(Column::with_children(rows).width(Fill))
+            .padding(DISK_LIST_PADDING)
+            .width(Fill)
+            .style(|_| depth::surface(theme::PANEL, DISK_LIST_RADIUS)),
+        DISK_LIST_RADIUS,
+        Elevation::Panel,
+    )
+    .into()
 }
 
 fn disk_text_width(list_width: f32) -> f32 {
@@ -288,13 +295,10 @@ struct DiskMeter<'a> {
 
 fn disk_row<'a>(identity: DiskIdentity<'a>, meter: DiskMeter<'a>, text_width: f32) -> Element<'a, Message> {
     let line_color = meter.color;
-    let line = progress_bar(0.0..=1.0, meter.fraction).length(METER_WIDTH).girth(METER_HEIGHT).style(move |_| {
-        progress_bar::Style {
-            background: theme::BG.into(),
-            bar: line_color.into(),
-            border: border::rounded(METER_HEIGHT / 2.0),
-        }
-    });
+    let line = progress_bar(0.0..=1.0, meter.fraction)
+        .length(METER_WIDTH)
+        .girth(METER_HEIGHT)
+        .style(move |_| depth::meter(line_color, METER_HEIGHT / 2.0));
     row![
         identity.icon,
         column![
@@ -332,12 +336,11 @@ fn fullness_color(used_fraction: f32) -> Color {
 }
 
 fn scan_button<'a>(label: &'a str, msg: Message) -> Element<'a, Message> {
-    button(text(label).size(SCAN_BUTTON_TEXT_SIZE).width(Fill).align_x(Alignment::Center).wrapping(Wrapping::None))
-        .padding([6.0, 0.0])
-        .width(SCAN_BUTTON_WIDTH)
-        .style(filled_white_text_button(theme::NEUTRAL_BUTTON))
-        .on_press(msg)
-        .into()
+    filled_button(
+        text(label).size(SCAN_BUTTON_TEXT_SIZE).width(Fill).align_x(Alignment::Center).wrapping(Wrapping::None),
+        theme::NEUTRAL_BUTTON,
+        |b| b.padding([6.0, 0.0]).width(SCAN_BUTTON_WIDTH).on_press(msg),
+    )
 }
 
 fn volume_row<'a>(identity: DiskIdentity<'a>, index: usize, v: &Volume, text_width: f32) -> Element<'a, Message> {
@@ -386,6 +389,7 @@ fn volume_details(v: &Volume) -> String {
 
 const RESULT_ROW_H: f32 = 56.0;
 const RESULT_GAP: f32 = 6.0;
+const RESULT_CARD_RADIUS: f32 = 10.0;
 const RESULT_ROWS_BEFORE_SCROLLING: usize = 4;
 const RESULT_ROW_PADDING_X: f32 = 12.0;
 const RESULT_ROW_SPACING: f32 = 12.0;
@@ -448,24 +452,18 @@ fn open_result_rows(app: &App, list_width: f32) -> Element<'_, Message> {
         .spacing(RESULT_ROW_SPACING)
         .height(Fill)
         .align_y(Alignment::Center);
-        list = list.push(
+        list = list.push(depth::casting_shadow(
             button(content)
                 .padding([0.0, RESULT_ROW_PADDING_X])
                 .width(Fill)
                 .height(RESULT_ROW_H)
-                .style(|t: &Theme, s| {
-                    let bg = if matches!(s, button::Status::Hovered) { theme::PANEL_HI } else { theme::PANEL };
-                    button::Style {
-                        background: Some(bg.into()),
-                        text_color: if matches!(s, button::Status::Disabled) { theme::TEXT_DIM } else { theme::TEXT },
-                        border: border::rounded(10),
-                        ..button::secondary(t, s)
-                    }
-                })
+                .style(depth::raised_button(theme::PANEL, theme::TEXT, RESULT_CARD_RADIUS))
                 .on_press(Message::ResumeParked(i)),
-        );
+            RESULT_CARD_RADIUS,
+            Elevation::Control,
+        ));
     }
-    scrollable(list).height(Fill).spacing(RESULT_LIST_SCROLLBAR_GAP).into()
+    scrollable(list).height(Fill).spacing(RESULT_LIST_SCROLLBAR_GAP).style(depth::slim_scrollbar).into()
 }
 
 const PANEL_GAP: f32 = 12.0;
@@ -483,9 +481,9 @@ fn browse(b: &Browser) -> Element<'_, Message> {
     match &b.drag {
         Some(d) if d.dragging => {
             let label = format!("{}  {}", truncate(&b.tree.name(d.item), 40), format_size(b.size(d.item)));
-            let chip = container(text(label).size(13))
-                .padding([6, 10])
-                .style(|_| rounded_box(theme::ACCENT.scale_alpha(0.92), 8.0).color(Color::WHITE));
+            let chip = container(text(label).size(13)).padding([6, 10]).style(|_| {
+                rounded_box(theme::ACCENT.scale_alpha(0.92), 8.0).color(Color::WHITE).shadow(floating_shadow())
+            });
             stack![main, pin(chip).x(d.pos.x + 14.0).y(d.pos.y + 10.0)].into()
         }
         _ => main.into(),
@@ -508,7 +506,7 @@ fn nav_icon_button<'a>(
     msg: Option<Message>,
 ) -> Element<'a, Message> {
     let tint =
-        if msg.is_some() { theme::TEXT } else { theme::mix(theme::PANEL, theme::TEXT_DIM, DISABLED_ICON_STRENGTH) };
+        if msg.is_some() { theme::TEXT } else { theme::mix(theme::PANEL_HI, theme::TEXT_DIM, DISABLED_ICON_STRENGTH) };
     let button = button(center(icon(NAV_ICON_SIZE, tint)))
         .width(INNER_BUTTON_SIDE)
         .height(INNER_BUTTON_SIDE)
@@ -519,7 +517,7 @@ fn nav_icon_button<'a>(
 }
 
 fn toolbar(b: &Browser) -> Element<'_, Message> {
-    let nav = framed_group(
+    let nav = raised_group(
         row![
             nav_icon_button(icon::home, "Start page", Some(Message::GoHome)),
             nav_icon_button(icon::chevron_left, BACK_TOOLTIP, Some(Message::Back)),
@@ -534,7 +532,7 @@ fn toolbar(b: &Browser) -> Element<'_, Message> {
         .padding([6, 10])
         .size(13)
         .width(Fill)
-        .style(framed_text_input);
+        .style(depth::well_input(FRAME_RADIUS));
 
     let chart_side =
         row![nav, path_bar(b)].spacing(8).align_y(Alignment::Center).width(Length::FillPortion(CHART_SIDE_PORTION));
@@ -546,15 +544,6 @@ fn toolbar(b: &Browser) -> Element<'_, Message> {
 
 fn rescan_button<'a>() -> Element<'a, Message> {
     with_tooltip(outlined_text_button("Rescan", Message::Rescan), RESCAN_TOOLTIP)
-}
-
-fn framed_text_input(t: &Theme, status: text_input::Status) -> text_input::Style {
-    let focused = matches!(status, text_input::Status::Focused { .. });
-    text_input::Style {
-        background: theme::PANEL.into(),
-        border: border::rounded(FRAME_RADIUS).width(1).color(if focused { theme::ACCENT } else { theme::PANEL_HI }),
-        ..text_input::default(t, status)
-    }
 }
 
 const PATH_ROOT_ICON_SIZE: f32 = 14.0;
@@ -572,11 +561,17 @@ fn path_bar(b: &Browser) -> Element<'_, Message> {
             .into()),
     ]
     .align_y(Alignment::Center);
-    framed_group(content).id(PATH_BAR_ID).padding([FRAME_INSET, 2.0 * FRAME_INSET]).width(Fill).clip(true).into()
+    framed_group(content)
+        .id(PATH_BAR_ID)
+        .padding([FRAME_INSET, 2.0 * FRAME_INSET])
+        .width(Fill)
+        .clip(true)
+        .style(|_| depth::well(theme::WELL, FRAME_RADIUS))
+        .into()
 }
 
 fn path_separator<'a>() -> Element<'a, Message> {
-    icon::chevron_right(PATH_SEPARATOR_SIZE, theme::mix(theme::PANEL, theme::TEXT_DIM, PATH_SEPARATOR_STRENGTH)).into()
+    icon::chevron_right(PATH_SEPARATOR_SIZE, theme::mix(theme::WELL, theme::TEXT_DIM, PATH_SEPARATOR_STRENGTH)).into()
 }
 
 const CRUMB_TEXT_SIZE: f32 = 13.0;
@@ -813,10 +808,9 @@ fn hold_to_delete_explanation() -> String {
 fn hold_to_delete_button(b: &Browser, fit: CollectorFit) -> Element<'_, Message> {
     let progress = b.delete_hold_progress();
     let width = fit.hold_button_width();
-    let held_part = container(Space::new())
-        .width(width * progress.unwrap_or(0.0))
-        .height(Fill)
-        .style(|_| rounded_box(theme::DANGER, 6.0));
+    let held_part = container(Space::new()).width(width * progress.unwrap_or(0.0)).height(Fill).style(|_| {
+        container::Style::default().background(depth::lit_from_above(theme::DANGER)).border(border::rounded(6))
+    });
     let label = center(
         text(hold_to_delete_label(progress, fit))
             .size(COLLECTOR_BUTTON_TEXT_SIZE)
@@ -830,11 +824,15 @@ fn hold_to_delete_button(b: &Browser, fit: CollectorFit) -> Element<'_, Message>
             rounded_box(theme::mix(theme::DANGER, theme::PANEL, 0.65), 6.0)
                 .border(border::rounded(6).width(1).color(theme::DANGER))
         });
-    let button = mouse_area(face)
-        .on_press(Message::DeleteHoldStart)
-        .on_release(Message::DeleteHoldCancel)
-        .on_exit(Message::DeleteHoldCancel)
-        .interaction(iced::mouse::Interaction::Pointer);
+    let button = depth::casting_shadow(
+        mouse_area(face)
+            .on_press(Message::DeleteHoldStart)
+            .on_release(Message::DeleteHoldCancel)
+            .on_exit(Message::DeleteHoldCancel)
+            .interaction(iced::mouse::Interaction::Pointer),
+        FILLED_BUTTON_RADIUS,
+        Elevation::Control,
+    );
     if fit == CollectorFit::Full {
         button.into()
     } else {
@@ -865,13 +863,21 @@ fn collector(b: &Browser, layer: iced::Size) -> Element<'_, Message> {
             .push(container(separator()).padding([0.0, COLLECTOR_PADDING]));
     }
     let zone = container(panel.push(bar)).width(Fill).style(move |_| {
-        let bg = if hot { theme::mix(theme::BG, theme::ACCENT, 0.18) } else { theme::PANEL };
-        let edge = if dragging { 1.5 } else { 0.0 };
-        let style = rounded_box(bg, COLLECTOR_RADIUS)
-            .border(border::rounded(COLLECTOR_RADIUS).width(edge).color(theme::ACCENT.scale_alpha(0.8)));
-        if list_open { style.shadow(floating_shadow()) } else { style }
+        let bg = if hot { theme::mix(theme::PANEL, theme::ACCENT, 0.25) } else { theme::PANEL };
+        let style = depth::surface(bg, COLLECTOR_RADIUS);
+        if dragging {
+            style.border(border::rounded(COLLECTOR_RADIUS).width(1.5).color(theme::ACCENT.scale_alpha(0.8)))
+        } else {
+            style
+        }
     });
-    mouse_area(zone).on_enter(Message::CollectorEnter).on_exit(Message::CollectorExit).into()
+    let elevation = if list_open { Elevation::Floating } else { Elevation::Panel };
+    depth::casting_shadow(
+        mouse_area(zone).on_enter(Message::CollectorEnter).on_exit(Message::CollectorExit),
+        COLLECTOR_RADIUS,
+        elevation,
+    )
+    .into()
 }
 
 fn floating_shadow() -> iced::Shadow {
@@ -888,7 +894,7 @@ fn collected_list(b: &Browser, room: iced::Size) -> Element<'_, Message> {
     for &id in b.collector.items() {
         rows = rows.push(collected_row(b, id, row_width));
     }
-    let list = container(scrollable(rows).spacing(LIST_SCROLLBAR_GAP))
+    let list = container(scrollable(rows).spacing(LIST_SCROLLBAR_GAP).style(depth::slim_scrollbar))
         .padding(COLLECTED_LIST_PADDING)
         .width(Fill)
         .max_height(room.height.max(0.0));
@@ -950,7 +956,8 @@ fn collector_ring<'a>(b: &Browser) -> Element<'a, Message> {
     container(dot(fill, COLLECTOR_RING_DOT))
         .padding(COLLECTOR_RING_PADDING)
         .style(move |_| {
-            container::Style::default().border(border::rounded(20).width(2).color(ring_color.scale_alpha(0.7)))
+            depth::well(theme::WELL, COLLECTOR_RING_WIDTH / 2.0)
+                .border(border::rounded(COLLECTOR_RING_WIDTH / 2.0).width(2).color(ring_color.scale_alpha(0.7)))
         })
         .into()
 }
@@ -980,10 +987,7 @@ fn empty_collector_hint<'a>(b: &Browser) -> Element<'a, Message> {
 }
 
 fn collector_button<'a>(label: String, bg: Color, msg: Message) -> Element<'a, Message> {
-    button(text(label).size(COLLECTOR_BUTTON_TEXT_SIZE).wrapping(Wrapping::None))
-        .style(filled_white_text_button(bg))
-        .on_press(msg)
-        .into()
+    filled_button(text(label).size(COLLECTOR_BUTTON_TEXT_SIZE).wrapping(Wrapping::None), bg, |b| b.on_press(msg))
 }
 
 fn trash_confirmation(b: &Browser, width: f32) -> (CollectorFit, Element<'_, Message>) {
@@ -1076,6 +1080,7 @@ fn collected_items(b: &Browser, width: f32) -> (CollectorFit, Element<'_, Messag
 }
 
 const LIST_PANEL_PADDING: f32 = 14.0;
+const LIST_PANEL_RADIUS: f32 = 10.0;
 const LIST_HEADER_TEXT_SIZE: f32 = 22.0;
 const LIST_HEADER_DOT: f32 = 14.0;
 const LIST_HEADER_SPACING: f32 = 10.0;
@@ -1088,6 +1093,9 @@ const LIST_BAR_SLOT_WIDTH: f32 = 64.0;
 const LIST_BAR_MAX_WIDTH: f32 = 60.0;
 const LIST_SIZE_COLUMN_WIDTH: f32 = 78.0;
 const LIST_SCROLLBAR_GAP: f32 = 4.0;
+const LIST_ROW_RADIUS: f32 = 6.0;
+const SELECTED_ROW_ACCENT: f32 = 0.6;
+const SEARCH_MATCH_TINT: f32 = 0.12;
 const LIST_NAME_MIN_WIDTH_BESIDE_A_BAR: f32 = 120.0;
 
 struct ListColumns {
@@ -1117,13 +1125,18 @@ fn clipped<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message>
 }
 
 fn list_panel(b: &Browser) -> Element<'_, Message> {
-    container(responsive(move |size| list_panel_content(b, size)))
-        .id(LIST_PANEL_ID)
-        .padding(LIST_PANEL_PADDING)
-        .width(Length::FillPortion(LIST_SIDE_PORTION))
-        .height(Fill)
-        .style(|_| rounded_box(theme::PANEL, 10.0))
-        .into()
+    depth::casting_shadow(
+        container(responsive(move |size| list_panel_content(b, size)))
+            .id(LIST_PANEL_ID)
+            .padding(LIST_PANEL_PADDING)
+            .width(Fill)
+            .height(Fill)
+            .style(|_| depth::surface(theme::PANEL, LIST_PANEL_RADIUS)),
+        LIST_PANEL_RADIUS,
+        Elevation::Panel,
+    )
+    .width(Length::FillPortion(LIST_SIDE_PORTION))
+    .into()
 }
 
 fn list_panel_content(b: &Browser, panel_size: iced::Size) -> Element<'_, Message> {
@@ -1170,7 +1183,9 @@ fn list_panel_content(b: &Browser, panel_size: iced::Size) -> Element<'_, Messag
         rows = rows.push(container(text("Empty").size(13).color(theme::TEXT_DIM)).padding(10));
     }
 
-    let mut panel = column![header, scrollable(rows).height(Fill).spacing(LIST_SCROLLBAR_GAP)].spacing(12);
+    let mut panel =
+        column![header, scrollable(rows).height(Fill).spacing(LIST_SCROLLBAR_GAP).style(depth::slim_scrollbar)]
+            .spacing(12);
     if let Some(details) = selection_details(b, panel_size) {
         panel = panel.push(column![separator(), details].spacing(12));
     }
@@ -1181,13 +1196,18 @@ const DETAILS_TITLE_TEXT_SIZE: f32 = 14.0;
 const DETAILS_TEXT_SIZE: f32 = 12.0;
 const DETAILS_SPACING: f32 = 8.0;
 const BULLET: &str = "•";
+const GROOVE_SHADOW_ALPHA: f32 = 0.35;
+const GROOVE_LIGHT_ALPHA: f32 = 0.05;
 const BULLET_SPACING: f32 = 6.0;
 const EXPLANATION_SHARE_OF_THE_PANEL: f32 = 0.5;
 const PREVIEW_SHORTCUT: &str = "Space";
 const OPEN_FULL_DISK_ACCESS_LABEL: &str = "Open Full Disk Access Settings";
 
 fn separator<'a>() -> Element<'a, Message> {
-    container(Space::new()).width(Fill).height(1).style(|_| container::background(theme::PANEL_HI)).into()
+    let line =
+        |color: Color| container(Space::new()).width(Fill).height(1).style(move |_| container::background(color));
+    column![line(Color::BLACK.scale_alpha(GROOVE_SHADOW_ALPHA)), line(Color::WHITE.scale_alpha(GROOVE_LIGHT_ALPHA))]
+        .into()
 }
 
 fn selection_details(b: &Browser, panel: iced::Size) -> Option<Element<'_, Message>> {
@@ -1259,7 +1279,7 @@ fn unscanned_space_explanation(
         }
         body = body.push(item);
     }
-    let body = container(scrollable(body).spacing(LIST_SCROLLBAR_GAP))
+    let body = container(scrollable(body).spacing(LIST_SCROLLBAR_GAP).style(depth::slim_scrollbar))
         .max_height(panel.height * EXPLANATION_SHARE_OF_THE_PANEL);
     column![selection_title(b, id, panel.width), body].spacing(DETAILS_SPACING).into()
 }
@@ -1308,18 +1328,20 @@ fn list_row<'a>(b: &'a Browser, r: &'a ListRow, columns: &ListColumns) -> Elemen
             .wrapping(Wrapping::None),
     );
 
-    let bg = if b.selected == Some(id) {
-        Some(theme::ACCENT.scale_alpha(0.35))
-    } else if b.hovered == Some(Segment::Node(id)) {
-        Some(theme::PANEL_HI)
+    let selected = b.selected == Some(id);
+    let tint = if b.hovered == Some(Segment::Node(id)) {
+        Some(HOVER_TINT)
     } else if b.search.as_ref().is_some_and(|s| s.is_match(id)) {
-        Some(theme::ACCENT.scale_alpha(0.12))
+        Some(theme::ACCENT.scale_alpha(SEARCH_MATCH_TINT))
     } else {
         None
     };
     let cell = container(content).padding([4.0, LIST_ROW_PADDING_X]).width(Fill).style(move |_| {
-        let style = container::Style::default().border(border::rounded(6));
-        match bg {
+        if selected {
+            return depth::surface(theme::mix(theme::PANEL, theme::ACCENT, SELECTED_ROW_ACCENT), LIST_ROW_RADIUS);
+        }
+        let style = container::Style::default().border(border::rounded(LIST_ROW_RADIUS));
+        match tint {
             Some(c) => style.background(c),
             None => style,
         }

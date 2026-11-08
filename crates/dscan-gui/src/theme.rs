@@ -1,7 +1,8 @@
 use dscan_core::Kind;
 use iced::Color;
 
-pub const BG: Color = Color::from_rgb8(0x24, 0x26, 0x2b);
+pub const BG: Color = Color::from_rgb8(0x1f, 0x21, 0x25);
+pub const WELL: Color = Color::from_rgb8(0x1c, 0x1e, 0x22);
 pub const PANEL: Color = Color::from_rgb8(0x2c, 0x2f, 0x35);
 pub const PANEL_HI: Color = Color::from_rgb8(0x36, 0x3a, 0x42);
 pub const TEXT: Color = Color::from_rgb8(0xe8, 0xea, 0xee);
