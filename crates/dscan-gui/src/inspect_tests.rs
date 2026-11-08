@@ -107,7 +107,7 @@ fn chart_reveals_zooms_and_lets_collected_items_shrink_away() -> Result<(), Erro
 fn deliver_search_result_without_its_thread(app: &mut App, query: &str) {
     if let Screen::Browse(b) = &app.screen {
         let result = dscan_core::search(&b.tree, query, &Default::default()).map(std::sync::Arc::new);
-        let _ = app.update(Message::SearchDone(1, result));
+        let _ = app.update(Message::SearchDone { browser: b.id, generation: 1, result });
     }
 }
 
@@ -373,7 +373,7 @@ fn the_start_page_is_one_step_back_from_the_results_root() -> Result<(), Error> 
     assert_eq!(browser(&app).focus, root, "and Cmd-] steps forward into the results again");
 
     let _ = app.update(Message::GoHome);
-    let _ = app.update(Message::CloseParked(0));
+    let _ = app.update(Message::CloseParked(app.parked_newest_first[0].id));
     let _ = app.update(Message::Forward);
     assert!(matches!(app.screen, Screen::Start), "closed results can't be stepped into");
     Ok(())
@@ -494,7 +494,7 @@ fn scanning_a_disk_turns_its_scan_button_into_pause_and_resume() -> Result<(), E
         assert_eq!(count_of(&texts_on_screen(&mut ui), "Scan"), 3, "every disk offers a scan");
     }
 
-    let _scan_task_never_run = app.update(Message::ScanVolume(0));
+    let _scan_task_never_run = app.update(Message::ScanVolume(app.volumes.as_ref().unwrap()[0].mount.clone()));
     assert!(matches!(app.screen, Screen::Start) && app.scans.len() == 1, "the scan runs inside the disk list");
     assert_eq!(app.title(), "Scanning Macintosh HD — Disk Analyzer");
     scan_job(&mut app).snapshot = MID_SCAN;
@@ -592,10 +592,13 @@ fn a_folder_scan_gets_its_own_row_and_runs_beside_a_disk_scan() -> Result<(), Er
         ui_inspect::click_at(&mut ui, (open_result.center_x(), open_result.center_y()));
         ui.into_messages().collect()
     };
-    assert!(matches!(msgs[..], [Message::ResumeParked(0)]), "open results stay open-able during a scan: {msgs:?}");
+    assert!(
+        matches!(msgs[..], [Message::ResumeParked(id)] if id == app.parked_newest_first[0].id),
+        "open results stay open-able during a scan: {msgs:?}"
+    );
 
     let (folder_job, folder_cancel) = (scan_job(&mut app).id, scan_job(&mut app).cancel.clone());
-    let _scan_task_never_run = app.update(Message::ScanVolume(0));
+    let _scan_task_never_run = app.update(Message::ScanVolume(app.volumes.as_ref().unwrap()[0].mount.clone()));
     assert!(!folder_cancel.is_cancelled(), "starting another scan leaves the folder scan running");
     assert_eq!(app.scans.len(), 2);
     assert_eq!(app.title(), format!("Scanning {folder_name}, Macintosh HD — Disk Analyzer"));
@@ -608,7 +611,7 @@ fn a_folder_scan_gets_its_own_row_and_runs_beside_a_disk_scan() -> Result<(), Er
     }
 
     let disk_cancel = scan_job(&mut app).cancel.clone();
-    let _ = app.update(Message::ResumeParked(0));
+    let _ = app.update(Message::ResumeParked(app.parked_newest_first[0].id));
     assert!(matches!(app.screen, Screen::Browse(_)), "opening a result works while scans run");
     assert!(!disk_cancel.is_cancelled() && !folder_cancel.is_cancelled(), "scans keep running behind a result");
 
@@ -699,7 +702,10 @@ fn inspect_open_results() -> Result<(), Error> {
         ui.click(name.as_str())?;
         ui.into_messages().collect()
     };
-    assert!(matches!(msgs[..], [Message::ResumeParked(0)]), "clicking a row resumes that result: {msgs:?}");
+    assert!(
+        matches!(msgs[..], [Message::ResumeParked(id)] if id == app.parked_newest_first[0].id),
+        "clicking a row resumes that result: {msgs:?}"
+    );
     for m in msgs {
         let _ = app.update(m);
     }
@@ -714,11 +720,11 @@ fn inspect_open_results() -> Result<(), Error> {
         ui.into_messages().collect()
     };
     assert!(
-        matches!(msgs[..], [Message::CloseParked(0)]),
+        matches!(msgs[..], [Message::CloseParked(id)] if id == app.parked_newest_first[0].id),
         "the × inside a row closes that result instead of opening it: {msgs:?}"
     );
 
-    let _ = app.update(Message::CloseParked(1));
+    let _ = app.update(Message::CloseParked(app.parked_newest_first[1].id));
     assert_eq!(app.parked_newest_first.len(), 5, "closing removes just that one result");
     assert!(
         app.parked_newest_first

@@ -33,6 +33,13 @@ fn next_removal_id() -> RemovalId {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
+pub type BrowserId = u64;
+
+fn next_browser_id() -> BrowserId {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
 enum RemovalProgress {
     OnDisk(RemovalId),
     Finished(Result<Arc<RemovalReport>, PanicMessage>),
@@ -149,6 +156,7 @@ pub struct Notice {
 }
 
 pub struct Browser {
+    pub id: BrowserId,
     pub tree: Arc<Tree>,
     pub opts: ScanOptions,
     pub focus: NodeId,
@@ -182,7 +190,7 @@ pub struct Browser {
 #[derive(Debug, Clone)]
 pub enum Message {
     VolumesLoaded(Vec<Volume>, bool),
-    ScanVolume(usize),
+    ScanVolume(PathBuf),
     OpenFolder,
     FolderPicked(Option<PathBuf>),
     OpenFdaSettings,
@@ -202,8 +210,8 @@ pub enum Message {
     Back,
     Forward,
     SearchChanged(String),
-    SearchFire(u64),
-    SearchDone(u64, Option<Arc<SearchResult>>),
+    SearchFire { browser: BrowserId, generation: u64 },
+    SearchDone { browser: BrowserId, generation: u64, result: Option<Arc<SearchResult>> },
     ClearSearch,
     FocusSearch,
     Key(Key, keyboard::Modifiers),
@@ -224,8 +232,8 @@ pub enum Message {
     RemovalDone { id: RemovalId, outcome: Result<Arc<RemovalReport>, PanicMessage> },
     Rescan,
     GoHome,
-    ResumeParked(usize),
-    CloseParked(usize),
+    ResumeParked(BrowserId),
+    CloseParked(BrowserId),
     DismissNotice,
     NoticeExpired,
     NoticeEnter,
@@ -326,9 +334,10 @@ impl App {
                 self.volumes = Some(volumes);
                 self.full_disk_access = fda;
             }
-            Message::ScanVolume(i) => {
-                if let Some(v) = self.volumes.as_ref().and_then(|v| v.get(i)) {
-                    return self.start_scan(ScanOptions::volume(&v.mount, &v.name));
+            Message::ScanVolume(mount) => {
+                let volume = self.volumes.iter().flatten().find(|v| v.mount == mount);
+                if let Some(opts) = volume.map(|v| ScanOptions::volume(&v.mount, &v.name)) {
+                    return self.start_scan(opts);
                 }
             }
             Message::OpenFolder => {
@@ -388,15 +397,24 @@ impl App {
                 Some(navigation) => return self.update(navigation),
                 None => return self.update_browser(Message::Key(key, mods)),
             },
-            Message::ResumeParked(i) => return self.resume_parked(i),
+            Message::ResumeParked(id) => {
+                if let Some(i) = self.parked_position(id) {
+                    return self.resume_parked(i);
+                }
+            }
+            message @ (Message::SearchFire { browser, .. } | Message::SearchDone { browser, .. }) => {
+                if let Some(b) = self.browser_mut(browser) {
+                    return b.update(message);
+                }
+            }
             Message::RemovalDone { id, outcome } => {
                 match self.parked_newest_first.iter_mut().find(|b| b.started_removal(id)) {
                     Some(parked) => parked.removal_left_the_disk(outcome),
                     None => return self.update_browser(Message::RemovalDone { id, outcome }),
                 }
             }
-            Message::CloseParked(i) => {
-                if i < self.parked_newest_first.len() {
+            Message::CloseParked(id) => {
+                if let Some(i) = self.parked_position(id) {
                     drop_off_thread(vec![self.parked_newest_first.remove(i)]);
                     self.stepped_back_from_newest_parked &= i != 0;
                 }
@@ -412,6 +430,18 @@ impl App {
         Task::none()
     }
 
+    fn parked_position(&self, id: BrowserId) -> Option<usize> {
+        self.parked_newest_first.iter().position(|b| b.id == id)
+    }
+
+    fn browser_mut(&mut self, id: BrowserId) -> Option<&mut Browser> {
+        let on_screen = match &mut self.screen {
+            Screen::Browse(b) => Some(&mut **b),
+            Screen::Start => None,
+        };
+        on_screen.into_iter().chain(self.parked_newest_first.iter_mut()).find(|b| b.id == id)
+    }
+
     fn update_browser(&mut self, message: Message) -> Task<Message> {
         match &mut self.screen {
             Screen::Browse(b) => b.update(message),
@@ -423,7 +453,7 @@ impl App {
         let Screen::Browse(mut b) = std::mem::replace(&mut self.screen, Screen::Start) else {
             return Task::none();
         };
-        b.drag = None;
+        b.let_go_of_the_pointer();
         self.parked_newest_first.insert(0, *b);
         self.stepped_back_from_newest_parked = true;
         self.error = None;
@@ -529,6 +559,7 @@ impl Browser {
     pub fn new(tree: Tree, opts: ScanOptions) -> Self {
         let root = tree.root();
         let mut b = Browser {
+            id: next_browser_id(),
             tree: Arc::new(tree),
             opts,
             focus: root,
@@ -581,7 +612,7 @@ impl Browser {
     }
 
     pub fn can_forward(&self) -> bool {
-        !self.forward.is_empty()
+        self.forward.iter().any(|&id| self.is_still_reachable_history_entry(id))
     }
 
     fn computed_layout(&self) -> Layout {
@@ -789,9 +820,9 @@ impl Browser {
             return Task::none();
         }
         let (tree, query, cancel) = (Arc::clone(&self.tree), self.search_text.clone(), self.search_cancel.clone());
-        let generation = self.search_gen;
+        let (browser, generation) = (self.id, self.search_gen);
         Task::perform(off_thread(move || dscan_core::search(&tree, &query, &cancel).map(Arc::new)), move |r| {
-            Message::SearchDone(generation, r.ok().flatten())
+            Message::SearchDone { browser, generation, result: r.ok().flatten() }
         })
     }
 
@@ -947,8 +978,22 @@ impl Browser {
         self.updating(|b| b.handle(message))
     }
 
+    fn let_go_of_the_pointer(&mut self) {
+        self.drag = None;
+        self.delete_hold_started = None;
+        self.over_collector = false;
+        self.notice_hovered = false;
+        self.hovered = None;
+        self.highlight_cache.clear();
+    }
+
     fn resume(&mut self) -> Task<Message> {
-        self.updating(Self::apply_finished_removal)
+        self.updating(|b| {
+            if b.notice.is_some() {
+                b.notice_expires_at = Some(Instant::now() + NOTICE_LIFETIME);
+            }
+            b.apply_finished_removal()
+        })
     }
 
     fn updating(&mut self, change: impl FnOnce(&mut Self) -> Task<Message>) -> Task<Message> {
@@ -992,13 +1037,13 @@ impl Browser {
             Message::SearchChanged(s) => {
                 self.search_text = s;
                 self.search_gen += 1;
-                let generation = self.search_gen;
+                let (browser, generation) = (self.id, self.search_gen);
                 return Task::perform(async { tokio::time::sleep(Duration::from_millis(150)).await }, move |_| {
-                    Message::SearchFire(generation)
+                    Message::SearchFire { browser, generation }
                 });
             }
-            Message::SearchFire(generation) if generation == self.search_gen => return self.run_search(),
-            Message::SearchDone(generation, result) => {
+            Message::SearchFire { generation, .. } if generation == self.search_gen => return self.run_search(),
+            Message::SearchDone { generation, result, .. } => {
                 if generation == self.search_gen {
                     self.search = result;
                     self.relayout();
@@ -1257,7 +1302,7 @@ mod tests {
         assert!(dir.path().join("Music").exists(), "later additions are not removed");
         assert!(b.tree.is_live(movies), "the tree changes only once the search lets go of it");
         drop(running_search);
-        let _ = b.update(Message::SearchDone(b.search_gen, None));
+        let _ = b.update(Message::SearchDone { browser: b.id, generation: b.search_gen, result: None });
         assert!(!b.tree.is_live(movies));
         assert_eq!(b.collector.items(), &[music]);
     }
@@ -1274,11 +1319,98 @@ mod tests {
 
         let _ = app.update(Message::GoHome);
         let _ = app.update(Message::RemovalDone { id, outcome: Ok(Arc::new(plan.carry_out())) });
-        let _ = app.update(Message::ResumeParked(0));
+        let _ = app.update(Message::ResumeParked(app.parked_newest_first[0].id));
 
         let Screen::Browse(b) = &app.screen else { panic!("the parked result is open again") };
         assert!(!b.tree.is_live(movies) && b.collector.is_empty());
         assert!(b.notice.as_ref().is_some_and(|n| n.kind == NoticeKind::Done), "{:?}", b.notice);
+    }
+
+    fn app_showing(b: Browser) -> App {
+        let (mut app, _) = App::new(None);
+        app.screen = Screen::Browse(Box::new(b));
+        app
+    }
+
+    fn resume_newest_parked(app: &mut App) -> Task<Message> {
+        app.update(Message::ResumeParked(app.parked_newest_first[0].id))
+    }
+
+    fn on_screen(app: &mut App) -> &mut Browser {
+        match &mut app.screen {
+            Screen::Browse(b) => b,
+            Screen::Start => panic!("a result is on screen"),
+        }
+    }
+
+    #[test]
+    fn going_home_mid_hold_cancels_the_permanent_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut b = browser(dir.path());
+        let movies = descend(&b.tree, &["Movies"]);
+        b.collector.add(&b.tree, movies).unwrap();
+        let _ = b.update(Message::DeleteHoldStart);
+        let mut app = app_showing(b);
+
+        let _ = app.update(Message::GoHome);
+        let _ = resume_newest_parked(&mut app);
+        let b = on_screen(&mut app);
+        assert!(b.delete_hold_progress().is_none(), "the hold ended when its button left the screen");
+        b.delete_hold_started.get_or_insert(Instant::now() - HOLD_TO_DELETE);
+        let _ = app.update(Message::DeleteHoldTick);
+        assert!(dir.path().join("Movies").exists(), "nothing is deleted without a new, finished hold");
+    }
+
+    #[test]
+    fn a_search_result_reaches_its_own_result_even_while_parked_and_never_another() {
+        let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let mut a = browser(dir_a.path());
+        let _ = a.update(Message::SearchChanged("mov".into()));
+        let fire = Message::SearchFire { browser: a.id, generation: a.search_gen };
+        let mut other = browser(dir_b.path());
+        other.search_gen = a.search_gen;
+        let mut app = app_showing(a);
+        let _ = app.update(Message::GoHome);
+        app.screen = Screen::Browse(Box::new(other));
+
+        assert!(app.update(fire).units() > 0, "the parked result starts its search");
+        let parked = &app.parked_newest_first[0];
+        let result = dscan_core::search(&parked.tree, "mov", &CancelToken::default()).map(Arc::new);
+        let _ = app.update(Message::SearchDone { browser: parked.id, generation: parked.search_gen, result });
+
+        assert!(app.parked_newest_first[0].search.is_some(), "the parked result keeps its search");
+        assert!(on_screen(&mut app).search.is_none(), "the result on screen never takes another's search");
+    }
+
+    #[test]
+    fn a_notice_left_showing_when_going_home_gets_a_full_lifetime_on_return() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut b = browser(dir.path());
+        let _ = b.update(Message::DesktopActionFinished { failure: Some("shown".into()) });
+        let _ = b.update(Message::NoticeEnter);
+        let mut app = app_showing(b);
+
+        let _ = app.update(Message::GoHome);
+        let timer = resume_newest_parked(&mut app);
+
+        assert!(timer.units() > 0, "returning restarts the notice's timer");
+        let b = on_screen(&mut app);
+        assert!(
+            b.notice_expires_at.is_some_and(|deadline| deadline > Instant::now()),
+            "and it is not hovered any more"
+        );
+    }
+
+    #[test]
+    fn forward_is_offered_only_while_its_target_still_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut b = browser(dir.path());
+        let movies = descend(&b.tree, &["Movies"]);
+        let _ = b.update(Message::Navigate(movies));
+        let _ = b.update(Message::Back);
+        assert!(b.can_forward());
+        Arc::get_mut(&mut b.tree).unwrap().remove(movies);
+        assert!(!b.can_forward(), "a removed folder is no forward target");
     }
 
     #[test]

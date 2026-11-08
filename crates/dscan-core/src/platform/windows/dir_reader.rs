@@ -89,21 +89,32 @@ pub(super) fn read_dir(path: &[u8], mut visit: impl FnMut(DirEntry<'_>)) -> io::
     let directory = Handle::open_without_following_links(&wide, FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES)?;
     let volume = directory.volume()?;
     BUFFER.with_borrow_mut(|buffer| {
-        let mut listing = WITH_UNIQUE_128_BIT_IDS;
-        let mut first_batch = true;
-        loop {
-            match next_batch(&directory, listing, buffer) {
-                Ok(Batch::Filled) => visit_batch(buffer, listing.layout, volume, &mut visit),
-                Ok(Batch::End) => return Ok(()),
-                Err(e) if first_batch && file_system_lacks_the_listing(&e) => {
-                    listing = FOR_FILE_SYSTEMS_WITHOUT_UNIQUE_IDS;
-                    continue;
-                }
-                Err(e) => return Err(e),
-            }
-            first_batch = false;
-        }
+        read_batches(
+            buffer,
+            |listing, buffer| next_batch(&directory, listing, buffer),
+            |listing, buffer| visit_batch(buffer, listing.layout, volume, &mut visit),
+        )
     })
+}
+
+fn read_batches(
+    buffer: &mut [u64],
+    mut next_batch: impl FnMut(Listing, &mut [u64]) -> io::Result<Batch>,
+    mut visit_batch: impl FnMut(Listing, &[u64]),
+) -> io::Result<()> {
+    let mut listing = WITH_UNIQUE_128_BIT_IDS;
+    let mut may_fall_back = true;
+    loop {
+        match next_batch(listing, buffer) {
+            Ok(Batch::Filled) => visit_batch(listing, buffer),
+            Ok(Batch::End) => return Ok(()),
+            Err(e) if may_fall_back && file_system_lacks_the_listing(&e) => {
+                listing = FOR_FILE_SYSTEMS_WITHOUT_UNIQUE_IDS;
+            }
+            Err(e) => return Err(e),
+        }
+        may_fall_back = false;
+    }
 }
 
 #[cfg(test)]
@@ -152,5 +163,40 @@ mod tests {
         assert_eq!(seen["a.bin"].2, seen["a-link.bin"].2, "both names of a hard link share a file id");
         assert_ne!(seen["a.bin"].2, seen["ünïcode.txt"].2);
         assert_eq!(seen["sub"].2, None);
+    }
+
+    fn lacks_the_listing() -> io::Error {
+        io::Error::from_raw_os_error(ERROR_NOT_SUPPORTED as i32)
+    }
+
+    #[test]
+    fn a_file_system_lacking_both_listings_fails_instead_of_retrying_forever() {
+        let mut asked = Vec::new();
+        let outcome = read_batches(
+            &mut [0u64; 1],
+            |listing, _| {
+                asked.push(listing.class);
+                assert!(asked.len() <= 2, "gave up after the fallback failed too");
+                Err(lacks_the_listing())
+            },
+            |_, _| panic!("nothing was listed"),
+        );
+        assert!(outcome.is_err_and(|e| file_system_lacks_the_listing(&e)));
+        assert_eq!(asked, [WITH_UNIQUE_128_BIT_IDS.class, FOR_FILE_SYSTEMS_WITHOUT_UNIQUE_IDS.class]);
+    }
+
+    #[test]
+    fn falls_back_once_and_lists_every_batch_with_the_fallback() {
+        let mut answers = vec![Ok(Batch::End), Ok(Batch::Filled), Ok(Batch::Filled), Err(lacks_the_listing())];
+        let mut visited = Vec::new();
+        read_batches(&mut [0u64; 1], |_, _| answers.pop().unwrap(), |listing, _| visited.push(listing.class)).unwrap();
+        assert_eq!(visited, [FOR_FILE_SYSTEMS_WITHOUT_UNIQUE_IDS.class; 2]);
+    }
+
+    #[test]
+    fn only_the_first_batch_may_fall_back() {
+        let mut answers = vec![Err(lacks_the_listing()), Ok(Batch::Filled)];
+        let outcome = read_batches(&mut [0u64; 1], |_, _| answers.pop().unwrap(), |_, _| {});
+        assert!(outcome.is_err(), "a later failure is a real error, not a missing listing");
     }
 }

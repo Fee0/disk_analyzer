@@ -117,5 +117,9 @@ mod system {
         fn reveal(path: &Path) -> io::Result<()> {
             unix::run_until_done(OPENER, &[OsStr::new(REVEAL_IN_FINDER), path.as_os_str()])
         }
+
+        fn remove_link(path: &Path) -> io::Result<()> {
+            unix::remove_link(path)
+        }
     }
 }

@@ -104,6 +104,7 @@ pub(crate) trait Platform {
     fn would_run_a_program(path: &Path) -> bool;
     fn preview(path: &Path) -> io::Result<()>;
     fn reveal(path: &Path) -> io::Result<()>;
+    fn remove_link(path: &Path) -> io::Result<()>;
 }
 
 pub(crate) fn answered_within<T: Send + 'static>(

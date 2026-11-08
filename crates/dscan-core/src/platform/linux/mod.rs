@@ -128,5 +128,9 @@ mod system {
         fn reveal(path: &Path) -> io::Result<()> {
             show_in_the_file_manager(path).or_else(|_| open_the_folder_holding(path))
         }
+
+        fn remove_link(path: &Path) -> io::Result<()> {
+            unix::remove_link(path)
+        }
     }
 }

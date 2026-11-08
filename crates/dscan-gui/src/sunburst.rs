@@ -306,7 +306,8 @@ impl canvas::Program<Message> for Sunburst<'_> {
                     Some(Hit::Arc(a)) => Some(a.segment),
                     _ => None,
                 };
-                if hit != state.hover {
+                let browser_forgot_the_arc_under_the_cursor = hit.is_some() && hit != self.hovered;
+                if hit != state.hover || browser_forgot_the_arc_under_the_cursor {
                     state.hover = hit;
                     return Some(canvas::Action::publish(Message::Hover(hit)));
                 }
@@ -371,6 +372,56 @@ mod tests {
     use iced::widget::canvas::path::{self, lyon_path::Event};
 
     use super::*;
+
+    const CHART_SIDE: f32 = 600.0;
+    const PROBE_STEP: usize = 5;
+
+    fn some_point_over_an_arc(chart: &Sunburst<'_>, geo: &Geo) -> (Point, Segment) {
+        let grid = (0..CHART_SIDE as usize).step_by(PROBE_STEP);
+        grid.clone()
+            .flat_map(|x| grid.clone().map(move |y| Point::new(x as f32, y as f32)))
+            .find_map(|p| match chart.locate(geo, p) {
+                Hit::Arc(a) => Some((p, a.segment)),
+                _ => None,
+            })
+            .expect("the chart draws at least one arc")
+    }
+
+    fn published_by_moving_to(chart: &Sunburst<'_>, state: &mut State, p: Point) -> Option<Message> {
+        let bounds = Rectangle::new(Point::ORIGIN, Size::new(CHART_SIDE, CHART_SIDE));
+        let moved = canvas::Event::Mouse(mouse::Event::CursorMoved { position: p });
+        canvas::Program::update(chart, state, &moved, bounds, mouse::Cursor::Available(p))
+            .and_then(|action| action.into_inner().0)
+    }
+
+    #[test]
+    fn the_arc_under_the_cursor_is_hovered_again_after_the_browser_forgot_it() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.bin"), vec![1u8; 4000]).unwrap();
+        std::fs::write(dir.path().join("b.bin"), vec![1u8; 2000]).unwrap();
+        let b = crate::app::test_util::scanned(dscan_core::ScanOptions::folder(dir.path()));
+        let chart = |hovered| Sunburst {
+            tree: &b.tree,
+            layout: &b.layout,
+            chart_cache: &b.chart_cache,
+            highlight_cache: &b.highlight_cache,
+            hovered,
+            selected: None,
+            moving: None,
+        };
+        let (p, segment) = some_point_over_an_arc(&chart(None), &Geo::new(Size::new(CHART_SIDE, CHART_SIDE)));
+        let mut state = State::default();
+
+        let entering = published_by_moving_to(&chart(None), &mut state, p);
+        assert!(matches!(entering, Some(Message::Hover(Some(s))) if s == segment), "{entering:?}");
+        let still_hovered = published_by_moving_to(&chart(Some(segment)), &mut state, p);
+        assert!(still_hovered.is_none(), "moving within the hovered arc says nothing new: {still_hovered:?}");
+        let after_the_browser_cleared_it = published_by_moving_to(&chart(None), &mut state, p);
+        assert!(
+            matches!(after_the_browser_cleared_it, Some(Message::Hover(Some(s))) if s == segment),
+            "the next move hovers the arc again: {after_the_browser_cleared_it:?}"
+        );
+    }
 
     fn subpath_count(path: &Path) -> usize {
         path.raw().iter().filter(|event| matches!(event, Event::Begin { .. })).count()

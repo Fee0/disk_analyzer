@@ -231,7 +231,7 @@ fn disk_list(app: &App, width: f32) -> Element<'_, Message> {
                 .into(),
         ),
         Some(volumes) => {
-            for (i, v) in volumes.iter().enumerate() {
+            for v in volumes {
                 let identity = DiskIdentity {
                     icon: icon::scan_root(true, DISK_ICON_SIZE, theme::TEXT_DIM),
                     name: v.name.clone(),
@@ -239,7 +239,7 @@ fn disk_list(app: &App, width: f32) -> Element<'_, Message> {
                 };
                 rows.push(match app.scans.iter().find(|job| job.scans_volume(v)) {
                     Some(job) => scanning_row(identity, job, text_width),
-                    None => volume_row(identity, i, v, text_width),
+                    None => volume_row(identity, v, text_width),
                 });
             }
         }
@@ -344,7 +344,7 @@ fn scan_button<'a>(label: &'a str, msg: Message) -> Element<'a, Message> {
     )
 }
 
-fn volume_row<'a>(identity: DiskIdentity<'a>, index: usize, v: &Volume, text_width: f32) -> Element<'a, Message> {
+fn volume_row<'a>(identity: DiskIdentity<'a>, v: &Volume, text_width: f32) -> Element<'a, Message> {
     let used_fraction = if v.total > 0 { v.used as f32 / v.total as f32 } else { 0.0 };
     let color = fullness_color(used_fraction);
     let meter = DiskMeter {
@@ -352,7 +352,7 @@ fn volume_row<'a>(identity: DiskIdentity<'a>, index: usize, v: &Volume, text_wid
         color,
         label: format!("{} free", format_size(v.available)),
         label_color: color,
-        controls: scan_button(SCAN_LABEL, Message::ScanVolume(index)),
+        controls: scan_button(SCAN_LABEL, Message::ScanVolume(v.mount.clone())),
         stop: None,
     };
     disk_row(identity, meter, text_width)
@@ -427,7 +427,7 @@ fn open_result_rows(app: &App, list_width: f32) -> Element<'_, Message> {
     let scrolls = app.parked_newest_first.len() > RESULT_ROWS_BEFORE_SCROLLING;
     let name_width = open_result_name_width(list_width, scrolls);
     let mut list = Column::new().spacing(RESULT_GAP);
-    for (i, b) in app.parked_newest_first.iter().enumerate() {
+    for b in &app.parked_newest_first {
         let t = &b.tree;
         let root = t.root();
         let meta = format!("{} files", thousands(t.node(root).items() as u64));
@@ -450,7 +450,7 @@ fn open_result_rows(app: &App, list_width: f32) -> Element<'_, Message> {
             .spacing(2)
             .width(RESULT_SIZE_COLUMN_WIDTH)
             .align_x(Alignment::End),
-            icon_button(icon::close(RESULT_CLOSE_ICON, theme::TEXT_DIM), "Close", Message::CloseParked(i)),
+            icon_button(icon::close(RESULT_CLOSE_ICON, theme::TEXT_DIM), "Close", Message::CloseParked(b.id)),
         ]
         .spacing(RESULT_ROW_SPACING)
         .height(Fill)
@@ -461,7 +461,7 @@ fn open_result_rows(app: &App, list_width: f32) -> Element<'_, Message> {
                 .width(Fill)
                 .height(RESULT_ROW_H)
                 .style(depth::raised_button(theme::PANEL, theme::TEXT, RESULT_CARD_RADIUS))
-                .on_press(Message::ResumeParked(i)),
+                .on_press(Message::ResumeParked(b.id)),
             RESULT_CARD_RADIUS,
             Elevation::Control,
         ));

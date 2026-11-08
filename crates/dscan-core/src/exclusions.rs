@@ -40,8 +40,12 @@ impl Exclusions {
         if !self.touches(id) {
             return ChildOrder::AsScanned(tree.children(id).map(move |c| (c, tree.size(c))));
         }
-        let mut kept: Vec<(NodeId, u64)> =
-            tree.children(id).map(|c| (c, self.size(tree, c))).filter(|&(_, size)| size > 0).collect();
+        let emptied_by_exclusion = |c: NodeId, size: u64| size == 0 && self.touches(c);
+        let mut kept: Vec<(NodeId, u64)> = tree
+            .children(id)
+            .map(|c| (c, self.size(tree, c)))
+            .filter(|&(c, size)| !emptied_by_exclusion(c, size))
+            .collect();
         kept.sort_by_key(|&(_, size)| Reverse(size));
         ChildOrder::Resorted(kept.into_iter())
     }
@@ -88,6 +92,16 @@ mod tests {
             ex.children_with_sizes(&t, t.root()).all(|(c, size)| size == ex.size(&t, c)),
             "listed sizes are the sizes after exclusion"
         );
+    }
+
+    #[test]
+    fn excluding_an_item_keeps_its_siblings_that_take_no_space() {
+        let t = tree(vec![D("a", vec![F("photo", 600), F("empty", 0), D("emptied", vec![F("inside", 50)])])]);
+        let (a, photo, inside) =
+            (descend(&t, &["a"]), descend(&t, &["a", "photo"]), descend(&t, &["a", "emptied", "inside"]));
+        let ex = Exclusions::new(&t, &[photo, inside]);
+        let names = ex.children(&t, a).map(|c| t.name(c).into_owned()).collect::<Vec<_>>();
+        assert_eq!(names, ["empty"], "only what the exclusion emptied is hidden, not what was empty to begin with");
     }
 
     #[test]

@@ -20,6 +20,7 @@ mod system {
     use std::borrow::Cow;
     use std::ffi::{OsStr, OsString};
     use std::io;
+    use std::os::windows::fs::FileTypeExt;
     use std::os::windows::process::CommandExt;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -113,6 +114,14 @@ mod system {
             run_explorer_whose_exit_code_is_1_even_when_it_worked(&launch::explorer_select_argument(
                 &path_without_verbatim_prefix(path),
             ))
+        }
+
+        fn remove_link(path: &Path) -> io::Result<()> {
+            if std::fs::symlink_metadata(path)?.file_type().is_symlink_dir() {
+                std::fs::remove_dir(path)
+            } else {
+                std::fs::remove_file(path)
+            }
         }
     }
 

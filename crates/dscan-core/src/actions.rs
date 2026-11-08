@@ -145,8 +145,14 @@ impl RemovalReport {
 }
 
 fn delete_permanently(path: &Path) -> std::io::Result<()> {
-    let is_real_directory = std::fs::symlink_metadata(path)?.is_dir();
-    if is_real_directory { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) }
+    let file_type = std::fs::symlink_metadata(path)?.file_type();
+    if file_type.is_symlink() {
+        Current::remove_link(path)
+    } else if file_type.is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    }
 }
 
 #[cfg(test)]
@@ -208,6 +214,31 @@ mod tests {
         assert_eq!(report.removed(), 1, "{:?}", report.failed);
         assert!(root.join("link").symlink_metadata().is_err(), "the symlink itself is deleted");
         assert!(root.join("target-folder/keep.txt").exists(), "a symlink's target is never followed");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn delete_permanently_removes_a_junction_but_never_its_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir(root.join("target-folder")).unwrap();
+        std::fs::write(root.join("target-folder/keep.txt"), b"keep").unwrap();
+        let junction_made_without_admin_rights = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(root.join("junction"))
+            .arg(root.join("target-folder"))
+            .output()
+            .unwrap();
+        assert!(junction_made_without_admin_rights.status.success(), "{junction_made_without_admin_rights:?}");
+        let t = scan_folder(root);
+        let junction = descend(&t, &["junction"]);
+        assert!(!t.node(junction).is_dir(), "a junction is listed as a link, not as a folder");
+
+        let report = RemovalPlan::new(&t, &[junction], Removal::DeletePermanently).carry_out();
+
+        assert_eq!(report.removed(), 1, "{:?}", report.failed);
+        assert!(root.join("junction").symlink_metadata().is_err(), "the junction itself is deleted");
+        assert!(root.join("target-folder/keep.txt").exists(), "a junction's target is never followed");
     }
 
     #[cfg(unix)]

@@ -18,6 +18,10 @@ impl Drop for Fd {
     }
 }
 
+pub(super) fn remove_link(path: &Path) -> io::Result<()> {
+    std::fs::remove_file(path)
+}
+
 pub(super) fn entry_with_unreadable_attributes(name: &[u8], device: DeviceId) -> DirEntry<'_> {
     DirEntry {
         name,
