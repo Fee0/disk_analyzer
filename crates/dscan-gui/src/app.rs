@@ -65,12 +65,13 @@ pub struct App {
     pub full_disk_access: bool,
     pub error: Option<String>,
     pub parked_newest_first: Vec<Browser>,
+    pub scans: Vec<ScanJob>,
     stepped_back_from_newest_parked: bool,
     next_job: u64,
 }
 
 pub enum Screen {
-    Start { scan: Option<ScanJob> },
+    Start,
     Browse(Box<Browser>),
 }
 
@@ -94,6 +95,10 @@ impl Drop for ScanJob {
 impl ScanJob {
     pub fn scans_volume(&self, volume: &Volume) -> bool {
         self.opts.whole_disk && self.opts.root == volume.mount
+    }
+
+    fn scans_same_place_as(&self, opts: &ScanOptions) -> bool {
+        self.opts.whole_disk == opts.whole_disk && self.opts.root == opts.root
     }
 }
 
@@ -184,7 +189,8 @@ pub enum Message {
     RefreshVolumes,
     ScanProgressTick,
     AnimationFrame(Instant),
-    TogglePause,
+    TogglePause(u64),
+    StopScan(u64),
     ScanFinished { job_id: u64, crash: Option<PanicMessage> },
     Hover(Option<Segment>),
     Press(Segment),
@@ -232,11 +238,12 @@ pub enum Message {
 impl App {
     pub fn new(initial: Option<PathBuf>) -> (Self, Task<Message>) {
         let mut app = App {
-            screen: Screen::Start { scan: None },
+            screen: Screen::Start,
             volumes: None,
             full_disk_access: true,
             error: None,
             parked_newest_first: Vec::new(),
+            scans: Vec::new(),
             stepped_back_from_newest_parked: false,
             next_job: 1,
         };
@@ -257,19 +264,22 @@ impl App {
 
     pub fn title(&self) -> String {
         match &self.screen {
-            Screen::Start { scan: Some(j) } => format!("Scanning {} — Disk Analyzer", j.opts.display_name()),
-            Screen::Start { scan: None } => "Disk Analyzer".into(),
+            Screen::Start if self.scans.is_empty() => "Disk Analyzer".into(),
+            Screen::Start => {
+                let names: Vec<String> = self.scans.iter().map(|job| job.opts.display_name()).collect();
+                format!("Scanning {} — Disk Analyzer", names.join(", "))
+            }
             Screen::Browse(b) => format!("{} — Disk Analyzer", b.tree.name(b.focus)),
         }
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
         match &self.screen {
-            Screen::Start { scan: Some(job) } if !job.cancel.is_paused() => Subscription::batch([
+            Screen::Start if self.scans.iter().any(|job| !job.cancel.is_paused()) => Subscription::batch([
                 event::listen_with(global_event),
                 iced::time::every(SCAN_PROGRESS_REFRESH).map(|_| Message::ScanProgressTick),
             ]),
-            Screen::Start { .. } => event::listen_with(global_event),
+            Screen::Start => event::listen_with(global_event),
             Screen::Browse(b) => {
                 let mut subscriptions = vec![event::listen_with(global_event)];
                 if b.drag.is_some() {
@@ -286,18 +296,8 @@ impl App {
         }
     }
 
-    pub fn scan(&self) -> Option<&ScanJob> {
-        match &self.screen {
-            Screen::Start { scan } => scan.as_ref(),
-            Screen::Browse(_) => None,
-        }
-    }
-
-    fn scan_slot(&mut self) -> Option<&mut Option<ScanJob>> {
-        match &mut self.screen {
-            Screen::Start { scan } => Some(scan),
-            Screen::Browse(_) => None,
-        }
+    fn scan_job(&self, id: u64) -> Option<&ScanJob> {
+        self.scans.iter().find(|job| job.id == id)
     }
 
     fn start_scan(&mut self, opts: ScanOptions) -> Task<Message> {
@@ -312,8 +312,9 @@ impl App {
         };
         self.error = None;
         self.stepped_back_from_newest_parked = false;
-        let job = ScanJob { id, opts, progress, cancel, snapshot: ProgressSnapshot::default(), result_slot };
-        if let Screen::Browse(b) = std::mem::replace(&mut self.screen, Screen::Start { scan: Some(job) }) {
+        self.scans.retain(|job| !job.scans_same_place_as(&opts));
+        self.scans.push(ScanJob { id, opts, progress, cancel, snapshot: ProgressSnapshot::default(), result_slot });
+        if let Screen::Browse(b) = std::mem::replace(&mut self.screen, Screen::Start) {
             drop_off_thread(vec![*b]);
         }
         Task::perform(work, move |r| Message::ScanFinished { job_id: id, crash: r.err() })
@@ -350,37 +351,35 @@ impl App {
             }
             Message::RefreshVolumes => return Self::load_volumes(),
             Message::ScanProgressTick => {
-                if let Some(Some(job)) = self.scan_slot() {
+                for job in &mut self.scans {
                     job.snapshot = job.progress.snapshot();
                 }
             }
-            Message::TogglePause => {
-                if let Some(job) = self.scan() {
+            Message::TogglePause(id) => {
+                if let Some(job) = self.scan_job(id) {
                     job.cancel.set_paused(!job.cancel.is_paused());
                 }
             }
+            Message::StopScan(id) => self.scans.retain(|job| job.id != id),
             Message::ScanFinished { job_id, crash } => {
-                let Some(job) = self.scan_slot().and_then(|scan| scan.take_if(|job| job.id == job_id)) else {
+                let Some(i) = self.scans.iter().position(|job| job.id == job_id) else {
                     return Task::none();
                 };
+                let job = self.scans.remove(i);
                 let result = job.result_slot.lock().take();
-                let opts = job.opts.clone();
-                match result {
-                    Some(Ok(tree)) => {
-                        self.drop_parked_results_superseded_by(&tree);
-                        self.screen = Screen::Browse(Box::new(Browser::new(tree, opts).with_opening_reveal()));
-                    }
-                    Some(Err(ScanError::Cancelled)) => {}
-                    Some(Err(e)) => self.error = Some(e.to_string()),
+                return match result {
+                    Some(Ok(tree)) => self.open_or_park_scan_result(tree, job.opts.clone()),
+                    Some(Err(ScanError::Cancelled)) => Task::none(),
+                    Some(Err(e)) => self.report_scan_failure(e.to_string()),
                     None => {
                         let why = crash.unwrap_or_else(|| "no result".into());
-                        self.error = Some(format!("The scan failed unexpectedly: {why}"));
+                        self.report_scan_failure(format!("The scan failed unexpectedly: {why}"))
                     }
-                }
+                };
             }
             Message::GoHome => return self.go_home(),
             Message::Back if matches!(&self.screen, Screen::Browse(b) if !b.can_back()) => return self.go_home(),
-            Message::Forward if matches!(self.screen, Screen::Start { scan: None }) => {
+            Message::Forward if matches!(self.screen, Screen::Start) => {
                 if self.stepped_back_from_newest_parked {
                     return self.resume_parked(0);
                 }
@@ -416,12 +415,12 @@ impl App {
     fn update_browser(&mut self, message: Message) -> Task<Message> {
         match &mut self.screen {
             Screen::Browse(b) => b.update(message),
-            Screen::Start { .. } => Task::none(),
+            Screen::Start => Task::none(),
         }
     }
 
     fn go_home(&mut self) -> Task<Message> {
-        let Screen::Browse(mut b) = std::mem::replace(&mut self.screen, Screen::Start { scan: None }) else {
+        let Screen::Browse(mut b) = std::mem::replace(&mut self.screen, Screen::Start) else {
             return Task::none();
         };
         b.drag = None;
@@ -432,7 +431,7 @@ impl App {
     }
 
     fn resume_parked(&mut self, i: usize) -> Task<Message> {
-        if !matches!(self.screen, Screen::Start { .. }) || i >= self.parked_newest_first.len() {
+        if !matches!(self.screen, Screen::Start) || i >= self.parked_newest_first.len() {
             return Task::none();
         }
         let mut resumed = Box::new(self.parked_newest_first.remove(i));
@@ -440,6 +439,33 @@ impl App {
         self.screen = Screen::Browse(resumed);
         self.stepped_back_from_newest_parked = false;
         catch_up
+    }
+
+    fn open_or_park_scan_result(&mut self, tree: Tree, opts: ScanOptions) -> Task<Message> {
+        self.drop_parked_results_superseded_by(&tree);
+        let finished = format!("Finished scanning {}. Open it from the start page.", opts.display_name());
+        let browser = Browser::new(tree, opts);
+        let notice = match &mut self.screen {
+            Screen::Start if self.scans.is_empty() => {
+                self.screen = Screen::Browse(Box::new(browser.with_opening_reveal()));
+                return Task::none();
+            }
+            Screen::Start => Task::none(),
+            Screen::Browse(b) => b.notify(NoticeKind::Done, finished),
+        };
+        self.parked_newest_first.insert(0, browser);
+        self.stepped_back_from_newest_parked = false;
+        notice
+    }
+
+    fn report_scan_failure(&mut self, why: String) -> Task<Message> {
+        match &mut self.screen {
+            Screen::Browse(b) => b.notify(NoticeKind::Error, why),
+            Screen::Start => {
+                self.error = Some(why);
+                Task::none()
+            }
+        }
     }
 
     fn drop_parked_results_superseded_by(&mut self, fresh: &Tree) {
@@ -781,6 +807,13 @@ impl Browser {
             ),
             Err(Refusal::NotActionable | Refusal::AlreadyCoveredByCollectedFolder) => {}
         }
+    }
+
+    fn notify(&mut self, kind: NoticeKind, text: String) -> Task<Message> {
+        self.updating(|b| {
+            b.show_notice(kind, text);
+            Task::none()
+        })
     }
 
     fn show_notice(&mut self, kind: NoticeKind, text: String) {

@@ -25,7 +25,7 @@ pub const MIN_WINDOW_SIZE: iced::Size = iced::Size::new(860.0, 560.0);
 
 pub fn view(app: &App) -> Element<'_, Message> {
     let content = match &app.screen {
-        Screen::Start { .. } => start(app),
+        Screen::Start => start(app),
         Screen::Browse(b) => browse(b),
     };
     container(content).width(Fill).height(Fill).style(|_| container::background(theme::BG)).into()
@@ -165,6 +165,9 @@ const SCAN_FOLDER_LABEL: &str = "Scan Folder…";
 const SCAN_LABEL: &str = "Scan";
 const PAUSE_LABEL: &str = "Pause";
 const RESUME_LABEL: &str = "Resume";
+const STOP_SCAN_TOOLTIP: &str = "Stop scan";
+const STOP_SCAN_ICON: f32 = 12.0;
+const STOP_SCAN_SLOT_WIDTH: f32 = STOP_SCAN_ICON + 2.0 * ICON_BUTTON_PADDING;
 
 fn start(app: &App) -> Element<'_, Message> {
     responsive(move |viewport| {
@@ -217,9 +220,7 @@ fn start_content(app: &App, width: f32) -> Column<'_, Message> {
 }
 
 fn disk_list(app: &App, width: f32) -> Element<'_, Message> {
-    let scan = app.scan();
     let text_width = disk_text_width(width);
-    let mut scan_shown = false;
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     match &app.volumes {
         None => rows.push(
@@ -236,17 +237,15 @@ fn disk_list(app: &App, width: f32) -> Element<'_, Message> {
                     name: v.name.clone(),
                     details: format!("{} · {}", format_size(v.total), volume_details(v)),
                 };
-                rows.push(match scan.filter(|job| job.scans_volume(v)) {
-                    Some(job) => {
-                        scan_shown = true;
-                        scanning_row(identity, job, text_width)
-                    }
+                rows.push(match app.scans.iter().find(|job| job.scans_volume(v)) {
+                    Some(job) => scanning_row(identity, job, text_width),
                     None => volume_row(identity, i, v, text_width),
                 });
             }
         }
     }
-    if let Some(job) = scan.filter(|_| !scan_shown) {
+    let shown_on_a_disk_row = |job: &ScanJob| app.volumes.iter().flatten().any(|v| job.scans_volume(v));
+    for job in app.scans.iter().filter(|job| !shown_on_a_disk_row(job)) {
         let identity = DiskIdentity {
             icon: icon::scan_root(job.opts.whole_disk, DISK_ICON_SIZE, theme::TEXT_DIM),
             name: job.opts.display_name(),
@@ -270,9 +269,10 @@ fn disk_text_width(list_width: f32) -> f32 {
         - 2.0 * DISK_LIST_PADDING
         - 2.0 * DISK_ROW_PADDING_X
         - DISK_ICON_SIZE
-        - 3.0 * DISK_ROW_SPACING
+        - 4.0 * DISK_ROW_SPACING
         - METER_WIDTH
         - SCAN_BUTTON_WIDTH
+        - STOP_SCAN_SLOT_WIDTH
 }
 
 struct DiskIdentity<'a> {
@@ -287,6 +287,7 @@ struct DiskMeter<'a> {
     label: String,
     label_color: Color,
     controls: Element<'a, Message>,
+    stop: Option<Message>,
 }
 
 fn disk_row<'a>(identity: DiskIdentity<'a>, meter: DiskMeter<'a>, text_width: f32) -> Element<'a, Message> {
@@ -312,12 +313,17 @@ fn disk_row<'a>(identity: DiskIdentity<'a>, meter: DiskMeter<'a>, text_width: f3
             .width(METER_WIDTH)
             .align_x(Alignment::End),
         container(meter.controls).width(SCAN_BUTTON_WIDTH).align_x(Alignment::End),
+        container(meter.stop.map(stop_scan_button)).width(STOP_SCAN_SLOT_WIDTH),
     ]
     .spacing(DISK_ROW_SPACING)
     .align_y(Alignment::Center)
     .padding([0.0, DISK_ROW_PADDING_X])
     .height(DISK_ROW_HEIGHT)
     .into()
+}
+
+fn stop_scan_button<'a>(stop: Message) -> Element<'a, Message> {
+    icon_button(icon::close(STOP_SCAN_ICON, theme::TEXT_DIM), STOP_SCAN_TOOLTIP, stop)
 }
 
 fn fullness_color(used_fraction: f32) -> Color {
@@ -347,6 +353,7 @@ fn volume_row<'a>(identity: DiskIdentity<'a>, index: usize, v: &Volume, text_wid
         label: format!("{} free", format_size(v.available)),
         label_color: color,
         controls: scan_button(SCAN_LABEL, Message::ScanVolume(index)),
+        stop: None,
     };
     disk_row(identity, meter, text_width)
 }
@@ -364,8 +371,9 @@ fn scanning_row<'a>(identity: DiskIdentity<'a>, job: &ScanJob, text_width: f32) 
     } else {
         (theme::ACCENT, format!("{} · {} files", format_size(s.bytes), thousands(s.files)), PAUSE_LABEL)
     };
-    let controls = scan_button(pause_or_resume, Message::TogglePause);
-    let meter = DiskMeter { fraction, color, label, label_color: theme::TEXT, controls };
+    let controls = scan_button(pause_or_resume, Message::TogglePause(job.id));
+    let meter =
+        DiskMeter { fraction, color, label, label_color: theme::TEXT, controls, stop: Some(Message::StopScan(job.id)) };
     disk_row(identity, meter, text_width)
 }
 

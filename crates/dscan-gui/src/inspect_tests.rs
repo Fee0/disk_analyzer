@@ -354,10 +354,10 @@ fn the_start_page_is_one_step_back_from_the_results_root() -> Result<(), Error> 
     for m in msgs {
         let _ = app.update(m);
     }
-    assert!(matches!(app.screen, Screen::Start { scan: None }), "back from the root shows the start page");
+    assert!(matches!(app.screen, Screen::Start), "back from the root shows the start page");
     assert_eq!(app.parked_newest_first.len(), 1, "the results stay open");
     let _ = app.update(Message::Back);
-    assert!(matches!(app.screen, Screen::Start { scan: None }), "nothing comes before the start page");
+    assert!(matches!(app.screen, Screen::Start), "nothing comes before the start page");
 
     let _ = app.update(Message::Forward);
     let b = browser(&app);
@@ -368,14 +368,14 @@ fn the_start_page_is_one_step_back_from_the_results_root() -> Result<(), Error> 
 
     key(&mut app, Key::Character("[".into()), true);
     key(&mut app, Key::Character("[".into()), true);
-    assert!(matches!(app.screen, Screen::Start { scan: None }), "Cmd-[ steps back to the start page too");
+    assert!(matches!(app.screen, Screen::Start), "Cmd-[ steps back to the start page too");
     key(&mut app, Key::Character("]".into()), true);
     assert_eq!(browser(&app).focus, root, "and Cmd-] steps forward into the results again");
 
     let _ = app.update(Message::GoHome);
     let _ = app.update(Message::CloseParked(0));
     let _ = app.update(Message::Forward);
-    assert!(matches!(app.screen, Screen::Start { scan: None }), "closed results can't be stepped into");
+    assert!(matches!(app.screen, Screen::Start), "closed results can't be stepped into");
     Ok(())
 }
 
@@ -403,12 +403,12 @@ fn f5_or_cmd_r_scans_the_shown_results_again() {
         let mut app = browser_app(dir.path());
         let shown_root = browser(&app).opts.root.clone();
         key(&mut app, shortcut.clone(), cmd);
-        let job = app.scan().unwrap_or_else(|| panic!("{shortcut:?} starts a scan"));
+        let job = app.scans.last().unwrap_or_else(|| panic!("{shortcut:?} starts a scan"));
         assert_eq!(job.opts.root, shown_root, "{shortcut:?} rescans what was shown");
     }
     let mut app = browser_app(dir.path());
     key(&mut app, Key::Character("r".into()), false);
-    assert!(app.scan().is_none(), "a plain R is not a rescan");
+    assert!(app.scans.is_empty(), "a plain R is not a rescan");
 }
 
 #[test]
@@ -468,10 +468,7 @@ fn disk(name: &str, mount: &Path, used_share: f64) -> dscan_core::Volume {
 }
 
 fn scan_job(app: &mut App) -> &mut crate::app::ScanJob {
-    match &mut app.screen {
-        Screen::Start { scan: Some(job) } => job,
-        _ => panic!("a scan is running"),
-    }
+    app.scans.last_mut().expect("a scan is running")
 }
 
 fn count_of(texts: &[String], label: &str) -> usize {
@@ -498,7 +495,7 @@ fn scanning_a_disk_turns_its_scan_button_into_pause_and_resume() -> Result<(), E
     }
 
     let _scan_task_never_run = app.update(Message::ScanVolume(0));
-    assert!(matches!(app.screen, Screen::Start { scan: Some(_) }), "the scan runs inside the disk list");
+    assert!(matches!(app.screen, Screen::Start) && app.scans.len() == 1, "the scan runs inside the disk list");
     assert_eq!(app.title(), "Scanning Macintosh HD — Disk Analyzer");
     scan_job(&mut app).snapshot = MID_SCAN;
     let progress_label = format!("{} · 673,862 files", dscan_core::format_size(MID_SCAN.bytes));
@@ -509,12 +506,12 @@ fn scanning_a_disk_turns_its_scan_button_into_pause_and_resume() -> Result<(), E
         shoot(&mut ui, &format!("scanning-{percent}"))?;
     }
     scan_job(&mut app).snapshot = MID_SCAN;
+    let job_id = scan_job(&mut app).id;
     let mut ui = sim(&app);
     let texts = texts_on_screen(&mut ui);
     assert!(texts.contains(&progress_label), "the scanned size and file count replace the free space: {texts:?}");
     assert_eq!(count_of(&texts, "Pause"), 1, "the scanned disk's Scan button became Pause");
     assert_eq!(count_of(&texts, "Scan"), 2, "the other disks keep their scan button");
-    assert_eq!(count_of(&texts, "Stop"), 0, "a scan is replaced by starting another, not stopped by a button");
     assert!(texts.contains(&"Backup".to_string()) && texts.contains(&"Archive".to_string()), "the list stays");
     let scan_button = bounds_of_text(&mut ui, "Scan");
     let pause_button = bounds_of_text(&mut ui, "Pause");
@@ -523,11 +520,16 @@ fn scanning_a_disk_turns_its_scan_button_into_pause_and_resume() -> Result<(), E
         (scan_button.x + scan_button.width, scan_button.width),
         "Pause takes the Scan button's place and size"
     );
+    let stop = icon_button_right_of(&mut ui, pause_button).expect("a scanning row has a stop button beside Pause");
+    ui_inspect::click_at(&mut ui, (stop.center_x(), stop.center_y()));
     ui.click("Pause")?;
     let msgs: Vec<Message> = ui.into_messages().collect();
-    assert!(matches!(msgs[..], [Message::TogglePause]), "{msgs:?}");
+    assert!(
+        matches!(msgs[..], [Message::StopScan(stop), Message::TogglePause(pause)] if stop == job_id && pause == job_id),
+        "{msgs:?}"
+    );
 
-    let _ = app.update(Message::TogglePause);
+    let _ = app.update(Message::TogglePause(job_id));
     assert!(scan_job(&mut app).cancel.is_paused());
     {
         let mut ui = sim(&app);
@@ -538,15 +540,29 @@ fn scanning_a_disk_turns_its_scan_button_into_pause_and_resume() -> Result<(), E
         shoot(&mut ui, "paused")?;
         ui.click("Resume")?;
         let msgs: Vec<Message> = ui.into_messages().collect();
-        assert!(matches!(msgs[..], [Message::TogglePause]), "{msgs:?}");
+        assert!(matches!(msgs[..], [Message::TogglePause(id)] if id == job_id), "{msgs:?}");
     }
-    let _ = app.update(Message::TogglePause);
+    let _ = app.update(Message::TogglePause(job_id));
     assert!(!scan_job(&mut app).cancel.is_paused());
+
+    let cancel = scan_job(&mut app).cancel.clone();
+    let _ = app.update(Message::StopScan(job_id));
+    assert!(cancel.is_cancelled() && app.scans.is_empty(), "stopping a scan cancels it and frees its row");
+    assert_eq!(count_of(&texts_on_screen(&mut sim(&app)), "Scan"), 3, "the disk offers a scan again");
     Ok(())
 }
 
+fn icon_button_right_of(ui: &mut Simulator<'_, Message>, button: iced::Rectangle) -> Option<iced::Rectangle> {
+    ui_inspect::nodes(ui)
+        .into_iter()
+        .map(|n| n.bounds)
+        .filter(|b| b.width == b.height && b.x >= button.x + button.width)
+        .filter(|b| (b.center_y() - button.center_y()).abs() < 1.0)
+        .min_by(|a, b| a.x.total_cmp(&b.x))
+}
+
 #[test]
-fn a_folder_scan_gets_its_own_row_and_another_scan_replaces_it() -> Result<(), Error> {
+fn a_folder_scan_gets_its_own_row_and_runs_beside_a_disk_scan() -> Result<(), Error> {
     let mount = tempfile::tempdir().unwrap();
     let folder = tempfile::tempdir().unwrap();
     fixture(folder.path());
@@ -580,17 +596,77 @@ fn a_folder_scan_gets_its_own_row_and_another_scan_replaces_it() -> Result<(), E
 
     let (folder_job, folder_cancel) = (scan_job(&mut app).id, scan_job(&mut app).cancel.clone());
     let _scan_task_never_run = app.update(Message::ScanVolume(0));
-    assert!(folder_cancel.is_cancelled(), "the replaced scan stops");
-    let _ = app.update(Message::ScanFinished { job_id: folder_job, crash: None });
-    let disk_job = app.scan().expect("the disk scan keeps running");
-    assert_ne!(disk_job.id, folder_job);
-    assert!(disk_job.opts.whole_disk);
+    assert!(!folder_cancel.is_cancelled(), "starting another scan leaves the folder scan running");
+    assert_eq!(app.scans.len(), 2);
+    assert_eq!(app.title(), format!("Scanning {folder_name}, Macintosh HD — Disk Analyzer"));
+    scan_job(&mut app).snapshot = MID_SCAN;
+    {
+        let mut ui = sim(&app);
+        shoot(&mut ui, "scanning-two")?;
+        let texts = texts_on_screen(&mut ui);
+        assert_eq!((count_of(&texts, "Pause"), count_of(&texts, "Scan")), (2, 0), "{texts:?}");
+    }
 
-    let disk_cancel = disk_job.cancel.clone();
+    let disk_cancel = scan_job(&mut app).cancel.clone();
     let _ = app.update(Message::ResumeParked(0));
-    assert!(matches!(app.screen, Screen::Browse(_)), "opening a result works while a scan runs");
-    assert!(disk_cancel.is_cancelled(), "opening a result stops the running scan");
+    assert!(matches!(app.screen, Screen::Browse(_)), "opening a result works while scans run");
+    assert!(!disk_cancel.is_cancelled() && !folder_cancel.is_cancelled(), "scans keep running behind a result");
+
+    finish_scan_of(&mut app, folder_job, folder.path());
+    assert_eq!(app.scans.len(), 1, "the disk scan is still running");
+    assert!(
+        app.parked_newest_first.first().is_some_and(|b| b.opts.root == folder.path()),
+        "a scan finishing behind a shown result waits under open results"
+    );
+    let notice = browser(&app).notice.as_ref().expect("the finished scan is announced");
+    assert_eq!(notice.kind, crate::app::NoticeKind::Done);
+    assert!(notice.text.contains(&folder_name), "{notice:?}");
     Ok(())
+}
+
+#[test]
+fn the_last_running_scan_opens_its_result_and_earlier_ones_wait_under_open_results() {
+    let folders = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
+    let (mut app, _) = App::new(None);
+    let ids: Vec<u64> = folders
+        .iter()
+        .map(|f| {
+            fixture(f.path());
+            let _scan_task_never_run = app.update(Message::FolderPicked(Some(f.path().to_path_buf())));
+            scan_job(&mut app).id
+        })
+        .collect();
+
+    finish_scan_of(&mut app, ids[1], folders[1].path());
+    assert!(matches!(app.screen, Screen::Start), "the start page stays while another scan runs");
+    assert_eq!(app.parked_newest_first.len(), 1);
+    assert_eq!(app.parked_newest_first[0].opts.root, folders[1].path());
+
+    finish_scan_of(&mut app, ids[0], folders[0].path());
+    assert!(app.scans.is_empty());
+    assert!(
+        matches!(&app.screen, Screen::Browse(b) if b.opts.root == folders[0].path()),
+        "the last scan to finish opens like a lone scan"
+    );
+    assert_eq!(app.parked_newest_first.len(), 1);
+}
+
+#[test]
+fn scanning_the_same_place_again_replaces_its_running_scan() {
+    let folder = tempfile::tempdir().unwrap();
+    let (mut app, _) = App::new(None);
+    let _scan_task_never_run = app.update(Message::FolderPicked(Some(folder.path().to_path_buf())));
+    let first = scan_job(&mut app).cancel.clone();
+    let _scan_task_never_run = app.update(Message::FolderPicked(Some(folder.path().to_path_buf())));
+    assert!(first.is_cancelled(), "the earlier scan of the same folder stops");
+    assert_eq!(app.scans.len(), 1);
+}
+
+fn finish_scan_of(app: &mut App, job_id: u64, folder: &Path) {
+    let job = app.scans.iter().find(|job| job.id == job_id).expect("the scan is running");
+    *job.result_slot.lock() =
+        Some(dscan_core::scan(&ScanOptions::folder(folder), &Progress::default(), &CancelToken::default()));
+    let _ = app.update(Message::ScanFinished { job_id, crash: None });
 }
 
 #[test]
@@ -652,7 +728,7 @@ fn inspect_open_results() -> Result<(), Error> {
     );
 
     let _ = app.update(Message::FolderPicked(Some(dirs[0].path().to_path_buf())));
-    let job = app.scan().expect("scanning");
+    let job = app.scans.last().expect("scanning");
     let job_id = job.id;
     let fresh_scan =
         dscan_core::scan(&ScanOptions::folder(dirs[0].path()), &Progress::default(), &CancelToken::default());
