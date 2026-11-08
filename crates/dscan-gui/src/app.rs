@@ -23,6 +23,7 @@ pub const HOLD_TO_DELETE: Duration = Duration::from_secs(3);
 const NOTICE_LIFETIME: Duration = Duration::from_secs(4);
 const HOLD_PROGRESS_REFRESH: Duration = Duration::from_millis(33);
 const SCAN_PROGRESS_REFRESH: Duration = Duration::from_millis(100);
+const SEARCH_TYPING_PAUSE: Duration = Duration::from_millis(150);
 
 pub type PanicMessage = String;
 
@@ -155,6 +156,13 @@ pub struct Notice {
     pub text: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SearchStatus {
+    Shown,
+    Due,
+    Running,
+}
+
 pub struct Browser {
     pub id: BrowserId,
     pub tree: Arc<Tree>,
@@ -170,6 +178,7 @@ pub struct Browser {
     pub selected: Option<NodeId>,
     pub search_text: String,
     search_gen: u64,
+    search_status: SearchStatus,
     search_cancel: CancelToken,
     pub search: Option<Arc<SearchResult>>,
     pub list: ListView,
@@ -210,8 +219,8 @@ pub enum Message {
     Back,
     Forward,
     SearchChanged(String),
-    SearchFire { browser: BrowserId, generation: u64 },
-    SearchDone { browser: BrowserId, generation: u64, result: Option<Arc<SearchResult>> },
+    SearchFire { generation: u64 },
+    SearchDone { generation: u64, result: Option<Arc<SearchResult>> },
     ClearSearch,
     FocusSearch,
     Key(Key, keyboard::Modifiers),
@@ -241,6 +250,7 @@ pub enum Message {
     Preview,
     Reveal,
     DesktopActionFinished { failure: Option<String> },
+    ForBrowser(BrowserId, Box<Message>),
 }
 
 impl App {
@@ -402,17 +412,7 @@ impl App {
                     return self.resume_parked(i);
                 }
             }
-            message @ (Message::SearchFire { browser, .. } | Message::SearchDone { browser, .. }) => {
-                if let Some(b) = self.browser_mut(browser) {
-                    return b.update(message);
-                }
-            }
-            Message::RemovalDone { id, outcome } => {
-                match self.parked_newest_first.iter_mut().find(|b| b.started_removal(id)) {
-                    Some(parked) => parked.removal_left_the_disk(outcome),
-                    None => return self.update_browser(Message::RemovalDone { id, outcome }),
-                }
-            }
+            Message::ForBrowser(id, message) => return self.update_browser_by_id(id, *message),
             Message::CloseParked(id) => {
                 if let Some(i) = self.parked_position(id) {
                     drop_off_thread(vec![self.parked_newest_first.remove(i)]);
@@ -434,12 +434,16 @@ impl App {
         self.parked_newest_first.iter().position(|b| b.id == id)
     }
 
-    fn browser_mut(&mut self, id: BrowserId) -> Option<&mut Browser> {
-        let on_screen = match &mut self.screen {
-            Screen::Browse(b) => Some(&mut **b),
-            Screen::Start => None,
-        };
-        on_screen.into_iter().chain(self.parked_newest_first.iter_mut()).find(|b| b.id == id)
+    fn update_browser_by_id(&mut self, id: BrowserId, message: Message) -> Task<Message> {
+        if let Screen::Browse(b) = &mut self.screen
+            && b.id == id
+        {
+            return b.update(message);
+        }
+        if let Some(parked) = self.parked_newest_first.iter_mut().find(|b| b.id == id) {
+            parked.note_while_parked(message);
+        }
+        Task::none()
     }
 
     fn update_browser(&mut self, message: Message) -> Task<Message> {
@@ -453,7 +457,7 @@ impl App {
         let Screen::Browse(mut b) = std::mem::replace(&mut self.screen, Screen::Start) else {
             return Task::none();
         };
-        b.let_go_of_the_pointer();
+        b.park();
         self.parked_newest_first.insert(0, *b);
         self.stepped_back_from_newest_parked = true;
         self.error = None;
@@ -555,6 +559,12 @@ fn shortcut_message(key: Key<&str>, cmd: bool) -> Option<Message> {
     })
 }
 
+impl Drop for Browser {
+    fn drop(&mut self) {
+        self.search_cancel.cancel();
+    }
+}
+
 impl Browser {
     pub fn new(tree: Tree, opts: ScanOptions) -> Self {
         let root = tree.root();
@@ -573,6 +583,7 @@ impl Browser {
             selected: None,
             search_text: String::new(),
             search_gen: 0,
+            search_status: SearchStatus::Shown,
             search_cancel: CancelToken::default(),
             search: None,
             list: ListView::default(),
@@ -817,12 +828,14 @@ impl Browser {
         self.search_cancel = CancelToken::default();
         if !self.has_query() {
             self.search = None;
+            self.search_status = SearchStatus::Shown;
             return Task::none();
         }
+        self.search_status = SearchStatus::Running;
         let (tree, query, cancel) = (Arc::clone(&self.tree), self.search_text.clone(), self.search_cancel.clone());
-        let (browser, generation) = (self.id, self.search_gen);
+        let generation = self.search_gen;
         Task::perform(off_thread(move || dscan_core::search(&tree, &query, &cancel).map(Arc::new)), move |r| {
-            Message::SearchDone { browser, generation, result: r.ok().flatten() }
+            Message::SearchDone { generation, result: r.ok().flatten() }
         })
     }
 
@@ -987,12 +1000,31 @@ impl Browser {
         self.highlight_cache.clear();
     }
 
+    fn park(&mut self) {
+        self.let_go_of_the_pointer();
+        if self.search_status == SearchStatus::Running {
+            self.search_cancel.cancel();
+            self.search_gen += 1;
+            self.search_status = SearchStatus::Due;
+        }
+    }
+
+    fn note_while_parked(&mut self, message: Message) {
+        match message {
+            Message::RemovalDone { id, outcome } if self.started_removal(id) => self.removal_left_the_disk(outcome),
+            Message::DesktopActionFinished { failure: Some(why) } => self.show_notice(NoticeKind::Error, why),
+            _ => {}
+        }
+    }
+
     fn resume(&mut self) -> Task<Message> {
         self.updating(|b| {
             if b.notice.is_some() {
                 b.notice_expires_at = Some(Instant::now() + NOTICE_LIFETIME);
             }
-            b.apply_finished_removal()
+            let removal = b.apply_finished_removal();
+            let search = if b.search_status == SearchStatus::Due { b.run_search() } else { Task::none() };
+            Task::batch([removal, search])
         })
     }
 
@@ -1004,12 +1036,14 @@ impl Browser {
             self.highlight_cache.clear();
         }
         self.sync_list();
-        match self.notice_expires_at {
+        let task = match self.notice_expires_at {
             Some(deadline) if Some(deadline) != deadline_before => {
                 Task::batch([task, Self::check_the_notice_again_once_its_lifetime_is_up()])
             }
             _ => task,
-        }
+        };
+        let id = self.id;
+        task.map(move |message| Message::ForBrowser(id, Box::new(message)))
     }
 
     fn handle(&mut self, message: Message) -> Task<Message> {
@@ -1037,15 +1071,17 @@ impl Browser {
             Message::SearchChanged(s) => {
                 self.search_text = s;
                 self.search_gen += 1;
-                let (browser, generation) = (self.id, self.search_gen);
-                return Task::perform(async { tokio::time::sleep(Duration::from_millis(150)).await }, move |_| {
-                    Message::SearchFire { browser, generation }
+                self.search_status = SearchStatus::Due;
+                let generation = self.search_gen;
+                return Task::perform(async { tokio::time::sleep(SEARCH_TYPING_PAUSE).await }, move |_| {
+                    Message::SearchFire { generation }
                 });
             }
-            Message::SearchFire { generation, .. } if generation == self.search_gen => return self.run_search(),
-            Message::SearchDone { generation, result, .. } => {
+            Message::SearchFire { generation } if generation == self.search_gen => return self.run_search(),
+            Message::SearchDone { generation, result } => {
                 if generation == self.search_gen {
                     self.search = result;
+                    self.search_status = SearchStatus::Shown;
                     self.relayout();
                 }
                 return self.apply_finished_removal();
@@ -1177,11 +1213,31 @@ pub(crate) mod test_util {
     pub fn descend(tree: &Tree, names: &[&str]) -> NodeId {
         names.iter().fold(tree.root(), |at, name| tree.children(at).find(|&c| tree.name(c) == *name).expect(name))
     }
+
+    pub fn app_showing(b: Browser) -> App {
+        let (mut app, _) = App::new(None);
+        app.screen = Screen::Browse(Box::new(b));
+        app
+    }
+
+    pub fn on_screen(app: &App) -> &Browser {
+        match &app.screen {
+            Screen::Browse(b) => b,
+            Screen::Start => panic!("a result is on screen"),
+        }
+    }
+
+    pub fn on_screen_mut(app: &mut App) -> &mut Browser {
+        match &mut app.screen {
+            Screen::Browse(b) => b,
+            Screen::Start => panic!("a result is on screen"),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::test_util::{descend, scanned};
+    use super::test_util::{app_showing, descend, on_screen, on_screen_mut, scanned};
     use super::*;
 
     fn browser(dir: &std::path::Path) -> Browser {
@@ -1302,9 +1358,13 @@ mod tests {
         assert!(dir.path().join("Music").exists(), "later additions are not removed");
         assert!(b.tree.is_live(movies), "the tree changes only once the search lets go of it");
         drop(running_search);
-        let _ = b.update(Message::SearchDone { browser: b.id, generation: b.search_gen, result: None });
+        let _ = b.update(Message::SearchDone { generation: b.search_gen, result: None });
         assert!(!b.tree.is_live(movies));
         assert_eq!(b.collector.items(), &[music]);
+    }
+
+    fn to(b: BrowserId, message: Message) -> Message {
+        Message::ForBrowser(b, Box::new(message))
     }
 
     #[test]
@@ -1314,33 +1374,23 @@ mod tests {
         let movies = descend(&b.tree, &["Movies"]);
         b.collector.add(&b.tree, movies).unwrap();
         let (id, plan) = b.start_removal(Removal::DeletePermanently).unwrap();
-        let (mut app, _) = App::new(None);
-        app.screen = Screen::Browse(Box::new(b));
+        let b_id = b.id;
+        let mut app = app_showing(b);
 
         let _ = app.update(Message::GoHome);
-        let _ = app.update(Message::RemovalDone { id, outcome: Ok(Arc::new(plan.carry_out())) });
-        let _ = app.update(Message::ResumeParked(app.parked_newest_first[0].id));
+        let _ = app.update(to(b_id, Message::RemovalDone { id, outcome: Ok(Arc::new(plan.carry_out())) }));
+        let _ = app.update(to(b_id, Message::SearchDone { generation: 0, result: None }));
+        let parked = &app.parked_newest_first[0];
+        assert!(parked.tree.is_live(movies) && parked.notice.is_none(), "nothing changes while it is parked");
+        let _ = resume_newest_parked(&mut app);
 
-        let Screen::Browse(b) = &app.screen else { panic!("the parked result is open again") };
+        let b = on_screen(&app);
         assert!(!b.tree.is_live(movies) && b.collector.is_empty());
         assert!(b.notice.as_ref().is_some_and(|n| n.kind == NoticeKind::Done), "{:?}", b.notice);
     }
 
-    fn app_showing(b: Browser) -> App {
-        let (mut app, _) = App::new(None);
-        app.screen = Screen::Browse(Box::new(b));
-        app
-    }
-
     fn resume_newest_parked(app: &mut App) -> Task<Message> {
         app.update(Message::ResumeParked(app.parked_newest_first[0].id))
-    }
-
-    fn on_screen(app: &mut App) -> &mut Browser {
-        match &mut app.screen {
-            Screen::Browse(b) => b,
-            Screen::Start => panic!("a result is on screen"),
-        }
     }
 
     #[test]
@@ -1354,32 +1404,112 @@ mod tests {
 
         let _ = app.update(Message::GoHome);
         let _ = resume_newest_parked(&mut app);
-        let b = on_screen(&mut app);
+        let b = on_screen_mut(&mut app);
         assert!(b.delete_hold_progress().is_none(), "the hold ended when its button left the screen");
         b.delete_hold_started.get_or_insert(Instant::now() - HOLD_TO_DELETE);
         let _ = app.update(Message::DeleteHoldTick);
         assert!(dir.path().join("Movies").exists(), "nothing is deleted without a new, finished hold");
     }
 
+    fn park_and_show(app: &mut App, other: Browser) {
+        let _ = app.update(Message::GoHome);
+        app.screen = Screen::Browse(Box::new(other));
+    }
+
     #[test]
-    fn a_search_result_reaches_its_own_result_even_while_parked_and_never_another() {
+    fn a_search_typed_just_before_going_home_runs_on_return_and_never_in_another_result() {
         let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         let mut a = browser(dir_a.path());
         let _ = a.update(Message::SearchChanged("mov".into()));
-        let fire = Message::SearchFire { browser: a.id, generation: a.search_gen };
+        let (a_id, fire) = (a.id, Message::SearchFire { generation: a.search_gen });
         let mut other = browser(dir_b.path());
         other.search_gen = a.search_gen;
         let mut app = app_showing(a);
+        park_and_show(&mut app, other);
+
+        assert_eq!(app.update(to(a_id, fire)).units(), 0, "a parked result starts no search");
+        assert_eq!(on_screen(&app).search_status, SearchStatus::Shown, "nor does the result on screen");
         let _ = app.update(Message::GoHome);
-        app.screen = Screen::Browse(Box::new(other));
+        let searching = app.update(Message::ResumeParked(a_id));
+        assert!(searching.units() > 0, "returning starts the search that was due");
+        let a = on_screen(&app);
+        let result = dscan_core::search(&a.tree, "mov", &CancelToken::default()).map(Arc::new);
+        let _ = app.update(to(a_id, Message::SearchDone { generation: a.search_gen, result }));
 
-        assert!(app.update(fire).units() > 0, "the parked result starts its search");
+        assert!(on_screen(&app).search.is_some(), "the result shows its own search");
+        assert!(app.parked_newest_first[0].search.is_none(), "the other result never takes it");
+    }
+
+    #[test]
+    fn going_home_cancels_a_running_search_and_returning_runs_it_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut b = browser(dir.path());
+        let _ = b.update(Message::SearchChanged("mov".into()));
+        let _ = b.update(Message::SearchFire { generation: b.search_gen });
+        let (running, stale) = (b.search_cancel.clone(), b.search_gen);
+        let mut app = app_showing(b);
+
+        let _ = app.update(Message::GoHome);
+        assert!(running.is_cancelled(), "a parked result lets go of its search");
         let parked = &app.parked_newest_first[0];
-        let result = dscan_core::search(&parked.tree, "mov", &CancelToken::default()).map(Arc::new);
-        let _ = app.update(Message::SearchDone { browser: parked.id, generation: parked.search_gen, result });
+        let late = dscan_core::search(&parked.tree, "mov", &CancelToken::default()).map(Arc::new);
+        let _ = app.update(to(parked.id, Message::SearchDone { generation: stale, result: late }));
+        assert!(app.parked_newest_first[0].search.is_none(), "the cancelled search's answer is dropped");
 
-        assert!(app.parked_newest_first[0].search.is_some(), "the parked result keeps its search");
-        assert!(on_screen(&mut app).search.is_none(), "the result on screen never takes another's search");
+        assert!(resume_newest_parked(&mut app).units() > 0, "returning searches again");
+        assert_eq!(on_screen(&app).search_status, SearchStatus::Running);
+    }
+
+    #[test]
+    fn closing_a_result_cancels_its_search() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut b = browser(dir.path());
+        let _ = b.update(Message::SearchChanged("mov".into()));
+        let _ = b.update(Message::SearchFire { generation: b.search_gen });
+        let running = b.search_cancel.clone();
+        drop(b);
+        assert!(running.is_cancelled(), "a closed result's tree is not kept alive by its search");
+    }
+
+    #[test]
+    fn a_desktop_action_failing_after_going_home_is_told_in_its_own_result() {
+        let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let (a, other) = (browser(dir_a.path()), browser(dir_b.path()));
+        let a_id = a.id;
+        let mut app = app_showing(a);
+        park_and_show(&mut app, other);
+
+        let failed = Message::DesktopActionFinished { failure: Some("Reveal failed".into()) };
+        assert_eq!(app.update(to(a_id, failed)).units(), 0, "a parked result starts no notice timer");
+        assert!(on_screen(&app).notice.is_none(), "the result on screen is not told");
+        assert!(app.parked_newest_first[0].notice.is_some(), "the result that asked is");
+    }
+
+    #[test]
+    fn every_task_a_result_starts_answers_to_that_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut b = browser(dir.path());
+        let typing_pause = b.update(Message::SearchChanged("mov".into()));
+        let answers = outputs(typing_pause);
+        assert!(
+            matches!(answers.as_slice(), [Message::ForBrowser(to, fire)]
+                if *to == b.id && matches!(**fire, Message::SearchFire { .. })),
+            "{answers:?}"
+        );
+    }
+
+    fn outputs(task: Task<Message>) -> Vec<Message> {
+        use iced_test::futures::futures::{StreamExt, future};
+        use iced_test::runtime::{Action, task};
+        let Some(actions) = task::into_stream(task) else { return Vec::new() };
+        let only_outputs = actions.filter_map(|action| {
+            future::ready(match action {
+                Action::Output(message) => Some(message),
+                _ => None,
+            })
+        });
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+        runtime.block_on(only_outputs.collect())
     }
 
     #[test]
@@ -1394,7 +1524,7 @@ mod tests {
         let timer = resume_newest_parked(&mut app);
 
         assert!(timer.units() > 0, "returning restarts the notice's timer");
-        let b = on_screen(&mut app);
+        let b = on_screen(&app);
         assert!(
             b.notice_expires_at.is_some_and(|deadline| deadline > Instant::now()),
             "and it is not hovered any more"

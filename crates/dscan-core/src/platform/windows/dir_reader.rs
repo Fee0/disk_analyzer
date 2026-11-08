@@ -1,9 +1,7 @@
 use std::cell::RefCell;
 use std::io;
 
-use windows_sys::Win32::Foundation::{
-    ERROR_INVALID_LEVEL, ERROR_INVALID_PARAMETER, ERROR_NO_MORE_FILES, ERROR_NOT_SUPPORTED,
-};
+use windows_sys::Win32::Foundation::ERROR_NO_MORE_FILES;
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_INFO_BY_HANDLE_CLASS, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FileIdBothDirectoryInfo,
     FileIdExtdDirectoryInfo, GetFileInformationByHandleEx,
@@ -11,6 +9,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 
 use super::dir_info::{self, FILE_ID_BOTH_DIR_INFO_WITHOUT_UNIQUE_IDS, FILE_ID_EXTD_DIR_INFO, Layout, Record};
 use super::handle::{Handle, wide_nul_terminated};
+use super::listing::{Batch, Listing, read_batches};
 use super::paths;
 use crate::platform::{DeviceId, DirEntry, SharedBlocks};
 
@@ -21,26 +20,25 @@ thread_local! {
     static NAME: RefCell<String> = const { RefCell::new(String::new()) };
 }
 
-#[derive(Clone, Copy)]
-struct Listing {
-    class: FILE_INFO_BY_HANDLE_CLASS,
-    layout: Layout,
+fn information_class(listing: Listing) -> FILE_INFO_BY_HANDLE_CLASS {
+    match listing {
+        Listing::WithUnique128BitIds => FileIdExtdDirectoryInfo,
+        Listing::ForFileSystemsWithoutUniqueIds => FileIdBothDirectoryInfo,
+    }
 }
 
-const WITH_UNIQUE_128_BIT_IDS: Listing = Listing { class: FileIdExtdDirectoryInfo, layout: FILE_ID_EXTD_DIR_INFO };
-const FOR_FILE_SYSTEMS_WITHOUT_UNIQUE_IDS: Listing =
-    Listing { class: FileIdBothDirectoryInfo, layout: FILE_ID_BOTH_DIR_INFO_WITHOUT_UNIQUE_IDS };
-
-enum Batch {
-    Filled,
-    End,
+fn record_layout(listing: Listing) -> Layout {
+    match listing {
+        Listing::WithUnique128BitIds => FILE_ID_EXTD_DIR_INFO,
+        Listing::ForFileSystemsWithoutUniqueIds => FILE_ID_BOTH_DIR_INFO_WITHOUT_UNIQUE_IDS,
+    }
 }
 
 fn next_batch(directory: &Handle, listing: Listing, buffer: &mut [u64]) -> io::Result<Batch> {
     let ok = unsafe {
         GetFileInformationByHandleEx(
             directory.0,
-            listing.class,
+            information_class(listing),
             buffer.as_mut_ptr().cast(),
             std::mem::size_of_val(buffer) as u32,
         )
@@ -50,12 +48,6 @@ fn next_batch(directory: &Handle, listing: Listing, buffer: &mut [u64]) -> io::R
     }
     let error = io::Error::last_os_error();
     if error.raw_os_error() == Some(ERROR_NO_MORE_FILES as i32) { Ok(Batch::End) } else { Err(error) }
-}
-
-fn file_system_lacks_the_listing(error: &io::Error) -> bool {
-    [ERROR_INVALID_PARAMETER, ERROR_INVALID_LEVEL, ERROR_NOT_SUPPORTED]
-        .iter()
-        .any(|&code| error.raw_os_error() == Some(code as i32))
 }
 
 fn as_bytes(buffer: &[u64]) -> &[u8] {
@@ -92,36 +84,18 @@ pub(super) fn read_dir(path: &[u8], mut visit: impl FnMut(DirEntry<'_>)) -> io::
         read_batches(
             buffer,
             |listing, buffer| next_batch(&directory, listing, buffer),
-            |listing, buffer| visit_batch(buffer, listing.layout, volume, &mut visit),
+            |listing, buffer| visit_batch(buffer, record_layout(listing), volume, &mut visit),
         )
     })
-}
-
-fn read_batches(
-    buffer: &mut [u64],
-    mut next_batch: impl FnMut(Listing, &mut [u64]) -> io::Result<Batch>,
-    mut visit_batch: impl FnMut(Listing, &[u64]),
-) -> io::Result<()> {
-    let mut listing = WITH_UNIQUE_128_BIT_IDS;
-    let mut may_fall_back = true;
-    loop {
-        match next_batch(listing, buffer) {
-            Ok(Batch::Filled) => visit_batch(listing, buffer),
-            Ok(Batch::End) => return Ok(()),
-            Err(e) if may_fall_back && file_system_lacks_the_listing(&e) => {
-                listing = FOR_FILE_SYSTEMS_WITHOUT_UNIQUE_IDS;
-            }
-            Err(e) => return Err(e),
-        }
-        may_fall_back = false;
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::platform::EntryType;
+    use crate::platform::windows::listing;
     use std::mem::offset_of;
+    use windows_sys::Win32::Foundation::{ERROR_INVALID_LEVEL, ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED};
     use windows_sys::Win32::Storage::FileSystem::{FILE_ID_BOTH_DIR_INFO, FILE_ID_EXTD_DIR_INFO as Extd};
 
     #[test]
@@ -137,6 +111,13 @@ mod tests {
         assert_eq!(dir_info::FILE_NAME_LENGTH, offset_of!(FILE_ID_BOTH_DIR_INFO, FileNameLength));
         assert_eq!(FILE_ID_BOTH_DIR_INFO_WITHOUT_UNIQUE_IDS.reparse_tag, offset_of!(FILE_ID_BOTH_DIR_INFO, EaSize));
         assert_eq!(FILE_ID_BOTH_DIR_INFO_WITHOUT_UNIQUE_IDS.file_name, offset_of!(FILE_ID_BOTH_DIR_INFO, FileName));
+    }
+
+    #[test]
+    fn listing_error_codes_match_the_windows_definitions() {
+        assert_eq!(listing::ERROR_NOT_SUPPORTED, ERROR_NOT_SUPPORTED as i32);
+        assert_eq!(listing::ERROR_INVALID_PARAMETER, ERROR_INVALID_PARAMETER as i32);
+        assert_eq!(listing::ERROR_INVALID_LEVEL, ERROR_INVALID_LEVEL as i32);
     }
 
     #[test]
@@ -163,40 +144,5 @@ mod tests {
         assert_eq!(seen["a.bin"].2, seen["a-link.bin"].2, "both names of a hard link share a file id");
         assert_ne!(seen["a.bin"].2, seen["ünïcode.txt"].2);
         assert_eq!(seen["sub"].2, None);
-    }
-
-    fn lacks_the_listing() -> io::Error {
-        io::Error::from_raw_os_error(ERROR_NOT_SUPPORTED as i32)
-    }
-
-    #[test]
-    fn a_file_system_lacking_both_listings_fails_instead_of_retrying_forever() {
-        let mut asked = Vec::new();
-        let outcome = read_batches(
-            &mut [0u64; 1],
-            |listing, _| {
-                asked.push(listing.class);
-                assert!(asked.len() <= 2, "gave up after the fallback failed too");
-                Err(lacks_the_listing())
-            },
-            |_, _| panic!("nothing was listed"),
-        );
-        assert!(outcome.is_err_and(|e| file_system_lacks_the_listing(&e)));
-        assert_eq!(asked, [WITH_UNIQUE_128_BIT_IDS.class, FOR_FILE_SYSTEMS_WITHOUT_UNIQUE_IDS.class]);
-    }
-
-    #[test]
-    fn falls_back_once_and_lists_every_batch_with_the_fallback() {
-        let mut answers = vec![Ok(Batch::End), Ok(Batch::Filled), Ok(Batch::Filled), Err(lacks_the_listing())];
-        let mut visited = Vec::new();
-        read_batches(&mut [0u64; 1], |_, _| answers.pop().unwrap(), |listing, _| visited.push(listing.class)).unwrap();
-        assert_eq!(visited, [FOR_FILE_SYSTEMS_WITHOUT_UNIQUE_IDS.class; 2]);
-    }
-
-    #[test]
-    fn only_the_first_batch_may_fall_back() {
-        let mut answers = vec![Err(lacks_the_listing()), Ok(Batch::Filled)];
-        let outcome = read_batches(&mut [0u64; 1], |_, _| answers.pop().unwrap(), |_, _| {});
-        assert!(outcome.is_err(), "a later failure is a real error, not a missing listing");
     }
 }

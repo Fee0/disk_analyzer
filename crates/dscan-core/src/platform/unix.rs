@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::ffi::{CStr, CString, OsStr};
+use std::fs::FileType;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
@@ -18,7 +19,7 @@ impl Drop for Fd {
     }
 }
 
-pub(super) fn remove_link(path: &Path) -> io::Result<()> {
+pub(super) fn remove_link(path: &Path, _every_link_is_a_file_on_unix: FileType) -> io::Result<()> {
     std::fs::remove_file(path)
 }
 

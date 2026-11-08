@@ -18,6 +18,7 @@ pub(crate) use system::Linux;
 mod system {
     use std::borrow::Cow;
     use std::ffi::OsStr;
+    use std::fs::FileType;
     use std::io::{self, Read};
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
@@ -129,8 +130,8 @@ mod system {
             show_in_the_file_manager(path).or_else(|_| open_the_folder_holding(path))
         }
 
-        fn remove_link(path: &Path) -> io::Result<()> {
-            unix::remove_link(path)
+        fn remove_link(path: &Path, link: FileType) -> io::Result<()> {
+            unix::remove_link(path, link)
         }
     }
 }

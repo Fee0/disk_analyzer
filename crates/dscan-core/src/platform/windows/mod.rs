@@ -5,10 +5,13 @@ mod drives;
 #[cfg(windows)]
 mod handle;
 mod launch;
+mod listing;
 pub(crate) mod paths;
 mod protected;
 #[cfg(windows)]
 mod space_causes;
+#[cfg(all(windows, test))]
+pub(crate) mod test_fixtures;
 #[cfg(windows)]
 mod volumes;
 
@@ -19,6 +22,7 @@ pub(crate) use system::Windows;
 mod system {
     use std::borrow::Cow;
     use std::ffi::{OsStr, OsString};
+    use std::fs::FileType;
     use std::io;
     use std::os::windows::fs::FileTypeExt;
     use std::os::windows::process::CommandExt;
@@ -116,12 +120,8 @@ mod system {
             ))
         }
 
-        fn remove_link(path: &Path) -> io::Result<()> {
-            if std::fs::symlink_metadata(path)?.file_type().is_symlink_dir() {
-                std::fs::remove_dir(path)
-            } else {
-                std::fs::remove_file(path)
-            }
+        fn remove_link(path: &Path, link: FileType) -> io::Result<()> {
+            if link.is_symlink_dir() { std::fs::remove_dir(path) } else { std::fs::remove_file(path) }
         }
     }
 

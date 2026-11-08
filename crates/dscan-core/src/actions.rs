@@ -147,7 +147,7 @@ impl RemovalReport {
 fn delete_permanently(path: &Path) -> std::io::Result<()> {
     let file_type = std::fs::symlink_metadata(path)?.file_type();
     if file_type.is_symlink() {
-        Current::remove_link(path)
+        Current::remove_link(path, file_type)
     } else if file_type.is_dir() {
         std::fs::remove_dir_all(path)
     } else {
@@ -223,13 +223,8 @@ mod tests {
         let root = dir.path();
         std::fs::create_dir(root.join("target-folder")).unwrap();
         std::fs::write(root.join("target-folder/keep.txt"), b"keep").unwrap();
-        let junction_made_without_admin_rights = std::process::Command::new("cmd")
-            .args(["/C", "mklink", "/J"])
-            .arg(root.join("junction"))
-            .arg(root.join("target-folder"))
-            .output()
-            .unwrap();
-        assert!(junction_made_without_admin_rights.status.success(), "{junction_made_without_admin_rights:?}");
+        crate::platform::windows::test_fixtures::make_junction(&root.join("junction"), &root.join("target-folder"))
+            .expect("a junction needs no admin rights");
         let t = scan_folder(root);
         let junction = descend(&t, &["junction"]);
         assert!(!t.node(junction).is_dir(), "a junction is listed as a link, not as a folder");

@@ -4,7 +4,7 @@ use dscan_core::{CancelToken, Progress, ScanOptions};
 use iced::Settings;
 use iced_test::{Error, Simulator};
 
-use crate::app::test_util::{descend, scanned};
+use crate::app::test_util::{app_showing, descend, on_screen, on_screen_mut, scanned};
 use crate::app::{App, Browser, Message, Notice, NoticeKind, Screen};
 use crate::iced_inspect as ui_inspect;
 use crate::{theme, view};
@@ -43,12 +43,6 @@ fn scanned_fixture(dir: &Path) -> Browser {
     scanned_folder(dir)
 }
 
-fn app_showing(browser: Browser) -> App {
-    let (mut app, _) = App::new(None);
-    app.screen = Screen::Browse(Box::new(browser));
-    app
-}
-
 fn browser_app(dir: &Path) -> App {
     app_showing(scanned_fixture(dir))
 }
@@ -59,14 +53,14 @@ fn finish_chart_animation(app: &mut App) {
     let first_frame = std::time::Instant::now();
     let _ = app.update(Message::AnimationFrame(first_frame));
     let _ = app.update(Message::AnimationFrame(first_frame + LONGER_THAN_ANY_CHART_ANIMATION));
-    assert!(browser(app).animation.is_none(), "the animation ends once its time is up");
+    assert!(on_screen(app).animation.is_none(), "the animation ends once its time is up");
 }
 
 fn shoot_chart_animation(app: &mut App, name: &str, kind: dscan_core::TransitionKind) -> Result<(), Error> {
-    let animation = browser(app).animation.as_ref().expect("the change animates the chart");
+    let animation = on_screen(app).animation.as_ref().expect("the change animates the chart");
     assert_eq!(animation.kind(), kind, "{name}");
     for percent in [25, 50, 75] {
-        browser_mut(app).animation.as_mut().unwrap().jump_to(f64::from(percent) / 100.0);
+        on_screen_mut(app).animation.as_mut().unwrap().jump_to(f64::from(percent) / 100.0);
         let mut ui = sim(app);
         shoot(&mut ui, &format!("{name}-{percent}"))?;
     }
@@ -81,17 +75,17 @@ fn chart_reveals_zooms_and_lets_collected_items_shrink_away() -> Result<(), Erro
     let mut app = app_showing(scanned_fixture(dir.path()).with_opening_reveal());
     shoot_chart_animation(&mut app, "anim-reveal", TransitionKind::Reveal)?;
 
-    let movies = descend(&browser(&app).tree, &["Movies"]);
+    let movies = descend(&on_screen(&app).tree, &["Movies"]);
     let _ = app.update(Message::Navigate(movies));
     shoot_chart_animation(&mut app, "anim-zoom-in", TransitionKind::ZoomIn)?;
     let _ = app.update(Message::Back);
     shoot_chart_animation(&mut app, "anim-zoom-out", TransitionKind::ZoomOut)?;
 
-    let size_before = browser(&app).layout.total;
-    let pictures = descend(&browser(&app).tree, &["Pictures"]);
+    let size_before = on_screen(&app).layout.total;
+    let pictures = descend(&on_screen(&app).tree, &["Pictures"]);
     let _ = app.update(Message::Press(dscan_core::Segment::Node(pictures)));
     let _ = app.update(Message::CollectSelected);
-    let b = browser(&app);
+    let b = on_screen(&app);
     assert_eq!(b.collector.items(), &[pictures]);
     assert_eq!(b.layout.total, size_before - b.tree.size(pictures), "the chart leaves out what is collected");
     assert!(b.layout.find(dscan_core::Segment::Node(pictures)).is_none(), "the collected folder has no arc");
@@ -99,7 +93,7 @@ fn chart_reveals_zooms_and_lets_collected_items_shrink_away() -> Result<(), Erro
     shoot_chart_animation(&mut app, "anim-collect", TransitionKind::Morph)?;
 
     let _ = app.update(Message::Uncollect(pictures));
-    assert_eq!(browser(&app).layout.total, size_before, "uncollecting puts it back");
+    assert_eq!(on_screen(&app).layout.total, size_before, "uncollecting puts it back");
     shoot_chart_animation(&mut app, "anim-uncollect", TransitionKind::Morph)?;
     Ok(())
 }
@@ -107,7 +101,7 @@ fn chart_reveals_zooms_and_lets_collected_items_shrink_away() -> Result<(), Erro
 fn deliver_search_result_without_its_thread(app: &mut App, query: &str) {
     if let Screen::Browse(b) = &app.screen {
         let result = dscan_core::search(&b.tree, query, &Default::default()).map(std::sync::Arc::new);
-        let _ = app.update(Message::SearchDone { browser: b.id, generation: 1, result });
+        let _ = app.update(Message::ForBrowser(b.id, Box::new(Message::SearchDone { generation: 1, result })));
     }
 }
 
@@ -159,7 +153,7 @@ fn inspect_browse() -> Result<(), Error> {
     let _ = app.update(Message::MouseReleased);
     let _ = app.update(Message::SearchChanged("img".into()));
     deliver_search_result_without_its_thread(&mut app, "img");
-    assert_eq!(browser(&app).search.as_ref().unwrap().matches, 3);
+    assert_eq!(on_screen(&app).search.as_ref().unwrap().matches, 3);
     {
         let mut ui = sim(&app);
         println!("{}", ui_inspect::report(&mut ui, VIEW));
@@ -204,7 +198,7 @@ fn toolbar_lines_up_with_the_file_list_and_a_long_path_stops_before_it() -> Resu
     std::fs::create_dir_all(&deepest).unwrap();
     std::fs::write(deepest.join("file.bin"), vec![0u8; 50_000]).unwrap();
     let mut app = browser_app(dir.path());
-    let deepest = descend(&browser(&app).tree, &chain);
+    let deepest = descend(&on_screen(&app).tree, &chain);
     let _ = app.update(Message::Navigate(deepest));
 
     let mut ui = sim(&app);
@@ -245,7 +239,7 @@ fn deep_path_bar_shows_root_ellipsis_and_last_folders_and_the_ellipsis_steps_int
     std::fs::create_dir_all(&deepest).unwrap();
     std::fs::write(deepest.join("hero.png"), vec![0u8; 50_000]).unwrap();
     let mut app = browser_app(dir.path());
-    let images = descend(&browser(&app).tree, &chain);
+    let images = descend(&on_screen(&app).tree, &chain);
     let _ = app.update(Message::Navigate(images));
 
     let msgs: Vec<Message> = {
@@ -258,7 +252,7 @@ fn deep_path_bar_shows_root_ellipsis_and_last_folders_and_the_ellipsis_steps_int
         ui.click("…")?;
         ui.into_messages().collect()
     };
-    let clients = descend(&browser(&app).tree, &chain[..2]);
+    let clients = descend(&on_screen(&app).tree, &chain[..2]);
     assert!(
         matches!(msgs[..], [Message::Navigate(id)] if id == clients),
         "the ellipsis opens the deepest folder it hides: {msgs:?}"
@@ -275,20 +269,6 @@ fn deep_path_bar_shows_root_ellipsis_and_last_folders_and_the_ellipsis_steps_int
     Ok(())
 }
 
-fn browser(app: &App) -> &Browser {
-    match &app.screen {
-        Screen::Browse(b) => b,
-        _ => panic!("not browsing"),
-    }
-}
-
-fn browser_mut(app: &mut App) -> &mut Browser {
-    match &mut app.screen {
-        Screen::Browse(b) => b,
-        _ => panic!("not browsing"),
-    }
-}
-
 fn key(app: &mut App, k: iced::keyboard::Key, cmd: bool) {
     let mods = if cmd { iced::keyboard::Modifiers::COMMAND } else { iced::keyboard::Modifiers::empty() };
     let _ = app.update(Message::Key(k, mods));
@@ -299,38 +279,38 @@ fn keyboard_navigation() {
     use iced::keyboard::{Key, key::Named};
     let dir = tempfile::tempdir().unwrap();
     let mut app = browser_app(dir.path());
-    let root = browser(&app).tree.root();
+    let root = on_screen(&app).tree.root();
 
     key(&mut app, Key::Named(Named::ArrowRight), false);
-    let b = browser(&app);
+    let b = on_screen(&app);
     let first = b.selected.unwrap();
     assert_eq!(b.tree.name(first), "Movies");
 
     key(&mut app, Key::Named(Named::ArrowRight), false);
-    assert_eq!(browser(&app).tree.name(browser(&app).selected.unwrap()), "Downloads");
+    assert_eq!(on_screen(&app).tree.name(on_screen(&app).selected.unwrap()), "Downloads");
     key(&mut app, Key::Named(Named::ArrowLeft), false);
-    assert_eq!(browser(&app).selected, Some(first));
+    assert_eq!(on_screen(&app).selected, Some(first));
 
     key(&mut app, Key::Named(Named::ArrowDown), false);
-    let b = browser(&app);
+    let b = on_screen(&app);
     assert_eq!(b.tree.name(b.selected.unwrap()), "2015");
     assert_eq!(b.listed_folder(), first, "list follows the selection's parent");
     key(&mut app, Key::Named(Named::ArrowUp), false);
-    assert_eq!(browser(&app).selected, Some(first));
+    assert_eq!(on_screen(&app).selected, Some(first));
 
     key(&mut app, Key::Named(Named::Enter), false);
-    assert_eq!(browser(&app).focus, first, "Enter drills into a folder");
+    assert_eq!(on_screen(&app).focus, first, "Enter drills into a folder");
     key(&mut app, Key::Named(Named::Backspace), false);
-    assert_eq!(browser(&app).focus, root, "Backspace goes back");
+    assert_eq!(on_screen(&app).focus, root, "Backspace goes back");
     key(&mut app, Key::Character("]".into()), true);
-    assert_eq!(browser(&app).focus, first, "Cmd-] goes forward");
+    assert_eq!(on_screen(&app).focus, first, "Cmd-] goes forward");
     key(&mut app, Key::Named(Named::ArrowUp), true);
-    assert_eq!(browser(&app).focus, root, "Cmd-Up goes to the parent");
+    assert_eq!(on_screen(&app).focus, root, "Cmd-Up goes to the parent");
 
     key(&mut app, Key::Character("c".into()), false);
-    assert_eq!(browser(&app).collector.items(), &[first], "C collects the selection");
+    assert_eq!(on_screen(&app).collector.items(), &[first], "C collects the selection");
     key(&mut app, Key::Named(Named::Escape), false);
-    assert_eq!(browser(&app).selected, None);
+    assert_eq!(on_screen(&app).selected, None);
 }
 
 #[test]
@@ -338,12 +318,12 @@ fn the_start_page_is_one_step_back_from_the_results_root() -> Result<(), Error> 
     use iced::keyboard::Key;
     let dir = tempfile::tempdir().unwrap();
     let mut app = browser_app(dir.path());
-    let root = browser(&app).tree.root();
-    let movies = descend(&browser(&app).tree, &["Movies"]);
+    let root = on_screen(&app).tree.root();
+    let movies = descend(&on_screen(&app).tree, &["Movies"]);
     let _ = app.update(Message::Navigate(movies));
 
     let _ = app.update(Message::Back);
-    assert_eq!(browser(&app).focus, root, "back walks the folder history first");
+    assert_eq!(on_screen(&app).focus, root, "back walks the folder history first");
     let msgs: Vec<Message> = {
         let mut ui = sim(&app);
         let back_button = toolbar_icon_buttons_left_to_right(&mut ui)[1];
@@ -360,17 +340,17 @@ fn the_start_page_is_one_step_back_from_the_results_root() -> Result<(), Error> 
     assert!(matches!(app.screen, Screen::Start), "nothing comes before the start page");
 
     let _ = app.update(Message::Forward);
-    let b = browser(&app);
+    let b = on_screen(&app);
     assert_eq!(b.focus, root, "forward returns to the results where they were left");
     assert!(app.parked_newest_first.is_empty());
     let _ = app.update(Message::Forward);
-    assert_eq!(browser(&app).focus, movies, "the results keep their own forward history");
+    assert_eq!(on_screen(&app).focus, movies, "the results keep their own forward history");
 
     key(&mut app, Key::Character("[".into()), true);
     key(&mut app, Key::Character("[".into()), true);
     assert!(matches!(app.screen, Screen::Start), "Cmd-[ steps back to the start page too");
     key(&mut app, Key::Character("]".into()), true);
-    assert_eq!(browser(&app).focus, root, "and Cmd-] steps forward into the results again");
+    assert_eq!(on_screen(&app).focus, root, "and Cmd-] steps forward into the results again");
 
     let _ = app.update(Message::GoHome);
     let _ = app.update(Message::CloseParked(app.parked_newest_first[0].id));
@@ -401,7 +381,7 @@ fn f5_or_cmd_r_scans_the_shown_results_again() {
     let dir = tempfile::tempdir().unwrap();
     for (shortcut, cmd) in [(Key::Named(Named::F5), false), (Key::Character("r".into()), true)] {
         let mut app = browser_app(dir.path());
-        let shown_root = browser(&app).opts.root.clone();
+        let shown_root = on_screen(&app).opts.root.clone();
         key(&mut app, shortcut.clone(), cmd);
         let job = app.scans.last().unwrap_or_else(|| panic!("{shortcut:?} starts a scan"));
         assert_eq!(job.opts.root, shown_root, "{shortcut:?} rescans what was shown");
@@ -417,29 +397,29 @@ fn drag_to_collector() {
     use iced::Point;
     let dir = tempfile::tempdir().unwrap();
     let mut app = browser_app(dir.path());
-    let b = browser(&app);
+    let b = on_screen(&app);
     let movies = b.tree.children(b.tree.root()).next().unwrap();
 
     let _ = app.update(Message::Press(Segment::Node(movies)));
     let _ = app.update(Message::CollectorEnter);
     let _ = app.update(Message::MouseReleased);
-    assert!(browser(&app).collector.is_empty(), "a click without movement selects but does not collect");
+    assert!(on_screen(&app).collector.is_empty(), "a click without movement selects but does not collect");
     let _ = app.update(Message::CollectorExit);
 
     let _ = app.update(Message::Press(Segment::Node(movies)));
     let _ = app.update(Message::CursorMoved(Point::new(100.0, 100.0)));
     let _ = app.update(Message::CursorMoved(Point::new(140.0, 160.0)));
-    assert!(browser(&app).drag.as_ref().unwrap().dragging, "moving past the threshold starts a drag");
+    assert!(on_screen(&app).drag.as_ref().unwrap().dragging, "moving past the threshold starts a drag");
     let _ = app.update(Message::CollectorEnter);
     let _ = app.update(Message::MouseReleased);
-    assert_eq!(browser(&app).collector.items(), &[movies], "releasing a drag over the collector collects");
-    assert!(browser(&app).drag.is_none(), "releasing ends the drag");
+    assert_eq!(on_screen(&app).collector.items(), &[movies], "releasing a drag over the collector collects");
+    assert!(on_screen(&app).drag.is_none(), "releasing ends the drag");
 
-    let b = browser(&app);
+    let b = on_screen(&app);
     let child = b.tree.children(movies).next().unwrap();
     let _ = app.update(Message::Press(Segment::Node(child)));
     let _ = app.update(Message::CollectSelected);
-    assert_eq!(browser(&app).collector.items(), &[movies], "collecting a child of a collected folder is a no-op");
+    assert_eq!(on_screen(&app).collector.items(), &[movies], "collecting a child of a collected folder is a no-op");
 
     let _ = app.update(Message::ClearCollector);
     let _ = app.update(Message::CollectorExit);
@@ -447,7 +427,7 @@ fn drag_to_collector() {
     let _ = app.update(Message::CursorMoved(Point::new(0.0, 0.0)));
     let _ = app.update(Message::CursorMoved(Point::new(50.0, 0.0)));
     let _ = app.update(Message::MouseReleased);
-    assert!(browser(&app).collector.is_empty(), "a drag released outside the collector collects nothing");
+    assert!(on_screen(&app).collector.is_empty(), "a drag released outside the collector collects nothing");
 }
 
 const TB: u64 = 1_000_000_000_000;
@@ -621,7 +601,7 @@ fn a_folder_scan_gets_its_own_row_and_runs_beside_a_disk_scan() -> Result<(), Er
         app.parked_newest_first.first().is_some_and(|b| b.opts.root == folder.path()),
         "a scan finishing behind a shown result waits under open results"
     );
-    let notice = browser(&app).notice.as_ref().expect("the finished scan is announced");
+    let notice = on_screen(&app).notice.as_ref().expect("the finished scan is announced");
     assert_eq!(notice.kind, crate::app::NoticeKind::Done);
     assert!(notice.text.contains(&folder_name), "{notice:?}");
     Ok(())
@@ -709,7 +689,7 @@ fn inspect_open_results() -> Result<(), Error> {
     for m in msgs {
         let _ = app.update(m);
     }
-    assert_eq!(browser(&app).tree.root_path(), newest, "exactly the clicked result is resumed");
+    assert_eq!(on_screen(&app).tree.root_path(), newest, "exactly the clicked result is resumed");
     assert_eq!(app.parked_newest_first.len(), 5);
     let _ = app.update(Message::GoHome);
 
@@ -749,8 +729,8 @@ fn inspect_open_results() -> Result<(), Error> {
 fn collector_fixed_height_fits_every_state_without_clipping() -> Result<(), Error> {
     let dir = tempfile::tempdir().unwrap();
     let mut app = browser_app(dir.path());
-    let root = browser(&app).tree.root();
-    let movies = browser(&app).tree.children(root).next().unwrap();
+    let root = on_screen(&app).tree.root();
+    let movies = on_screen(&app).tree.children(root).next().unwrap();
     let _ = app.update(Message::Press(dscan_core::Segment::Node(movies)));
     let _ = app.update(Message::MouseReleased);
 
@@ -764,19 +744,19 @@ fn collector_fixed_height_fits_every_state_without_clipping() -> Result<(), Erro
     shot(&app, "collector-empty")?;
     let _ = app.update(Message::CollectSelected);
     shot(&app, "collector-one")?;
-    let kids: Vec<_> = browser(&app).tree.children(root).skip(1).collect();
+    let kids: Vec<_> = on_screen(&app).tree.children(root).skip(1).collect();
     for id in kids {
-        let b = browser_mut(&mut app);
+        let b = on_screen_mut(&mut app);
         b.collector.add(&b.tree, id).unwrap();
     }
-    assert!(browser(&app).collector.len() > 4);
+    assert!(on_screen(&app).collector.len() > 4);
     shot(&app, "collector-many")?;
     {
         let mut ui = sim(&app);
         let report = ui_inspect::report(&mut ui, VIEW);
         assert!(report.contains("\"Hold 3 s to delete permanently\""), "the hold button says how long to hold");
     }
-    browser_mut(&mut app).delete_hold_started =
+    on_screen_mut(&mut app).delete_hold_started =
         Some(std::time::Instant::now() - std::time::Duration::from_millis(1500));
     {
         let mut ui = sim(&app);
@@ -790,7 +770,7 @@ fn collector_fixed_height_fits_every_state_without_clipping() -> Result<(), Erro
         );
     }
     shot(&app, "collector-holding")?;
-    browser_mut(&mut app).delete_hold_started = None;
+    on_screen_mut(&mut app).delete_hold_started = None;
     let _ = app.update(Message::AskTrash);
     shot(&app, "collector-confirm")?;
     let _ = app.update(Message::CancelTrash);
@@ -900,7 +880,7 @@ fn collected_items_are_listed_only_after_clicking_the_collector() -> Result<(), 
         ui_inspect::click_at(&mut ui, remove);
         clicks_only(ui.into_messages())
     };
-    let downloads = descend(&browser(&app).tree, &["Downloads"]);
+    let downloads = descend(&on_screen(&app).tree, &["Downloads"]);
     assert!(
         matches!(msgs[..], [Message::Uncollect(id)] if id == downloads),
         "a row's close button takes only that item out: {msgs:?}"
@@ -908,17 +888,17 @@ fn collected_items_are_listed_only_after_clicking_the_collector() -> Result<(), 
     for m in msgs {
         let _ = app.update(m);
     }
-    assert!(browser(&app).collected_list_open, "removing one item keeps the list open");
+    assert!(on_screen(&app).collected_list_open, "removing one item keeps the list open");
     assert_eq!(collected_rows_over_the_chart(&mut sim(&app), &names), ["Movies/", "Pictures/"]);
 
     key(&mut app, Key::Named(Named::Escape), false);
-    assert!(!browser(&app).collected_list_open, "Escape closes the list");
+    assert!(!on_screen(&app).collected_list_open, "Escape closes the list");
 
     let _ = app.update(Message::ToggleCollectedList);
     let _ = app.update(Message::ClearCollector);
-    assert!(!browser(&app).collected_list_open, "an emptied collector closes its list");
+    assert!(!on_screen(&app).collected_list_open, "an emptied collector closes its list");
     let _ = app.update(Message::ToggleCollectedList);
-    assert!(!browser(&app).collected_list_open, "an empty collector has no list to open");
+    assert!(!on_screen(&app).collected_list_open, "an empty collector has no list to open");
     Ok(())
 }
 
@@ -984,7 +964,7 @@ fn messages_float_over_the_chart_instead_of_a_status_line() -> Result<(), Error>
             "“System32” is a protected system location and can't be moved to the Recycle Bin.",
         ),
     ] {
-        browser_mut(&mut app).notice = Some(Notice { kind, text: text.to_string() });
+        on_screen_mut(&mut app).notice = Some(Notice { kind, text: text.to_string() });
         let mut ui = sim(&app);
         shoot(&mut ui, label)?;
         let dismiss = bounds_of_button_beside(&mut ui, text);
@@ -1001,7 +981,7 @@ fn messages_float_over_the_chart_instead_of_a_status_line() -> Result<(), Error>
 
 fn collect_through_the_ui(app: &mut App, names: &[&str]) {
     for name in names {
-        let id = descend(&browser(app).tree, &[name]);
+        let id = descend(&on_screen(app).tree, &[name]);
         let _ = app.update(Message::Press(dscan_core::Segment::Node(id)));
         let _ = app.update(Message::MouseReleased);
         let _ = app.update(Message::CollectSelected);
@@ -1042,7 +1022,7 @@ fn every_screen_stays_readable_from_the_default_window_down_to_the_minimum_size(
     scan_job(&mut scanning).snapshot = MID_SCAN;
 
     let mut collected_and_searching = browser_app(dir.path());
-    let inner = descend(&browser(&collected_and_searching).tree, &[long_name, "inner"]);
+    let inner = descend(&on_screen(&collected_and_searching).tree, &[long_name, "inner"]);
     let _ = collected_and_searching.update(Message::Navigate(inner));
     collect_through_the_ui(&mut collected_and_searching, &["Movies", "Downloads", "Pictures"]);
     let _ = collected_and_searching.update(Message::SearchChanged("img".into()));
@@ -1053,7 +1033,7 @@ fn every_screen_stays_readable_from_the_default_window_down_to_the_minimum_size(
     let _ = holding_delete.update(Message::DeleteHoldStart);
 
     let mut long_folder_with_unreadable_parts = browser_app(dir.path());
-    let long_folder = descend(&browser(&long_folder_with_unreadable_parts).tree, &[long_name]);
+    let long_folder = descend(&on_screen(&long_folder_with_unreadable_parts).tree, &[long_name]);
     let _ = long_folder_with_unreadable_parts.update(Message::Navigate(long_folder));
     if let Screen::Browse(b) = &mut long_folder_with_unreadable_parts.screen {
         std::sync::Arc::get_mut(&mut b.tree).expect("nothing else holds the fresh tree").stats.errors = 1_234;
@@ -1074,12 +1054,12 @@ fn every_screen_stays_readable_from_the_default_window_down_to_the_minimum_size(
     let _ = long_notice.update(Message::DesktopActionFinished { failure: Some(LONG_FAILURE.to_string()) });
 
     let mut long_file_selected = browser_app(dir.path());
-    let long_folder = descend(&browser(&long_file_selected).tree, &[long_name]);
+    let long_folder = descend(&on_screen(&long_file_selected).tree, &[long_name]);
     select(&mut long_file_selected, long_folder);
 
     let whole_disk = tempfile::tempdir().unwrap();
     let mut hidden_space_explained = whole_disk_scan_of(whole_disk.path());
-    let hidden = descend(&browser(&hidden_space_explained).tree, &[HIDDEN_SPACE_NAME]);
+    let hidden = descend(&on_screen(&hidden_space_explained).tree, &[HIDDEN_SPACE_NAME]);
     select(&mut hidden_space_explained, hidden);
 
     let screens = [
@@ -1131,7 +1111,7 @@ const HIDDEN_SPACE_NAME: &str = "Hidden space";
 fn a_selected_file_offers_preview_and_reveal_and_the_buttons_only_send_messages() -> Result<(), Error> {
     let dir = tempfile::tempdir().unwrap();
     let mut app = browser_app(dir.path());
-    let notes = descend(&browser(&app).tree, &["notes.txt"]);
+    let notes = descend(&on_screen(&app).tree, &["notes.txt"]);
     select(&mut app, notes);
     {
         let mut ui = sim(&app);
@@ -1158,11 +1138,11 @@ fn a_selected_file_offers_preview_and_reveal_and_the_buttons_only_send_messages(
 fn selecting_hidden_space_explains_it_and_offers_the_fixes_this_os_has() -> Result<(), Error> {
     let dir = tempfile::tempdir().unwrap();
     let mut app = whole_disk_scan_of(dir.path());
-    let hidden = descend(&browser(&app).tree, &[HIDDEN_SPACE_NAME]);
-    let tree = &mut browser_mut(&mut app).tree;
+    let hidden = descend(&on_screen(&app).tree, &[HIDDEN_SPACE_NAME]);
+    let tree = &mut on_screen_mut(&mut app).tree;
     std::sync::Arc::get_mut(tree).expect("nothing else holds the fresh tree").stats.errors = 12;
     select(&mut app, hidden);
-    let explanation = dscan_core::hidden::explain(&browser(&app).tree, hidden).expect("hidden space is explained");
+    let explanation = dscan_core::hidden::explain(&on_screen(&app).tree, hidden).expect("hidden space is explained");
 
     let mut ui = sim(&app);
     shoot(&mut ui, "hidden-space-explained")?;

@@ -11,6 +11,7 @@ pub(crate) mod windows;
 
 use std::borrow::Cow;
 use std::ffi::OsStr;
+use std::fs::FileType;
 use std::io;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -104,7 +105,7 @@ pub(crate) trait Platform {
     fn would_run_a_program(path: &Path) -> bool;
     fn preview(path: &Path) -> io::Result<()>;
     fn reveal(path: &Path) -> io::Result<()>;
-    fn remove_link(path: &Path) -> io::Result<()>;
+    fn remove_link(path: &Path, link: FileType) -> io::Result<()>;
 }
 
 pub(crate) fn answered_within<T: Send + 'static>(

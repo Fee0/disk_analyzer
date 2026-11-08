@@ -1,23 +1,25 @@
 use std::cmp::Reverse;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::tree::{NodeId, Tree};
 
 #[derive(Clone, Debug, Default)]
 pub struct Exclusions {
+    excluded_items: HashSet<NodeId>,
     excluded_bytes_below_or_at: HashMap<NodeId, u64>,
 }
 
 impl Exclusions {
     pub fn new(tree: &Tree, excluded: &[NodeId]) -> Self {
+        let excluded_items: HashSet<NodeId> = excluded.iter().copied().filter(|&item| tree.is_live(item)).collect();
         let mut excluded_bytes_below_or_at: HashMap<NodeId, u64> = HashMap::new();
-        for &item in excluded.iter().filter(|&&item| tree.is_live(item)) {
+        for &item in &excluded_items {
             let item_bytes = tree.size(item);
             for holder in tree.ancestors(item) {
                 *excluded_bytes_below_or_at.entry(holder).or_default() += item_bytes;
             }
         }
-        Exclusions { excluded_bytes_below_or_at }
+        Exclusions { excluded_items, excluded_bytes_below_or_at }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -40,11 +42,14 @@ impl Exclusions {
         if !self.touches(id) {
             return ChildOrder::AsScanned(tree.children(id).map(move |c| (c, tree.size(c))));
         }
-        let emptied_by_exclusion = |c: NodeId, size: u64| size == 0 && self.touches(c);
+        let hidden_by_exclusion = |c: NodeId, size: u64| {
+            let emptied_by_exclusion = size == 0 && tree.size(c) > 0;
+            self.excluded_items.contains(&c) || emptied_by_exclusion
+        };
         let mut kept: Vec<(NodeId, u64)> = tree
             .children(id)
             .map(|c| (c, self.size(tree, c)))
-            .filter(|&(c, size)| !emptied_by_exclusion(c, size))
+            .filter(|&(c, size)| !hidden_by_exclusion(c, size))
             .collect();
         kept.sort_by_key(|&(_, size)| Reverse(size));
         ChildOrder::Resorted(kept.into_iter())
@@ -102,6 +107,17 @@ mod tests {
         let ex = Exclusions::new(&t, &[photo, inside]);
         let names = ex.children(&t, a).map(|c| t.name(c).into_owned()).collect::<Vec<_>>();
         assert_eq!(names, ["empty"], "only what the exclusion emptied is hidden, not what was empty to begin with");
+    }
+
+    #[test]
+    fn excluding_an_empty_item_hides_it_but_keeps_the_empty_folder_holding_it() {
+        let t = tree(vec![D("a", vec![F("photo", 600), D("cache", vec![F("lock", 0), F("pid", 0)])])]);
+        let (a, cache, lock) =
+            (descend(&t, &["a"]), descend(&t, &["a", "cache"]), descend(&t, &["a", "cache", "lock"]));
+        let ex = Exclusions::new(&t, &[lock]);
+        let names = |p| ex.children(&t, p).map(|c| t.name(c).into_owned()).collect::<Vec<_>>();
+        assert_eq!(names(cache), ["pid"], "the excluded empty file is hidden");
+        assert_eq!(names(a), ["photo", "cache"], "its folder was empty before and stays listed");
     }
 
     #[test]
