@@ -1,12 +1,11 @@
 use std::io;
-use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use crate::hidden::SpaceInfo;
-use crate::platform::unix::c_path;
+use crate::platform::unix;
 
 pub(super) fn space_info(path: &Path) -> io::Result<SpaceInfo> {
-    let c = c_path(path.as_os_str().as_bytes())?;
+    let c = unix::c_path(&unix::path_bytes(path))?;
     let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
     if unsafe { libc::statvfs(c.as_ptr(), &mut s) } != 0 {
         return Err(io::Error::last_os_error());

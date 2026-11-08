@@ -46,6 +46,8 @@ mod system {
         const PURGEABLE_SPACE: SpaceExplanation = space_causes::PURGEABLE_SPACE;
         const PREVIEW_ACTION: &'static str = "Quick Look";
         const REVEAL_ACTION: &'static str = "Show in Finder";
+        const COMMAND_KEY: &'static str = "⌘";
+        const RESCAN_SHORTCUT: &'static str = "⌘R";
 
         fn read_dir(path: &[u8], visit: impl FnMut(DirEntry<'_>)) -> io::Result<()> {
             bulk::read_dir(path, visit)

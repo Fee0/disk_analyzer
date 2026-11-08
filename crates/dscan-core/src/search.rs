@@ -96,7 +96,7 @@ fn mark_ancestors_of_matches(tree: &Tree, match_flags: &mut [u8], matched: &[u32
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tree::test_util::{T::*, tree};
+    use crate::tree::test_util::{T::*, descend, tree};
 
     #[test]
     fn finds_case_insensitively_and_marks_ancestors() {
@@ -107,8 +107,7 @@ mod tests {
         let r = search(&t, " img_71 ", &CancelToken::default()).unwrap();
         assert_eq!(r.query, "img_71", "the query is stored trimmed");
         assert_eq!(r.matches, 1);
-        let movies = t.children(t.root()).find(|&c| t.name(c) == "Movies").unwrap();
-        let docs = t.children(t.root()).find(|&c| t.name(c) == "Docs").unwrap();
+        let (movies, docs) = (descend(&t, &["Movies"]), descend(&t, &["Docs"]));
         assert!(r.is_relevant(movies) && !r.is_match(movies), "an ancestor of a match is relevant, not a match");
         assert!(!r.is_relevant(docs));
         assert!(r.is_relevant(t.root()));
@@ -121,7 +120,7 @@ mod tests {
     #[test]
     fn skips_contents_of_removed_folders() {
         let mut t = tree(vec![D("Movies", vec![D("2015", vec![F("IMG_1.MOV", 10)])]), F("img.txt", 1)]);
-        let movies = t.children(t.root()).find(|&c| t.name(c) == "Movies").unwrap();
+        let movies = descend(&t, &["Movies"]);
         assert!(t.remove(movies));
         let r = search(&t, "img", &CancelToken::default()).unwrap();
         assert_eq!(r.matches, 1, "only the live img.txt matches");

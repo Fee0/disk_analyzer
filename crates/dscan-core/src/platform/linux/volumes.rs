@@ -73,14 +73,13 @@ pub(super) fn mounted_volumes() -> Vec<Volume> {
         .into_iter()
         .filter(|(_, facts)| seen_devices.insert(facts.device))
         .map(|(m, facts)| {
-            let is_root = m.mount_point == Path::new("/");
             let mounted = MountedFileSystem {
                 name: display_name(m),
                 mount: PathBuf::from(&m.mount_point),
                 file_system: m.file_system_name(),
                 is_network: m.is_network(),
             };
-            Volume::new(mounted, &facts.space, is_root)
+            Volume::new(mounted, &facts.space)
         })
         .collect()
 }

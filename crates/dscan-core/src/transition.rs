@@ -289,21 +289,13 @@ struct MorphArc {
     style_after: ArcStyle,
 }
 
-fn span(a: &Arc) -> Span {
+fn bounds(a: &Arc) -> Span {
     (a.start, a.end)
 }
 
 fn share_of(child: &Arc, parent: &Arc) -> Span {
     let width = parent.span().max(NEGLIGIBLE);
     ((child.start - parent.start) / width, (child.end - parent.start) / width)
-}
-
-fn parent_indices(layout: &Layout, ring: usize) -> Vec<Option<usize>> {
-    let arcs = layout.rings.get(ring).map_or(&[][..], Vec::as_slice);
-    match ring.checked_sub(1) {
-        Some(parent_ring) => arcs.iter().map(|a| layout.hit_index(parent_ring, a.mid())).collect(),
-        None => vec![None; arcs.len()],
-    }
 }
 
 struct Side<'a> {
@@ -316,9 +308,13 @@ struct Side<'a> {
 impl<'a> Side<'a> {
     fn new(layout: &'a Layout, ring: usize) -> Self {
         let arcs = layout.rings.get(ring).map_or(&[][..], Vec::as_slice);
+        let parents = match ring.checked_sub(1) {
+            Some(parent_ring) => arcs.iter().map(|a| layout.hit_index(parent_ring, a.mid())).collect(),
+            None => vec![None; arcs.len()],
+        };
         Side {
             arcs,
-            parents: parent_indices(layout, ring),
+            parents,
             by_key: arcs.iter().enumerate().map(|(i, a)| (key(a.segment), i)).collect(),
             slots: vec![0; arcs.len()],
         }
@@ -374,8 +370,8 @@ fn lone_arc(own: &Side, other: &Side, i: usize, parent_ring: Option<(&Side, &Sid
         _ => {
             let point = point_where_a_lone_arc_leaves_or_arrives(own, other, i, parent_counterpart);
             match lone {
-                Lone::Leaving => Travel::Between { from: span(arc), to: (point, point) },
-                Lone::Arriving => Travel::Between { from: (point, point), to: span(arc) },
+                Lone::Leaving => Travel::Between { from: bounds(arc), to: (point, point) },
+                Lone::Arriving => Travel::Between { from: (point, point), to: bounds(arc) },
             }
         }
     };
@@ -394,7 +390,7 @@ fn morph(from: &Layout, to: &Layout) -> Vec<Vec<MorphArc>> {
                 Some(j) => {
                     new.slots[j] = slots.len();
                     MorphArc {
-                        travel: Travel::Between { from: span(&old.arcs[i]), to: span(&new.arcs[j]) },
+                        travel: Travel::Between { from: bounds(&old.arcs[i]), to: bounds(&new.arcs[j]) },
                         style_before: ArcStyle::of(&old.arcs[i]),
                         style_after: ArcStyle::of(&new.arcs[j]),
                     }

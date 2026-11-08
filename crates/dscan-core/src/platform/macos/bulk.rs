@@ -1,7 +1,9 @@
-use std::ffi::CString;
 use std::io;
 
-use crate::platform::unix::{Fd, entry_with_unreadable_attributes, open_dir_without_following_symlink};
+use crate::platform::unix::{
+    Fd, allocated_bytes, c_path, entry_with_unreadable_attributes, hard_link_id, open_dir_without_following_symlink,
+    stat_at,
+};
 use crate::platform::{DeviceId, DirEntry, EntryType, SharedBlocks};
 
 const ATTR_CMN_ERROR: u32 = 0x2000_0000;
@@ -10,7 +12,6 @@ const BUF_SIZE: usize = 256 * 1024;
 const EF_MAY_SHARE_BLOCKS: u64 = 0x1;
 const CLONE_INFO_ATTRIBUTES: u32 = libc::ATTR_CMNEXT_CLONEID | libc::ATTR_CMNEXT_EXT_FLAGS;
 const RECORD_LENGTH_SIZE: usize = 4;
-const STAT_BLOCK_SIZE: u64 = 512;
 
 const VREG: u32 = 1;
 const VDIR: u32 = 2;
@@ -50,7 +51,7 @@ impl<'a> RawEntry<'a> {
             }),
             device,
             allocated: self.alloc,
-            hard_link_id: (is_regular_file && self.links > 1).then_some(self.ino),
+            hard_link_id: hard_link_id(is_regular_file, self.links, self.ino),
             shared_data_stream_id: self.data_stream.filter(|_| is_regular_file && self.may_share_blocks),
             shared_blocks: SharedBlocks::NONE_KNOWN,
         }
@@ -61,11 +62,9 @@ impl<'a> RawEntry<'a> {
     }
 
     fn take_sizes_from_stat(&mut self, directory: &Fd) {
-        let Ok(name) = CString::new(self.name) else { return };
-        let mut status: libc::stat = unsafe { std::mem::zeroed() };
-        let found = unsafe { libc::fstatat(directory.0, name.as_ptr(), &mut status, libc::AT_SYMLINK_NOFOLLOW) } == 0;
-        if found {
-            self.alloc = status.st_blocks as u64 * STAT_BLOCK_SIZE;
+        let Ok(name) = c_path(self.name) else { return };
+        if let Ok(status) = stat_at(directory.0, &name) {
+            self.alloc = allocated_bytes(&status);
             self.links = status.st_nlink as u32;
             self.ino = status.st_ino;
         }
@@ -269,6 +268,7 @@ fn parse_entry(record: &[u8]) -> RawEntry<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
 
     #[test]

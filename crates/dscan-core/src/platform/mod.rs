@@ -87,6 +87,8 @@ pub(crate) trait Platform {
     const PURGEABLE_SPACE: SpaceExplanation;
     const PREVIEW_ACTION: &'static str;
     const REVEAL_ACTION: &'static str;
+    const COMMAND_KEY: &'static str;
+    const RESCAN_SHORTCUT: &'static str;
 
     fn read_dir(path: &[u8], visit: impl FnMut(DirEntry<'_>)) -> io::Result<()>;
     fn device_of(path: &Path) -> io::Result<DeviceId>;

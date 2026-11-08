@@ -60,6 +60,8 @@ mod system {
         const PURGEABLE_SPACE: SpaceExplanation = space_causes::PURGEABLE_SPACE;
         const PREVIEW_ACTION: &'static str = "Open";
         const REVEAL_ACTION: &'static str = "Show in File Manager";
+        const COMMAND_KEY: &'static str = "Ctrl+";
+        const RESCAN_SHORTCUT: &'static str = "F5";
 
         fn read_dir(path: &[u8], visit: impl FnMut(DirEntry<'_>)) -> io::Result<()> {
             dir_reader::read_dir(path, visit)

@@ -46,6 +46,8 @@ mod system {
         const PURGEABLE_SPACE: SpaceExplanation = space_causes::PURGEABLE_SPACE;
         const PREVIEW_ACTION: &'static str = "Open";
         const REVEAL_ACTION: &'static str = "Show in Explorer";
+        const COMMAND_KEY: &'static str = "Ctrl+";
+        const RESCAN_SHORTCUT: &'static str = "F5";
 
         fn read_dir(path: &[u8], visit: impl FnMut(DirEntry<'_>)) -> io::Result<()> {
             dir_reader::read_dir(path, visit)
@@ -56,8 +58,7 @@ mod system {
         }
 
         fn canonical_root(path: &Path) -> io::Result<PathBuf> {
-            let canonical = std::fs::canonicalize(path)?;
-            Ok(PathBuf::from(paths::without_verbatim_prefix(&canonical.to_string_lossy()).into_owned()))
+            Ok(PathBuf::from(path_without_verbatim_prefix(&std::fs::canonicalize(path)?)))
         }
 
         fn is_system_root(path: &Path) -> bool {
@@ -103,17 +104,19 @@ mod system {
         }
 
         fn preview(path: &Path) -> io::Result<()> {
-            run_explorer_whose_exit_code_is_1_even_when_it_worked(&launch::quoted_for_explorer(&explorer_path(path)))
+            run_explorer_whose_exit_code_is_1_even_when_it_worked(&launch::quoted_for_explorer(
+                &path_without_verbatim_prefix(path),
+            ))
         }
 
         fn reveal(path: &Path) -> io::Result<()> {
-            run_explorer_whose_exit_code_is_1_even_when_it_worked(&launch::explorer_select_argument(&explorer_path(
-                path,
-            )))
+            run_explorer_whose_exit_code_is_1_even_when_it_worked(&launch::explorer_select_argument(
+                &path_without_verbatim_prefix(path),
+            ))
         }
     }
 
-    fn explorer_path(path: &Path) -> String {
+    fn path_without_verbatim_prefix(path: &Path) -> String {
         paths::without_verbatim_prefix(&path.to_string_lossy()).into_owned()
     }
 

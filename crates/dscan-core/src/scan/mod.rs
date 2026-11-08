@@ -151,7 +151,6 @@ enum Duplicate {
     HardLink,
     PureClone,
 }
-const MAX_ERROR_SAMPLES: usize = 100;
 
 struct Ctx<'a> {
     boundaries: ScanBoundaries,
@@ -160,7 +159,6 @@ struct Ctx<'a> {
     shared_data_streams: ShardedSeenSet,
     shared_blocks: SharedBlockLedger,
     errors: AtomicU64,
-    error_samples: Mutex<Vec<PathBuf>>,
     progress: &'a Progress,
     cancel: &'a CancelToken,
 }
@@ -205,12 +203,8 @@ impl Ctx<'_> {
         self.boundaries.devices_mounted_on.get(path).copied().unwrap_or(as_listed)
     }
 
-    fn record_error(&self, path: &[u8]) {
+    fn record_error(&self) {
         self.errors.fetch_add(1, Relaxed);
-        let mut s = self.error_samples.lock();
-        if s.len() < MAX_ERROR_SAMPLES {
-            s.push(PathBuf::from(Current::os_str_from_bytes(path).into_owned()));
-        }
     }
 }
 
@@ -225,12 +219,16 @@ fn default_scan_threads() -> usize {
     (cores * IO_BOUND_THREADS_PER_CORE).clamp(MIN_SCAN_THREADS, MAX_SCAN_THREADS)
 }
 
+fn unreadable_root(root: &Path) -> impl FnOnce(std::io::Error) -> ScanError + '_ {
+    |source| ScanError::Root { path: root.to_path_buf(), source }
+}
+
 fn canonical_root(root: &Path) -> Result<PathBuf, ScanError> {
-    Current::canonical_root(root).map_err(|source| ScanError::Root { path: root.to_path_buf(), source })
+    Current::canonical_root(root).map_err(unreadable_root(root))
 }
 
 fn ensure_readable(root: &Path) -> Result<(), ScanError> {
-    std::fs::read_dir(root).map(drop).map_err(|source| ScanError::Root { path: root.to_path_buf(), source })
+    std::fs::read_dir(root).map(drop).map_err(unreadable_root(root))
 }
 
 fn vanished_while_scanning(error: &std::io::Error) -> bool {
@@ -240,7 +238,7 @@ fn vanished_while_scanning(error: &std::io::Error) -> bool {
 pub fn scan(opts: &ScanOptions, progress: &Progress, cancel: &CancelToken) -> Result<Tree, ScanError> {
     let started = Instant::now();
     let root = canonical_root(&opts.root)?;
-    let root_dev = Current::device_of(&root).map_err(|source| ScanError::Root { path: root.clone(), source })?;
+    let root_dev = Current::device_of(&root).map_err(unreadable_root(&root))?;
     ensure_readable(&root)?;
 
     let space = opts.whole_disk.then(|| hidden::space_info(&root).ok()).flatten();
@@ -262,7 +260,6 @@ pub fn scan(opts: &ScanOptions, progress: &Progress, cancel: &CancelToken) -> Re
         shared_data_streams: ShardedSeenSet::new(),
         shared_blocks: SharedBlockLedger::new(),
         errors: AtomicU64::new(0),
-        error_samples: Mutex::new(Vec::new()),
         progress,
         cancel,
     };
@@ -284,7 +281,6 @@ pub fn scan(opts: &ScanOptions, progress: &Progress, cancel: &CancelToken) -> Re
         files: progress.files.load(Relaxed),
         dirs: progress.dirs.load(Relaxed),
         errors: ctx.errors.load(Relaxed),
-        error_samples: std::mem::take(&mut *ctx.error_samples.lock()),
         duration: started.elapsed().saturating_sub(cancel.paused_for()),
         hidden: 0,
         purgeable: 0,
@@ -332,7 +328,7 @@ fn scan_dir(ctx: &Ctx<'_>, path: Vec<u8>, name: Box<[u8]>, dev: DeviceId, depth:
     let mut file_bytes = 0u64;
     let res = Current::read_dir(path, |e| match e.entry_type {
         None => {
-            ctx.record_error(&join(path, e.name));
+            ctx.record_error();
             node.push_file(e.name, Kind::Other, flags::UNREADABLE, 0);
         }
         Some(EntryType::Directory) => subdirs.push((e.name.into(), e.device)),
@@ -353,7 +349,7 @@ fn scan_dir(ctx: &Ctx<'_>, path: Vec<u8>, name: Box<[u8]>, dev: DeviceId, depth:
         Err(e) if vanished_while_scanning(&e) => {}
         Err(_) => {
             node.flags |= flags::UNREADABLE;
-            ctx.record_error(path);
+            ctx.record_error();
         }
     }
 
@@ -393,17 +389,10 @@ fn subdirs_to_descend(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tree::test_util::{descend, scan_folder};
 
     fn find(t: &Tree, path: &str) -> crate::NodeId {
-        let mut cur = t.root();
-        for part in path.split('/') {
-            cur = t.children(cur).find(|&c| t.name(c) == part).unwrap_or_else(|| panic!("{part} missing"));
-        }
-        cur
-    }
-
-    fn scan_folder(root: &Path) -> Tree {
-        scan(&ScanOptions::folder(root), &Progress::default(), &CancelToken::default()).unwrap()
+        descend(t, &path.split('/').collect::<Vec<_>>())
     }
 
     #[test]
@@ -460,6 +449,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn counts_pure_clones_once() {
+        use crate::tree::Accounting;
         use std::ffi::CString;
         use std::io::{Seek, Write};
         use std::os::unix::ffi::OsStrExt;
@@ -482,7 +472,8 @@ mod tests {
         let alloc = |id| t.size(id);
         assert!(alloc(orig) >= 1_000_000 || alloc(pure) >= 1_000_000);
         assert_eq!(alloc(orig).min(alloc(pure)), 0, "pure clone counted once");
-        assert!(t.node(orig).is_clone_copy() ^ t.node(pure).is_clone_copy());
+        let is_clone_copy = |id| t.node(id).accounting() == Accounting::CloneCopy;
+        assert!(is_clone_copy(orig) ^ is_clone_copy(pure));
         assert!(alloc(edited) >= 1_000_000, "edited clones count in full");
         let total = t.size(t.root());
         assert!((2_000_000..2_100_000).contains(&total), "two streams on disk, not three: {total}");
@@ -505,6 +496,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn reflinked_copies_count_shared_blocks_once_where_the_file_system_shares_blocks_and_in_full_elsewhere() {
+        use crate::tree::Accounting;
         use std::io::{Seek, Write};
         const LENGTH: u64 = 1 << 20;
         const EDITED: u64 = 16 << 10;
@@ -523,20 +515,19 @@ mod tests {
 
         let t = scan_folder(r);
         let files = [find(&t, "orig.bin"), find(&t, "copies/pure.bin"), find(&t, "copies/edited.bin")];
+        let counted_elsewhere =
+            |id| matches!(t.node(id).accounting(), Accounting::CloneCopy | Accounting::SharesBlocksCountedElsewhere);
         let total = t.size(t.root());
         if shares_blocks {
             println!("reflinks: the temp dir shares blocks");
             let one_copy_and_the_edit = LENGTH + EDITED..LENGTH + EDITED + LENGTH / 4;
             assert!(one_copy_and_the_edit.contains(&total), "one copy of the data plus the edited blocks: {total}");
-            let marked =
-                files.iter().filter(|&&id| t.node(id).is_clone_copy() || t.node(id).shares_blocks_counted_elsewhere());
+            let marked = files.iter().filter(|&&id| counted_elsewhere(id));
             assert!(marked.count() >= 2, "the copies counted second are marked");
         } else {
             println!("reflinks: the temp dir can't share blocks, so every copy is its own");
             assert!(total >= 3 * LENGTH, "three full copies: {total}");
-            assert!(
-                files.iter().all(|&id| !t.node(id).is_clone_copy() && !t.node(id).shares_blocks_counted_elsewhere())
-            );
+            assert!(files.iter().all(|&id| !counted_elsewhere(id)));
         }
     }
 

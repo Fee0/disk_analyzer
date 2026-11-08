@@ -10,6 +10,10 @@ pub fn thousands(n: u64) -> String {
     out
 }
 
+pub fn items_phrase(count: usize) -> String {
+    if count == 1 { "1 item".to_string() } else { format!("{} items", thousands(count as u64)) }
+}
+
 pub fn truncate(s: &str, max_chars: usize) -> String {
     if s.chars().count() <= max_chars {
         s.to_string()

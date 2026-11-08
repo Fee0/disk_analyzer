@@ -23,15 +23,15 @@ pub(crate) struct MountedFileSystem {
 }
 
 impl Volume {
-    pub(crate) fn new(mounted: MountedFileSystem, space: &SpaceInfo, is_root: bool) -> Self {
+    pub(crate) fn new(mounted: MountedFileSystem, space: &SpaceInfo) -> Self {
         let MountedFileSystem { name, mount, file_system, is_network } = mounted;
         Volume {
             name,
+            is_root: Current::is_system_root(&mount),
             mount,
             total: space.total,
             used: space.used,
             available: space.available_important.max(space.available),
-            is_root,
             file_system,
             is_network,
         }

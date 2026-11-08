@@ -77,7 +77,6 @@ pub(super) fn system_drive_letter() -> char {
 }
 
 pub(super) fn mounted_volumes() -> Vec<Volume> {
-    let system_drive = system_drive_letter();
     drives::letters_in(unsafe { GetLogicalDrives() })
         .filter_map(|letter| {
             let root = drives::root_of(letter);
@@ -93,7 +92,7 @@ pub(super) fn mounted_volumes() -> Vec<Volume> {
                 file_system: facts.file_system,
                 is_network,
             };
-            Some(Volume::new(mounted, &facts.space, letter == system_drive))
+            Some(Volume::new(mounted, &facts.space))
         })
         .collect()
 }

@@ -4,10 +4,11 @@ use std::mem::ManuallyDrop;
 use std::ops::Range;
 
 use super::extents::{self, Batch, FIEMAP_BUFFER_WORDS, FileSystemBlocks};
-use crate::platform::unix::{Fd, entry_with_unreadable_attributes, open_dir_without_following_symlink};
+use crate::platform::unix::{
+    Fd, allocated_bytes, entry_with_unreadable_attributes, hard_link_id, open_dir_without_following_symlink, stat_at,
+};
 use crate::platform::{DeviceId, DirEntry, EntryType, SharedBlocks};
 
-const STAT_BLOCK_SIZE: u64 = 512;
 const FS_IOC_FIEMAP: u32 = 0xC020_660B;
 const BTRFS_IOC_FS_INFO: u32 = 0x8400_941F;
 const NO_ERROR: libc::c_int = 0;
@@ -46,15 +47,6 @@ impl Dir {
     }
 }
 
-fn stat_at(dir: libc::c_int, name: &CStr) -> io::Result<libc::stat> {
-    let mut status: libc::stat = unsafe { std::mem::zeroed() };
-    if unsafe { libc::fstatat(dir, name.as_ptr(), &mut status, libc::AT_SYMLINK_NOFOLLOW) } == 0 {
-        Ok(status)
-    } else {
-        Err(io::Error::last_os_error())
-    }
-}
-
 fn is_self_or_parent(name: &[u8]) -> bool {
     name == b"." || name == b".."
 }
@@ -70,8 +62,8 @@ fn entry_from_stat<'a>(name: &'a [u8], status: &libc::stat) -> DirEntry<'a> {
             _ => EntryType::File,
         }),
         device: DeviceId(status.st_dev),
-        allocated: status.st_blocks as u64 * STAT_BLOCK_SIZE,
-        hard_link_id: (is_regular_file && status.st_nlink > 1).then_some(status.st_ino),
+        allocated: allocated_bytes(status),
+        hard_link_id: hard_link_id(is_regular_file, status.st_nlink, status.st_ino),
         shared_data_stream_id: None,
         shared_blocks: SharedBlocks::NONE_KNOWN,
     }

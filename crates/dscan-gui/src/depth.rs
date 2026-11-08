@@ -33,7 +33,7 @@ impl Elevation {
     }
 }
 
-pub fn top_to_bottom(top: Color, bottom: Color) -> Background {
+fn top_to_bottom(top: Color, bottom: Color) -> Background {
     Background::Gradient(Gradient::Linear(
         gradient::Linear::new(TOP_TO_BOTTOM).add_stop(0.0, top).add_stop(1.0, bottom),
     ))
@@ -57,7 +57,8 @@ pub fn lit_from_above(base: Color) -> Background {
 }
 
 fn pressed_in(base: Color) -> Background {
-    top_to_bottom(theme::mix(base, Color::BLACK, SHADE_BELOW), theme::mix(base, Color::WHITE, LIGHT_FROM_ABOVE))
+    let Shading { top, bottom } = lit_shading(base);
+    top_to_bottom(bottom, top)
 }
 
 pub fn rim(radius: f32) -> Border {

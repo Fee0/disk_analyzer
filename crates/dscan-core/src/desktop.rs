@@ -7,6 +7,10 @@ pub const PREVIEW_ACTION: &str = Current::PREVIEW_ACTION;
 
 pub const REVEAL_ACTION: &str = Current::REVEAL_ACTION;
 
+pub const COMMAND_KEY: &str = Current::COMMAND_KEY;
+
+pub const RESCAN_SHORTCUT: &str = Current::RESCAN_SHORTCUT;
+
 #[derive(Debug, thiserror::Error)]
 pub enum DesktopError {
     #[error("it is a program, and opening it would run it")]

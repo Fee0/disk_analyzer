@@ -4,6 +4,7 @@ use dscan_core::{CancelToken, Progress, ScanOptions};
 use iced::Settings;
 use iced_test::{Error, Simulator};
 
+use crate::app::test_util::{descend, scanned};
 use crate::app::{App, Browser, Message, Notice, NoticeKind, Screen};
 use crate::iced_inspect as ui_inspect;
 use crate::{theme, view};
@@ -39,9 +40,7 @@ fn fixture(root: &Path) {
 
 fn scanned_fixture(dir: &Path) -> Browser {
     fixture(dir);
-    let opts = ScanOptions::folder(dir);
-    let tree = dscan_core::scan(&opts, &Progress::default(), &CancelToken::default()).unwrap();
-    Browser::new(tree, opts)
+    scanned_folder(dir)
 }
 
 fn app_showing(browser: Browser) -> App {
@@ -67,14 +66,9 @@ fn shoot_chart_animation(app: &mut App, name: &str, kind: dscan_core::Transition
     let animation = browser(app).animation.as_ref().expect("the change animates the chart");
     assert_eq!(animation.kind(), kind, "{name}");
     for percent in [25, 50, 75] {
-        if let Screen::Browse(b) = &mut app.screen {
-            b.animation.as_mut().unwrap().jump_to(f64::from(percent) / 100.0);
-        }
+        browser_mut(app).animation.as_mut().unwrap().jump_to(f64::from(percent) / 100.0);
         let mut ui = sim(app);
-        println!(
-            "shot: {}",
-            ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, &format!("{name}-{percent}"))?.display()
-        );
+        shoot(&mut ui, &format!("{name}-{percent}"))?;
     }
     finish_chart_animation(app);
     Ok(())
@@ -121,12 +115,17 @@ fn sim(app: &App) -> Simulator<'_, Message> {
     Simulator::with_size(Settings::default(), VIEW, view::view(app))
 }
 
+fn shoot(ui: &mut Simulator<'_, Message>, name: &str) -> Result<(), Error> {
+    println!("shot: {}", ui_inspect::shot(ui, &theme::app_theme(), OUT, name)?.display());
+    Ok(())
+}
+
 #[test]
 fn inspect_start() -> Result<(), Error> {
     let (app, _) = App::new(None);
     let mut ui = sim(&app);
     println!("{}", ui_inspect::report(&mut ui, VIEW));
-    println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, "start")?.display());
+    shoot(&mut ui, "start")?;
     Ok(())
 }
 
@@ -137,7 +136,7 @@ fn inspect_browse() -> Result<(), Error> {
     {
         let mut ui = sim(&app);
         println!("{}", ui_inspect::report(&mut ui, VIEW));
-        println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, "browse")?.display());
+        shoot(&mut ui, "browse")?;
         let file_count =
             |text: &str| text.strip_suffix(" files").is_some_and(|n| n.chars().all(|c| c.is_ascii_digit() || c == ','));
         assert!(
@@ -148,7 +147,7 @@ fn inspect_browse() -> Result<(), Error> {
     let msgs: Vec<Message> = {
         let mut ui = sim(&app);
         ui_inspect::hover(&mut ui, A_CHART_SEGMENT);
-        println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, "chart-tooltip")?.display());
+        shoot(&mut ui, "chart-tooltip")?;
         ui_inspect::click_at(&mut ui, A_CHART_SEGMENT);
         ui.click("Pictures/")?;
         ui.into_messages().collect()
@@ -164,7 +163,7 @@ fn inspect_browse() -> Result<(), Error> {
     {
         let mut ui = sim(&app);
         println!("{}", ui_inspect::report(&mut ui, VIEW));
-        println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, "browse-after")?.display());
+        shoot(&mut ui, "browse-after")?;
     }
     Ok(())
 }
@@ -196,10 +195,6 @@ fn bounds_of_text(ui: &mut Simulator<'_, Message>, label: &str) -> iced::Rectang
         .bounds
 }
 
-fn descend(tree: &dscan_core::Tree, names: &[&str]) -> dscan_core::NodeId {
-    names.iter().fold(tree.root(), |at, name| tree.children(at).find(|&c| tree.name(c) == *name).expect(name))
-}
-
 #[test]
 fn toolbar_lines_up_with_the_file_list_and_a_long_path_stops_before_it() -> Result<(), Error> {
     let dir = tempfile::tempdir().unwrap();
@@ -213,7 +208,7 @@ fn toolbar_lines_up_with_the_file_list_and_a_long_path_stops_before_it() -> Resu
     let _ = app.update(Message::Navigate(deepest));
 
     let mut ui = sim(&app);
-    println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, "toolbar-aligned")?.display());
+    shoot(&mut ui, "toolbar-aligned")?;
     let nodes = ui_inspect::nodes(&mut ui);
     let bounds_of =
         |id: &str| nodes.iter().find(|n| n.id.as_deref() == Some(id)).unwrap_or_else(|| panic!("no {id}")).bounds;
@@ -256,7 +251,7 @@ fn deep_path_bar_shows_root_ellipsis_and_last_folders_and_the_ellipsis_steps_int
     let msgs: Vec<Message> = {
         let mut ui = sim(&app);
         println!("{}", ui_inspect::report(&mut ui, VIEW));
-        println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, "path-bar-deep")?.display());
+        shoot(&mut ui, "path-bar-deep")?;
         for hidden in ["Projects", "clients"] {
             assert!(ui.find(hidden).is_err(), "{hidden} is folded into the ellipsis");
         }
@@ -276,12 +271,19 @@ fn deep_path_bar_shows_root_ellipsis_and_last_folders_and_the_ellipsis_steps_int
         .map(|acme| iced::Point::new(54.0, acme.bounds.center_y()))
         .unwrap();
     ui_inspect::hover(&mut ui, back_button);
-    println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, "path-bar-back-hover")?.display());
+    shoot(&mut ui, "path-bar-back-hover")?;
     Ok(())
 }
 
 fn browser(app: &App) -> &Browser {
     match &app.screen {
+        Screen::Browse(b) => b,
+        _ => panic!("not browsing"),
+    }
+}
+
+fn browser_mut(app: &mut App) -> &mut Browser {
+    match &mut app.screen {
         Screen::Browse(b) => b,
         _ => panic!("not browsing"),
     }
@@ -491,7 +493,7 @@ fn scanning_a_disk_turns_its_scan_button_into_pause_and_resume() -> Result<(), E
     {
         let mut ui = sim(&app);
         println!("{}", ui_inspect::report(&mut ui, VIEW));
-        println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, "start-disks")?.display());
+        shoot(&mut ui, "start-disks")?;
         assert_eq!(count_of(&texts_on_screen(&mut ui), "Scan"), 3, "every disk offers a scan");
     }
 
@@ -504,10 +506,7 @@ fn scanning_a_disk_turns_its_scan_button_into_pause_and_resume() -> Result<(), E
         let bytes = MID_SCAN.expected.unwrap() / 100 * percent;
         scan_job(&mut app).snapshot = dscan_core::ProgressSnapshot { bytes, ..MID_SCAN };
         let mut ui = sim(&app);
-        println!(
-            "shot: {}",
-            ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, &format!("scanning-{percent}"))?.display()
-        );
+        shoot(&mut ui, &format!("scanning-{percent}"))?;
     }
     scan_job(&mut app).snapshot = MID_SCAN;
     let mut ui = sim(&app);
@@ -536,7 +535,7 @@ fn scanning_a_disk_turns_its_scan_button_into_pause_and_resume() -> Result<(), E
         let texts = texts_on_screen(&mut ui);
         assert!(texts.contains(&paused_label));
         assert_eq!(count_of(&texts, "Resume"), 1, "a paused scan offers Resume in the same place");
-        println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, "paused")?.display());
+        shoot(&mut ui, "paused")?;
         ui.click("Resume")?;
         let msgs: Vec<Message> = ui.into_messages().collect();
         assert!(matches!(msgs[..], [Message::TogglePause]), "{msgs:?}");
@@ -561,7 +560,7 @@ fn a_folder_scan_gets_its_own_row_and_another_scan_replaces_it() -> Result<(), E
     let folder_name = scan_job(&mut app).opts.display_name();
     {
         let mut ui = sim(&app);
-        println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, "scanning-folder")?.display());
+        shoot(&mut ui, "scanning-folder")?;
         let texts = texts_on_screen(&mut ui);
         assert!(count_of(&texts, &folder_name) >= 1, "the folder is listed under the disks: {texts:?}");
         assert_eq!((count_of(&texts, "Pause"), count_of(&texts, "Scan")), (1, 1), "{texts:?}");
@@ -596,13 +595,8 @@ fn a_folder_scan_gets_its_own_row_and_another_scan_replaces_it() -> Result<(), E
 
 #[test]
 fn inspect_open_results() -> Result<(), Error> {
-    use dscan_core::Tree;
-    let scan = |p: &Path| -> (Tree, ScanOptions) {
-        let opts = ScanOptions::folder(p);
-        (dscan_core::scan(&opts, &Progress::default(), &CancelToken::default()).unwrap(), opts)
-    };
-    let open = |app: &mut App, (tree, opts): (Tree, ScanOptions)| {
-        app.screen = Screen::Browse(Box::new(Browser::new(tree, opts)));
+    let open = |app: &mut App, browser: Browser| {
+        app.screen = Screen::Browse(Box::new(browser));
         let _ = app.update(Message::GoHome);
     };
     let dirs: Vec<_> = (0..6).map(|_| tempfile::tempdir().unwrap()).collect();
@@ -612,13 +606,13 @@ fn inspect_open_results() -> Result<(), Error> {
     let (mut app, _) = App::new(None);
     app.volumes = Some(dscan_core::list_volumes());
     for d in &dirs {
-        open(&mut app, scan(d.path()));
+        open(&mut app, scanned_folder(d.path()));
     }
     assert_eq!(app.parked_newest_first.len(), 6, "every result stays open");
     {
         let mut ui = sim(&app);
         println!("{}", ui_inspect::report(&mut ui, VIEW));
-        println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, "home-results")?.display());
+        shoot(&mut ui, "home-results")?;
     }
 
     let newest = dscan_core::canonical_path(dirs[5].path()).unwrap();
@@ -660,7 +654,9 @@ fn inspect_open_results() -> Result<(), Error> {
     let _ = app.update(Message::FolderPicked(Some(dirs[0].path().to_path_buf())));
     let job = app.scan().expect("scanning");
     let job_id = job.id;
-    *job.result_slot.lock() = Some(Ok(scan(dirs[0].path()).0));
+    let fresh_scan =
+        dscan_core::scan(&ScanOptions::folder(dirs[0].path()), &Progress::default(), &CancelToken::default());
+    *job.result_slot.lock() = Some(fresh_scan);
     let _ = app.update(Message::ScanFinished { job_id, crash: None });
     assert!(matches!(app.screen, Screen::Browse(_)));
     assert_eq!(app.parked_newest_first.len(), 4, "a fresh scan of an open folder drops its stale result");
@@ -680,7 +676,7 @@ fn collector_fixed_height_fits_every_state_without_clipping() -> Result<(), Erro
         let mut ui = sim(app);
         let report = ui_inspect::report(&mut ui, VIEW);
         assert!(!report.contains("clipped:"), "{name}: collector content is clipped\n{report}");
-        println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, name)?.display());
+        shoot(&mut ui, name)?;
         Ok(())
     };
     shot(&app, "collector-empty")?;
@@ -688,9 +684,8 @@ fn collector_fixed_height_fits_every_state_without_clipping() -> Result<(), Erro
     shot(&app, "collector-one")?;
     let kids: Vec<_> = browser(&app).tree.children(root).skip(1).collect();
     for id in kids {
-        if let Screen::Browse(b) = &mut app.screen {
-            b.collector.add(&b.tree, id).unwrap();
-        }
+        let b = browser_mut(&mut app);
+        b.collector.add(&b.tree, id).unwrap();
     }
     assert!(browser(&app).collector.len() > 4);
     shot(&app, "collector-many")?;
@@ -699,9 +694,8 @@ fn collector_fixed_height_fits_every_state_without_clipping() -> Result<(), Erro
         let report = ui_inspect::report(&mut ui, VIEW);
         assert!(report.contains("\"Hold 3 s to delete permanently\""), "the hold button says how long to hold");
     }
-    if let Screen::Browse(b) = &mut app.screen {
-        b.delete_hold_started = Some(std::time::Instant::now() - std::time::Duration::from_millis(1500));
-    }
+    browser_mut(&mut app).delete_hold_started =
+        Some(std::time::Instant::now() - std::time::Duration::from_millis(1500));
     {
         let mut ui = sim(&app);
         let seconds_left: f32 = ui_inspect::nodes(&mut ui)
@@ -714,9 +708,7 @@ fn collector_fixed_height_fits_every_state_without_clipping() -> Result<(), Erro
         );
     }
     shot(&app, "collector-holding")?;
-    if let Screen::Browse(b) = &mut app.screen {
-        b.delete_hold_started = None;
-    }
+    browser_mut(&mut app).delete_hold_started = None;
     let _ = app.update(Message::AskTrash);
     shot(&app, "collector-confirm")?;
     let _ = app.update(Message::CancelTrash);
@@ -817,7 +809,7 @@ fn collected_items_are_listed_only_after_clicking_the_collector() -> Result<(), 
             .expect("the summary stays")
             .bounds;
         assert_eq!(still_in_place.y, summary.y, "opening the list grows it upward, the bar stays put");
-        println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, "collector-list-open")?.display());
+        shoot(&mut ui, "collector-list-open")?;
     }
 
     let msgs: Vec<Message> = {
@@ -870,7 +862,7 @@ fn messages_float_over_the_chart_instead_of_a_status_line() -> Result<(), Error>
         let message = bounds_of_text(&mut ui, LONG_FAILURE);
         assert!(message.x + message.width < chart_side, "the notice floats over the chart: {message:?}");
         assert!(message.y < VIEW.1 / 4.0, "the notice sits at the top of the chart: {message:?}");
-        println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, "notice-error")?.display());
+        shoot(&mut ui, "notice-error")?;
         let dismiss = remove_button_beside(&mut ui, LONG_FAILURE);
         ui_inspect::click_at(&mut ui, dismiss);
         clicks_only(ui.into_messages())
@@ -910,11 +902,9 @@ fn messages_float_over_the_chart_instead_of_a_status_line() -> Result<(), Error>
             "“System32” is a protected system location and can't be moved to the Recycle Bin.",
         ),
     ] {
-        if let Screen::Browse(b) = &mut app.screen {
-            b.notice = Some(Notice { kind, text: text.to_string() });
-        }
+        browser_mut(&mut app).notice = Some(Notice { kind, text: text.to_string() });
         let mut ui = sim(&app);
-        println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, label)?.display());
+        shoot(&mut ui, label)?;
         let dismiss = bounds_of_button_beside(&mut ui, text);
         assert!(
             dismiss.width >= view::NOTICE_DISMISS_BUTTON_SIDE && dismiss.height >= view::NOTICE_DISMISS_BUTTON_SIDE,
@@ -1027,7 +1017,7 @@ fn every_screen_stays_readable_from_the_default_window_down_to_the_minimum_size(
         for size in sizes {
             let mut ui = Simulator::with_size(Settings::default(), size, view::view(app));
             let shot_name = format!("squash-{name}-{}x{}", size.0, size.1);
-            println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, &shot_name)?.display());
+            shoot(&mut ui, &shot_name)?;
             problems.extend(layout_problems(&mut ui, size).into_iter().map(|p| format!("{shot_name}: {p}")));
         }
     }
@@ -1036,8 +1026,7 @@ fn every_screen_stays_readable_from_the_default_window_down_to_the_minimum_size(
 }
 
 fn scanned_folder(path: &Path) -> Browser {
-    let opts = ScanOptions::folder(path);
-    Browser::new(dscan_core::scan(&opts, &Progress::default(), &CancelToken::default()).unwrap(), opts)
+    scanned(ScanOptions::folder(path))
 }
 
 fn select(app: &mut App, id: dscan_core::NodeId) {
@@ -1051,9 +1040,7 @@ fn texts_on_screen(ui: &mut Simulator<'_, Message>) -> Vec<String> {
 
 fn whole_disk_scan_of(dir: &Path) -> App {
     fixture(dir);
-    let opts = ScanOptions::volume(dir, "Test Disk");
-    let tree = dscan_core::scan(&opts, &Progress::default(), &CancelToken::default()).unwrap();
-    app_showing(Browser::new(tree, opts))
+    app_showing(scanned(ScanOptions::volume(dir, "Test Disk")))
 }
 
 const HIDDEN_SPACE_NAME: &str = "Hidden space";
@@ -1066,7 +1053,7 @@ fn a_selected_file_offers_preview_and_reveal_and_the_buttons_only_send_messages(
     select(&mut app, notes);
     {
         let mut ui = sim(&app);
-        println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, "selection-actions")?.display());
+        shoot(&mut ui, "selection-actions")?;
     }
     for (label, expected) in [(dscan_core::PREVIEW_ACTION, "Preview"), (dscan_core::REVEAL_ACTION, "Reveal")] {
         let mut ui = sim(&app);
@@ -1090,14 +1077,13 @@ fn selecting_hidden_space_explains_it_and_offers_the_fixes_this_os_has() -> Resu
     let dir = tempfile::tempdir().unwrap();
     let mut app = whole_disk_scan_of(dir.path());
     let hidden = descend(&browser(&app).tree, &[HIDDEN_SPACE_NAME]);
-    if let Screen::Browse(b) = &mut app.screen {
-        std::sync::Arc::get_mut(&mut b.tree).expect("nothing else holds the fresh tree").stats.errors = 12;
-    }
+    let tree = &mut browser_mut(&mut app).tree;
+    std::sync::Arc::get_mut(tree).expect("nothing else holds the fresh tree").stats.errors = 12;
     select(&mut app, hidden);
     let explanation = dscan_core::hidden::explain(&browser(&app).tree, hidden).expect("hidden space is explained");
 
     let mut ui = sim(&app);
-    println!("shot: {}", ui_inspect::shot(&mut ui, &theme::app_theme(), OUT, "hidden-space-explained")?.display());
+    shoot(&mut ui, "hidden-space-explained")?;
     let texts = texts_on_screen(&mut ui);
     assert!(texts.iter().any(|t| t == explanation.summary), "the summary is shown: {texts:?}");
     for cause in explanation.causes {

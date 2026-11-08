@@ -41,13 +41,6 @@ fn space_of_a_share_that_may_not_answer(m: &Mount) -> SpaceInfo {
     answered_within(NETWORK_ANSWER_LIMIT, move || space::space_info(&on).ok()).flatten().unwrap_or(m.space_when_listed)
 }
 
-fn space_reported_by(s: &libc::statfs) -> SpaceInfo {
-    let block = s.f_bsize as u64;
-    let available = s.f_bavail * block;
-    let total = s.f_blocks * block;
-    SpaceInfo { total, used: total.saturating_sub(s.f_bfree * block), available, available_important: available }
-}
-
 fn cstr(buf: &[libc::c_char]) -> String {
     unsafe { CStr::from_ptr(buf.as_ptr()) }.to_string_lossy().into_owned()
 }
@@ -77,7 +70,7 @@ fn mounts_via_getfsstat_into_own_buffer() -> Vec<Mount> {
             from: cstr(&s.f_mntfromname),
             fstype: cstr(&s.f_fstypename),
             flags: s.f_flags,
-            space_when_listed: space_reported_by(s),
+            space_when_listed: space::space_reported_by(s),
         })
         .collect()
 }
@@ -97,10 +90,9 @@ pub(super) fn other_volumes_of_the_same_container(root: &Path) -> FxHashSet<Devi
 }
 
 pub(super) fn devices_mounted_on() -> FxHashMap<Vec<u8>, DeviceId> {
-    use std::os::unix::ffi::OsStrExt;
     mounts_via_getfsstat_into_own_buffer()
         .into_iter()
-        .filter_map(|m| Some((m.on.as_os_str().as_bytes().to_vec(), unix::device_of(&m.on).ok()?)))
+        .filter_map(|m| Some((unix::path_bytes(&m.on).into_owned(), unix::device_of(&m.on).ok()?)))
         .collect()
 }
 
@@ -117,14 +109,13 @@ pub(super) fn mounted_volumes() -> Vec<Volume> {
                 true => DEFAULT_STARTUP_DISK_NAME.into(),
                 false => m.on.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
             });
-            let is_root = m.is_root();
             let mounted = MountedFileSystem {
                 name,
                 file_system: file_systems::display_name(&m.fstype),
                 is_network: m.is_network(),
                 mount: m.on,
             };
-            Some(Volume::new(mounted, &space, is_root))
+            Some(Volume::new(mounted, &space))
         })
         .collect()
 }

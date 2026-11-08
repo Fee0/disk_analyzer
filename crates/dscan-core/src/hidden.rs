@@ -23,15 +23,16 @@ pub struct SpaceExplanation {
 }
 
 pub fn explain(tree: &Tree, id: NodeId) -> Option<SpaceExplanation> {
-    let node = tree.node(id);
-    if !node.is_synthetic() {
-        return None;
-    }
-    match node.kind() {
+    match tree.node(id).kind() {
         Kind::Hidden => Some(Current::HIDDEN_SPACE),
         Kind::Purgeable => Some(Current::PURGEABLE_SPACE),
         _ => None,
     }
+}
+
+pub fn unreadable_items_behind(tree: &Tree, id: NodeId) -> Option<u64> {
+    let unreadable = tree.stats.errors;
+    (tree.node(id).kind() == Kind::Hidden && unreadable > 0).then_some(unreadable)
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -81,8 +82,15 @@ mod tests {
             Synthetic { name: "Hidden space", kind: Kind::Hidden, size: 5 },
             Synthetic { name: "Purgeable space", kind: Kind::Purgeable, size: 3 },
         ];
-        let tree = build(root, "/r".into(), "root", true, synthetic, ScanStats::default());
-        let named = |name: &str| tree.children(tree.root()).find(|&c| tree.name(c) == name).unwrap();
+        let stats = ScanStats { errors: 3, ..ScanStats::default() };
+        let tree = build(root, "/r".into(), "root", true, synthetic, stats);
+        let named = |name| crate::tree::test_util::descend(&tree, &[name]);
+        assert_eq!(
+            unreadable_items_behind(&tree, named("Hidden space")),
+            Some(3),
+            "unreadable items show up as hidden"
+        );
+        assert_eq!(unreadable_items_behind(&tree, named("Purgeable space")), None);
 
         let hidden = explain(&tree, named("Hidden space")).expect("hidden space is explained");
         assert!(!hidden.causes.is_empty(), "every OS names what hidden space can be");

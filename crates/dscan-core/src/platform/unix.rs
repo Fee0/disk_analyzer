@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::ffi::{CString, OsStr};
+use std::ffi::{CStr, CString, OsStr};
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use super::{DeviceId, DirEntry, SharedBlocks};
+
+const STAT_BLOCK_SIZE: u64 = 512;
 
 pub(super) struct Fd(pub libc::c_int);
 
@@ -37,6 +39,23 @@ pub(super) fn open_dir_without_following_symlink(path: &[u8]) -> io::Result<Fd> 
     let fd =
         unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
     if fd < 0 { Err(io::Error::last_os_error()) } else { Ok(Fd(fd)) }
+}
+
+pub(super) fn stat_at(dir: libc::c_int, name: &CStr) -> io::Result<libc::stat> {
+    let mut status: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstatat(dir, name.as_ptr(), &mut status, libc::AT_SYMLINK_NOFOLLOW) } == 0 {
+        Ok(status)
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+pub(super) fn allocated_bytes(status: &libc::stat) -> u64 {
+    status.st_blocks as u64 * STAT_BLOCK_SIZE
+}
+
+pub(super) fn hard_link_id(is_regular_file: bool, links: impl Into<u64>, inode: u64) -> Option<u64> {
+    (is_regular_file && links.into() > 1).then_some(inode)
 }
 
 pub(super) fn device_of(path: &Path) -> io::Result<DeviceId> {

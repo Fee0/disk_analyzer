@@ -1,5 +1,8 @@
+use std::sync::LazyLock;
+
 use dscan_core::{
-    Kind, NodeId, PREVIEW_ACTION, REVEAL_ACTION, Remedy, Segment, SpaceExplanation, TRASH_NAME, Volume, format_size,
+    Accounting, COMMAND_KEY, NodeId, PREVIEW_ACTION, RESCAN_SHORTCUT, REVEAL_ACTION, Remedy, Segment, SpaceExplanation,
+    TRASH_NAME, Volume, format_size,
 };
 use iced::border;
 use iced::widget::text::Wrapping;
@@ -12,7 +15,7 @@ use iced::{Alignment, Color, Element, Fill, Length, Theme};
 use crate::animation::ChartAnimation;
 use crate::app::{App, Browser, HOLD_TO_DELETE, ListRow, Message, Notice, NoticeKind, SEARCH_ID, ScanJob, Screen};
 use crate::depth::{self, Elevation};
-use crate::fmt::{fit_width, fit_width_keeping_both_ends, generous_text_width, thousands, truncate};
+use crate::fmt::{fit_width, fit_width_keeping_both_ends, generous_text_width, items_phrase, thousands, truncate};
 use crate::icon;
 use crate::sunburst::Sunburst;
 use crate::theme;
@@ -87,24 +90,6 @@ fn filled_button<'a>(
     .into()
 }
 
-fn subtle_button<'a>(content: impl Into<Element<'a, Message>>, msg: Option<Message>) -> button::Button<'a, Message> {
-    button(content)
-        .padding([4.0, SUBTLE_BUTTON_PADDING_X])
-        .style(|t: &Theme, s| {
-            let mut st = button::text(t, s);
-            st.background = match s {
-                button::Status::Hovered => Some(HOVER_TINT.into()),
-                button::Status::Pressed => Some(PRESS_TINT.into()),
-                button::Status::Active | button::Status::Disabled => None,
-            };
-            st.text_color =
-                if matches!(s, button::Status::Disabled) { theme::TEXT_DIM.scale_alpha(0.4) } else { theme::TEXT };
-            st.border = st.border.rounded(6);
-            st
-        })
-        .on_press_maybe(msg)
-}
-
 fn outlined_text_button(label: &str, msg: Message) -> Element<'_, Message> {
     depth::casting_shadow(
         button(text(label).size(13).wrapping(Wrapping::None))
@@ -131,8 +116,18 @@ fn tooltip_box<'a>(label: impl text::IntoFragment<'a>) -> container::Container<'
     )
 }
 
+const TOOLTIP_GAP: f32 = 4.0;
+
+fn tooltip_at<'a>(
+    content: impl Into<Element<'a, Message>>,
+    label: impl text::IntoFragment<'a>,
+    position: tooltip::Position,
+) -> Element<'a, Message> {
+    tooltip(content, tooltip_box(label), position).gap(TOOLTIP_GAP).into()
+}
+
 fn with_tooltip<'a>(content: impl Into<Element<'a, Message>>, label: &'a str) -> Element<'a, Message> {
-    tooltip(content, tooltip_box(label), tooltip::Position::Bottom).gap(4).into()
+    tooltip_at(content, label, tooltip::Position::Bottom)
 }
 
 fn icon_button<'a>(
@@ -140,7 +135,8 @@ fn icon_button<'a>(
     tooltip_label: &'a str,
     msg: Message,
 ) -> Element<'a, Message> {
-    with_tooltip(subtle_button(icon, Some(msg)).padding(ICON_BUTTON_PADDING), tooltip_label)
+    let button = button(icon).padding(ICON_BUTTON_PADDING).style(quiet_button_style(theme::TEXT)).on_press(msg);
+    with_tooltip(button, tooltip_label)
 }
 
 const START_PADDING: f32 = 24.0;
@@ -197,7 +193,7 @@ fn start_content(app: &App, width: f32) -> Column<'_, Message> {
     }
 
     if !app.full_disk_access {
-        let warn = theme::kind_color(Kind::Archive);
+        let warn = theme::WARNING;
         col = col.push(Space::new().height(START_SECTION_GAP)).push(
             container(
                 row![
@@ -325,14 +321,13 @@ fn disk_row<'a>(identity: DiskIdentity<'a>, meter: DiskMeter<'a>, text_width: f3
 }
 
 fn fullness_color(used_fraction: f32) -> Color {
-    let kind = if used_fraction >= NEARLY_FULL {
-        Kind::DiskImage
+    if used_fraction >= NEARLY_FULL {
+        theme::DANGER
     } else if used_fraction >= FILLING_UP {
-        Kind::Archive
+        theme::WARNING
     } else {
-        Kind::Video
-    };
-    theme::kind_color(kind)
+        theme::SUCCESS
+    }
 }
 
 fn scan_button<'a>(label: &'a str, msg: Message) -> Element<'a, Message> {
@@ -478,24 +473,26 @@ fn browse(b: &Browser) -> Element<'_, Message> {
         .spacing(10)
         .padding(12);
 
-    match &b.drag {
-        Some(d) if d.dragging => {
+    match b.active_drag() {
+        Some(d) => {
             let label = format!("{}  {}", truncate(&b.tree.name(d.item), 40), format_size(b.size(d.item)));
             let chip = container(text(label).size(13)).padding([6, 10]).style(|_| {
                 rounded_box(theme::ACCENT.scale_alpha(0.92), 8.0).color(Color::WHITE).shadow(floating_shadow())
             });
             stack![main, pin(chip).x(d.pos.x + 14.0).y(d.pos.y + 10.0)].into()
         }
-        _ => main.into(),
+        None => main.into(),
     }
 }
 
-const SEARCH_PLACEHOLDER_WITH_SHORTCUT: &str =
-    if cfg!(target_os = "macos") { "Search  ⌘F" } else { "Search  Ctrl+F" };
+fn with_command_shortcut(label: &str, key: &str) -> String {
+    format!("{label}  {COMMAND_KEY}{key}")
+}
 
-const BACK_TOOLTIP: &str = if cfg!(target_os = "macos") { "Back  ⌘[" } else { "Back  Ctrl+[" };
-const FORWARD_TOOLTIP: &str = if cfg!(target_os = "macos") { "Forward  ⌘]" } else { "Forward  Ctrl+]" };
-const RESCAN_TOOLTIP: &str = if cfg!(target_os = "macos") { "Scan again  ⌘R" } else { "Scan again  F5" };
+static SEARCH_PLACEHOLDER_WITH_SHORTCUT: LazyLock<String> = LazyLock::new(|| with_command_shortcut("Search", "F"));
+static BACK_TOOLTIP: LazyLock<String> = LazyLock::new(|| with_command_shortcut("Back", "["));
+static FORWARD_TOOLTIP: LazyLock<String> = LazyLock::new(|| with_command_shortcut("Forward", "]"));
+static RESCAN_TOOLTIP: LazyLock<String> = LazyLock::new(|| format!("Scan again  {RESCAN_SHORTCUT}"));
 
 const NAV_ICON_SIZE: f32 = 16.0;
 const DISABLED_ICON_STRENGTH: f32 = 0.4;
@@ -520,13 +517,13 @@ fn toolbar(b: &Browser) -> Element<'_, Message> {
     let nav = raised_group(
         row![
             nav_icon_button(icon::home, "Start page", Some(Message::GoHome)),
-            nav_icon_button(icon::chevron_left, BACK_TOOLTIP, Some(Message::Back)),
-            nav_icon_button(icon::chevron_right, FORWARD_TOOLTIP, b.can_forward().then_some(Message::Forward)),
+            nav_icon_button(icon::chevron_left, &BACK_TOOLTIP, Some(Message::Back)),
+            nav_icon_button(icon::chevron_right, &FORWARD_TOOLTIP, b.can_forward().then_some(Message::Forward)),
         ]
         .spacing(2),
     );
 
-    let search = text_input(SEARCH_PLACEHOLDER_WITH_SHORTCUT, &b.search_text)
+    let search = text_input(&SEARCH_PLACEHOLDER_WITH_SHORTCUT, &b.search_text)
         .id(SEARCH_ID)
         .on_input(Message::SearchChanged)
         .padding([6, 10])
@@ -543,7 +540,7 @@ fn toolbar(b: &Browser) -> Element<'_, Message> {
 }
 
 fn rescan_button<'a>() -> Element<'a, Message> {
-    with_tooltip(outlined_text_button("Rescan", Message::Rescan), RESCAN_TOOLTIP)
+    with_tooltip(outlined_text_button("Rescan", Message::Rescan), &RESCAN_TOOLTIP)
 }
 
 const PATH_ROOT_ICON_SIZE: f32 = 14.0;
@@ -707,7 +704,7 @@ fn dismiss_notice_button<'a>() -> Element<'a, Message> {
             }
         })
         .on_press(Message::DismissNotice);
-    tooltip(dismiss, tooltip_box(DISMISS_NOTICE_TOOLTIP), tooltip::Position::Bottom).gap(4).into()
+    with_tooltip(dismiss, DISMISS_NOTICE_TOOLTIP)
 }
 
 fn notice_banner(notice: &Notice) -> Element<'_, Message> {
@@ -787,10 +784,6 @@ fn generous_button_width(label: &str, text_size: f32) -> f32 {
     generous_text_width(label, text_size) + 2.0 * DEFAULT_BUTTON_PADDING_X
 }
 
-fn items_phrase(count: usize) -> String {
-    if count == 1 { "1 item".to_string() } else { format!("{} items", thousands(count as u64)) }
-}
-
 fn hold_to_delete_label(progress: Option<f32>, fit: CollectorFit) -> String {
     let seconds_left = |done: f32| HOLD_TO_DELETE.as_secs_f32() * (1.0 - done);
     match (progress, fit) {
@@ -836,14 +829,14 @@ fn hold_to_delete_button(b: &Browser, fit: CollectorFit) -> Element<'_, Message>
     if fit == CollectorFit::Full {
         button.into()
     } else {
-        tooltip(button, tooltip_box(hold_to_delete_explanation()), tooltip::Position::Top).gap(4).into()
+        tooltip_at(button, hold_to_delete_explanation(), tooltip::Position::Top)
     }
 }
 
 fn collector(b: &Browser, layer: iced::Size) -> Element<'_, Message> {
-    let dragging = b.drag.as_ref().is_some_and(|d| d.dragging);
-    let hot = dragging && b.over_collector;
-    let list_open = b.collected_list_open && !b.collector.is_empty();
+    let dragging = b.active_drag().is_some();
+    let hot = b.dropping_on_collector();
+    let list_open = b.collected_list_open;
 
     let bar = container(responsive(move |size| collector_content(b, size.width)))
         .padding(COLLECTOR_PADDING)
@@ -950,8 +943,7 @@ fn with_chevron<'a>(b: &Browser, label: impl Into<Element<'a, Message>>) -> Elem
 }
 
 fn collector_ring<'a>(b: &Browser) -> Element<'a, Message> {
-    let hot = b.over_collector && b.drag.as_ref().is_some_and(|d| d.dragging);
-    let ring_color = if hot { theme::ACCENT } else { theme::TEXT_DIM };
+    let ring_color = if b.dropping_on_collector() { theme::ACCENT } else { theme::TEXT_DIM };
     let fill = if b.collector.is_empty() { theme::PANEL_HI } else { theme::DANGER };
     container(dot(fill, COLLECTOR_RING_DOT))
         .padding(COLLECTOR_RING_PADDING)
@@ -978,8 +970,8 @@ fn collector_content(b: &Browser, width: f32) -> Element<'_, Message> {
 }
 
 fn empty_collector_hint<'a>(b: &Browser) -> Element<'a, Message> {
-    let dragging = b.drag.as_ref().is_some_and(|d| d.dragging);
-    let hot = dragging && b.over_collector;
+    let dragging = b.active_drag().is_some();
+    let hot = b.dropping_on_collector();
     text(if dragging { "Drop here to collect" } else { "Drag items here (or press C) to collect them" })
         .size(COLLECTOR_TEXT_SIZE)
         .color(if hot { theme::TEXT } else { theme::TEXT_DIM })
@@ -1144,23 +1136,7 @@ fn list_panel_content(b: &Browser, panel_size: iced::Size) -> Element<'_, Messag
     let subject = b.listed_folder();
     let t = &b.tree;
 
-    let size = format_size(b.size(subject));
-    let name_width =
-        width - LIST_HEADER_DOT - 2.0 * LIST_HEADER_SPACING - generous_text_width(&size, LIST_HEADER_TEXT_SIZE);
-    let mut header = column![
-        row![
-            dot(theme::kind_color(t.node(subject).kind()), LIST_HEADER_DOT),
-            clipped(
-                text(fit_width(&t.name(subject), name_width, LIST_HEADER_TEXT_SIZE))
-                    .size(LIST_HEADER_TEXT_SIZE)
-                    .wrapping(Wrapping::None)
-            ),
-            text(size).size(LIST_HEADER_TEXT_SIZE).wrapping(Wrapping::None),
-        ]
-        .spacing(LIST_HEADER_SPACING)
-        .align_y(Alignment::Center),
-    ]
-    .spacing(4);
+    let mut header = column![name_and_size_title(b, subject, width, LIST_HEADER_TITLE)].spacing(4);
     if let Some(s) = &b.search {
         let search_summary = format!("{} matches for “{}”", thousands(s.matches as u64), s.query);
         header = header.push(
@@ -1218,33 +1194,39 @@ fn selection_details(b: &Browser, panel: iced::Size) -> Option<Element<'_, Messa
     b.tree.is_actionable(id).then(|| selection_actions(b, id, panel.width))
 }
 
-fn selection_title(b: &Browser, id: NodeId, width: f32) -> Element<'_, Message> {
+struct TitleStyle {
+    text_size: f32,
+    dot: f32,
+    spacing: f32,
+}
+
+const LIST_HEADER_TITLE: TitleStyle =
+    TitleStyle { text_size: LIST_HEADER_TEXT_SIZE, dot: LIST_HEADER_DOT, spacing: LIST_HEADER_SPACING };
+const DETAILS_TITLE: TitleStyle =
+    TitleStyle { text_size: DETAILS_TITLE_TEXT_SIZE, dot: LIST_ROW_DOT, spacing: LIST_ROW_SPACING };
+
+fn name_and_size_title(b: &Browser, id: NodeId, width: f32, style: TitleStyle) -> Element<'_, Message> {
     let size = format_size(b.size(id));
-    let name_width =
-        width - LIST_ROW_DOT - 2.0 * LIST_ROW_SPACING - generous_text_width(&size, DETAILS_TITLE_TEXT_SIZE);
+    let name_width = width - style.dot - 2.0 * style.spacing - generous_text_width(&size, style.text_size);
     row![
-        dot(theme::kind_color(b.tree.node(id).kind()), LIST_ROW_DOT),
+        dot(theme::kind_color(b.tree.node(id).kind()), style.dot),
         clipped(
-            text(fit_width(&b.tree.name(id), name_width, DETAILS_TITLE_TEXT_SIZE))
-                .size(DETAILS_TITLE_TEXT_SIZE)
+            text(fit_width(&b.tree.name(id), name_width, style.text_size))
+                .size(style.text_size)
                 .wrapping(Wrapping::None)
         ),
-        text(size).size(DETAILS_TITLE_TEXT_SIZE).wrapping(Wrapping::None),
+        text(size).size(style.text_size).wrapping(Wrapping::None),
     ]
-    .spacing(LIST_ROW_SPACING)
+    .spacing(style.spacing)
     .align_y(Alignment::Center)
     .into()
 }
 
 fn selection_actions(b: &Browser, id: NodeId, width: f32) -> Element<'_, Message> {
-    let preview = tooltip(
-        outlined_text_button(PREVIEW_ACTION, Message::Preview),
-        tooltip_box(PREVIEW_SHORTCUT),
-        tooltip::Position::Top,
-    )
-    .gap(4);
+    let preview =
+        tooltip_at(outlined_text_button(PREVIEW_ACTION, Message::Preview), PREVIEW_SHORTCUT, tooltip::Position::Top);
     let actions = row![preview, outlined_text_button(REVEAL_ACTION, Message::Reveal)].spacing(DETAILS_SPACING);
-    column![selection_title(b, id, width), actions].spacing(DETAILS_SPACING).into()
+    column![name_and_size_title(b, id, width, DETAILS_TITLE), actions].spacing(DETAILS_SPACING).into()
 }
 
 fn remedy_button<'a>(remedy: Remedy) -> Option<Element<'a, Message>> {
@@ -1265,10 +1247,9 @@ fn unscanned_space_explanation(
     panel: iced::Size,
 ) -> Element<'_, Message> {
     let mut body = column![details_text(explanation.summary).color(theme::TEXT_DIM)].spacing(DETAILS_SPACING);
-    let unreadable = b.tree.stats.errors;
-    if b.tree.node(id).kind() == Kind::Hidden && unreadable > 0 {
+    if let Some(unreadable) = dscan_core::hidden::unreadable_items_behind(&b.tree, id) {
         let note = format!("{} folders couldn't be read in this scan.", thousands(unreadable));
-        body = body.push(details_text(note).color(theme::kind_color(Kind::Archive)));
+        body = body.push(details_text(note).color(theme::WARNING));
     }
     for cause in explanation.causes {
         let mut item =
@@ -1281,7 +1262,7 @@ fn unscanned_space_explanation(
     }
     let body = container(scrollable(body).spacing(LIST_SCROLLBAR_GAP).style(depth::slim_scrollbar))
         .max_height(panel.height * EXPLANATION_SHARE_OF_THE_PANEL);
-    column![selection_title(b, id, panel.width), body].spacing(DETAILS_SPACING).into()
+    column![name_and_size_title(b, id, panel.width, DETAILS_TITLE), body].spacing(DETAILS_SPACING).into()
 }
 
 fn list_row<'a>(b: &'a Browser, r: &'a ListRow, columns: &ListColumns) -> Element<'a, Message> {
@@ -1291,7 +1272,7 @@ fn list_row<'a>(b: &'a Browser, r: &'a ListRow, columns: &ListColumns) -> Elemen
     let collected = b.collector.contains(id);
     let name_color = if collected && !columns.shows_bar {
         theme::DANGER
-    } else if n.is_synthetic() || n.is_unreadable() {
+    } else if n.is_synthetic() || n.accounting() == Accounting::Unreadable {
         theme::TEXT_DIM
     } else {
         theme::TEXT
@@ -1353,5 +1334,3 @@ fn list_row<'a>(b: &'a Browser, r: &'a ListRow, columns: &ListColumns) -> Elemen
         .on_double_click(Message::Activate(Segment::Node(id)))
         .into()
 }
-
-const SUBTLE_BUTTON_PADDING_X: f32 = 8.0;

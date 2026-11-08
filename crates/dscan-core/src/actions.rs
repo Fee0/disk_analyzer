@@ -77,40 +77,71 @@ pub enum Removal {
     DeletePermanently,
 }
 
-#[derive(Debug, Default)]
+struct RemovalTarget {
+    id: NodeId,
+    path: PathBuf,
+    size: u64,
+}
+
+pub struct RemovalPlan {
+    removal: Removal,
+    targets: Vec<RemovalTarget>,
+    refused: Vec<(PathBuf, String)>,
+}
+
+impl RemovalPlan {
+    pub fn new(tree: &Tree, items: &[NodeId], removal: Removal) -> Self {
+        let mut plan = RemovalPlan { removal, targets: Vec::new(), refused: Vec::new() };
+        for &id in items.iter().filter(|&&id| tree.is_actionable(id)) {
+            let path = tree.path(id);
+            if is_protected(&path) {
+                plan.refused.push((path, "protected system location".into()));
+            } else {
+                plan.targets.push(RemovalTarget { id, path, size: tree.size(id) });
+            }
+        }
+        plan
+    }
+
+    pub fn carry_out(self) -> RemovalReport {
+        let RemovalPlan { removal, targets, refused } = self;
+        let mut report = RemovalReport { removal, removed: Vec::new(), bytes: 0, failed: refused };
+        let trash = Current::trash_context();
+        for RemovalTarget { id, path, size } in targets {
+            let outcome = match removal {
+                Removal::MoveToTrash => trash.delete(&path).map_err(|e| e.to_string()),
+                Removal::DeletePermanently => delete_permanently(&path).map_err(|e| e.to_string()),
+            };
+            match outcome {
+                Ok(()) => {
+                    report.removed.push(id);
+                    report.bytes += size;
+                }
+                Err(e) => report.failed.push((path, e)),
+            }
+        }
+        report
+    }
+}
+
+#[derive(Debug)]
 pub struct RemovalReport {
-    pub removed: usize,
+    pub removal: Removal,
+    removed: Vec<NodeId>,
     pub bytes: u64,
     pub failed: Vec<(PathBuf, String)>,
 }
 
-pub fn remove_from_disk(tree: &mut Tree, items: &[NodeId], removal: Removal) -> RemovalReport {
-    let mut report = RemovalReport::default();
-    let trash = Current::trash_context();
-    for &id in items {
-        if !tree.is_actionable(id) {
-            continue;
-        }
-        let path = tree.path(id);
-        if is_protected(&path) {
-            report.failed.push((path, "protected system location".into()));
-            continue;
-        }
-        let size = tree.size(id);
-        let outcome = match removal {
-            Removal::MoveToTrash => trash.delete(&path).map_err(|e| e.to_string()),
-            Removal::DeletePermanently => delete_permanently(&path).map_err(|e| e.to_string()),
-        };
-        match outcome {
-            Ok(()) => {
-                tree.remove(id);
-                report.bytes += size;
-                report.removed += 1;
-            }
-            Err(e) => report.failed.push((path, e)),
+impl RemovalReport {
+    pub fn removed(&self) -> usize {
+        self.removed.len()
+    }
+
+    pub fn apply_to(&self, tree: &mut Tree) {
+        for &id in &self.removed {
+            tree.remove(id);
         }
     }
-    report
 }
 
 fn delete_permanently(path: &Path) -> std::io::Result<()> {
@@ -121,7 +152,7 @@ fn delete_permanently(path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tree::test_util::{T::*, tree};
+    use crate::tree::test_util::{T::*, descend, scan_folder, tree};
 
     #[test]
     fn collection_never_holds_an_item_inside_another_collected_item() {
@@ -138,16 +169,8 @@ mod tests {
         assert_eq!(c.size(&t), 8, "size counts allocated bytes");
     }
 
-    fn child(t: &Tree, name: &str) -> NodeId {
-        t.children(t.root()).find(|&c| t.name(c) == name).unwrap()
-    }
-
-    fn scan_folder(root: &Path) -> Tree {
-        crate::scan(&crate::ScanOptions::folder(root), &Default::default(), &Default::default()).unwrap()
-    }
-
     #[test]
-    fn delete_permanently_removes_files_and_folders_and_updates_the_tree() {
+    fn delete_permanently_removes_files_and_folders_and_the_report_updates_the_tree() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         std::fs::create_dir_all(root.join("old/nested")).unwrap();
@@ -155,12 +178,14 @@ mod tests {
         std::fs::write(root.join("big.bin"), vec![1u8; 80_000]).unwrap();
         std::fs::write(root.join("keep.txt"), b"keep").unwrap();
         let mut t = scan_folder(root);
-        let items = [child(&t, "old"), child(&t, "big.bin")];
+        let items = [descend(&t, &["old"]), descend(&t, &["big.bin"])];
         let total_before = t.size(t.root());
 
-        let report = remove_from_disk(&mut t, &items, Removal::DeletePermanently);
+        let report = RemovalPlan::new(&t, &items, Removal::DeletePermanently).carry_out();
+        assert!(items.iter().all(|&id| t.is_live(id)), "carrying out the plan leaves the tree alone");
+        report.apply_to(&mut t);
 
-        assert_eq!(report.removed, 2, "{:?}", report.failed);
+        assert_eq!(report.removed(), 2, "{:?}", report.failed);
         assert!(!root.join("old").exists() && !root.join("big.bin").exists());
         assert!(root.join("keep.txt").exists());
         assert_eq!(t.size(t.root()), total_before - report.bytes);
@@ -175,12 +200,12 @@ mod tests {
         std::fs::create_dir(root.join("target-folder")).unwrap();
         std::fs::write(root.join("target-folder/keep.txt"), b"keep").unwrap();
         std::os::unix::fs::symlink(root.join("target-folder"), root.join("link")).unwrap();
-        let mut t = scan_folder(root);
-        let link = child(&t, "link");
+        let t = scan_folder(root);
+        let link = descend(&t, &["link"]);
 
-        let report = remove_from_disk(&mut t, &[link], Removal::DeletePermanently);
+        let report = RemovalPlan::new(&t, &[link], Removal::DeletePermanently).carry_out();
 
-        assert_eq!(report.removed, 1, "{:?}", report.failed);
+        assert_eq!(report.removed(), 1, "{:?}", report.failed);
         assert!(root.join("link").symlink_metadata().is_err(), "the symlink itself is deleted");
         assert!(root.join("target-folder/keep.txt").exists(), "a symlink's target is never followed");
     }
@@ -192,14 +217,11 @@ mod tests {
             "/",
             vec![D("usr", vec![D("lib", vec![F("libc", 9)])]), D("opt", vec![D("tool", vec![F("bin", 5)])])],
         );
-        let child = |p: NodeId, name: &str| t.children(p).find(|&c| t.name(c) == name).unwrap();
-        let usr = child(t.root(), "usr");
-        let opt = child(t.root(), "opt");
         let mut c = Collection::default();
-        assert_eq!(c.add(&t, usr), Err(Refusal::Protected));
-        assert_eq!(c.add(&t, child(child(usr, "lib"), "libc")), Err(Refusal::Protected));
-        assert_eq!(c.add(&t, opt), Err(Refusal::Protected));
-        assert_eq!(c.add(&t, child(opt, "tool")), Ok(()), "what users install under /opt is theirs");
+        assert_eq!(c.add(&t, descend(&t, &["usr"])), Err(Refusal::Protected));
+        assert_eq!(c.add(&t, descend(&t, &["usr", "lib", "libc"])), Err(Refusal::Protected));
+        assert_eq!(c.add(&t, descend(&t, &["opt"])), Err(Refusal::Protected));
+        assert_eq!(c.add(&t, descend(&t, &["opt", "tool"])), Ok(()), "what users install under /opt is theirs");
     }
 
     #[test]

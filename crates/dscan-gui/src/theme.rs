@@ -105,8 +105,8 @@ pub fn app_theme() -> iced::Theme {
             background: BG,
             text: TEXT,
             primary: ACCENT,
-            success: kind_color(Kind::Video),
-            warning: kind_color(Kind::Archive),
+            success: SUCCESS,
+            warning: WARNING,
             danger: DANGER,
         },
     )

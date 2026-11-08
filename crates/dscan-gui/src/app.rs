@@ -1,19 +1,20 @@
 use std::any::Any;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use dscan_core::{
-    CancelToken, Collection, DesktopError, Exclusions, Layout, LayoutParams, NodeId, PREVIEW_ACTION, Progress,
-    ProgressSnapshot, REVEAL_ACTION, Refusal, Removal, ScanError, ScanOptions, SearchResult, Segment, TRASH_NAME,
-    Transition, Tree, Volume, actions, desktop, format_size,
+    Accounting, CancelToken, Collection, DesktopError, Exclusions, Layout, LayoutParams, NodeId, PREVIEW_ACTION,
+    Progress, ProgressSnapshot, REVEAL_ACTION, Refusal, Removal, RemovalPlan, RemovalReport, ScanError, ScanOptions,
+    SearchResult, Segment, TRASH_NAME, Transition, Tree, Volume, desktop, format_size,
 };
 use iced::keyboard::{self, Key, key::Named};
 use iced::widget::canvas::Cache;
 use iced::{Point, Subscription, Task, event, mouse};
 
 use crate::animation::{Advance, ChartAnimation};
-use crate::fmt::{thousands, truncate};
+use crate::fmt::{items_phrase, thousands, truncate};
 
 pub const SEARCH_ID: &str = "search";
 pub const MAX_LIST_ROWS: usize = 400;
@@ -23,12 +24,19 @@ const NOTICE_LIFETIME: Duration = Duration::from_secs(4);
 const HOLD_PROGRESS_REFRESH: Duration = Duration::from_millis(33);
 const SCAN_PROGRESS_REFRESH: Duration = Duration::from_millis(100);
 
-struct PendingRemoval {
-    removal: Removal,
-    items: Vec<NodeId>,
+pub type PanicMessage = String;
+
+pub type RemovalId = u64;
+
+fn next_removal_id() -> RemovalId {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
-pub type PanicMessage = String;
+enum RemovalProgress {
+    OnDisk(RemovalId),
+    Finished(Result<Arc<RemovalReport>, PanicMessage>),
+}
 
 fn panic_message(payload: Box<dyn Any + Send>) -> PanicMessage {
     payload
@@ -158,7 +166,7 @@ pub struct Browser {
     pub over_collector: bool,
     pub collected_list_open: bool,
     pub confirm_trash: bool,
-    removal_waiting_for_tree: Option<PendingRemoval>,
+    removal: Option<RemovalProgress>,
     pub(crate) delete_hold_started: Option<Instant>,
     pub drag: Option<PendingDrag>,
     pub notice: Option<Notice>,
@@ -207,6 +215,7 @@ pub enum Message {
     DeleteHoldStart,
     DeleteHoldCancel,
     DeleteHoldTick,
+    RemovalDone { id: RemovalId, outcome: Result<Arc<RemovalReport>, PanicMessage> },
     Rescan,
     GoHome,
     ResumeParked(usize),
@@ -373,14 +382,20 @@ impl App {
             Message::Back if matches!(&self.screen, Screen::Browse(b) if !b.can_back()) => return self.go_home(),
             Message::Forward if matches!(self.screen, Screen::Start { scan: None }) => {
                 if self.stepped_back_from_newest_parked {
-                    self.resume_parked(0);
+                    return self.resume_parked(0);
                 }
             }
             Message::Key(key, mods) => match navigation_shortcut(key.as_ref(), mods.command()) {
                 Some(navigation) => return self.update(navigation),
                 None => return self.update_browser(Message::Key(key, mods)),
             },
-            Message::ResumeParked(i) => self.resume_parked(i),
+            Message::ResumeParked(i) => return self.resume_parked(i),
+            Message::RemovalDone { id, outcome } => {
+                match self.parked_newest_first.iter_mut().find(|b| b.started_removal(id)) {
+                    Some(parked) => parked.removal_left_the_disk(outcome),
+                    None => return self.update_browser(Message::RemovalDone { id, outcome }),
+                }
+            }
             Message::CloseParked(i) => {
                 if i < self.parked_newest_first.len() {
                     drop_off_thread(vec![self.parked_newest_first.remove(i)]);
@@ -416,11 +431,15 @@ impl App {
         Self::load_volumes()
     }
 
-    fn resume_parked(&mut self, i: usize) {
-        if matches!(self.screen, Screen::Start { .. }) && i < self.parked_newest_first.len() {
-            self.screen = Screen::Browse(Box::new(self.parked_newest_first.remove(i)));
-            self.stepped_back_from_newest_parked = false;
+    fn resume_parked(&mut self, i: usize) -> Task<Message> {
+        if !matches!(self.screen, Screen::Start { .. }) || i >= self.parked_newest_first.len() {
+            return Task::none();
         }
+        let mut resumed = Box::new(self.parked_newest_first.remove(i));
+        let catch_up = resumed.resume();
+        self.screen = Screen::Browse(resumed);
+        self.stepped_back_from_newest_parked = false;
+        catch_up
     }
 
     fn drop_parked_results_superseded_by(&mut self, fresh: &Tree) {
@@ -506,7 +525,7 @@ impl Browser {
             over_collector: false,
             collected_list_open: false,
             confirm_trash: false,
-            removal_waiting_for_tree: None,
+            removal: None,
             delete_hold_started: None,
             drag: None,
             notice: None,
@@ -521,6 +540,14 @@ impl Browser {
     pub fn with_opening_reveal(mut self) -> Self {
         self.animation = Some(ChartAnimation::new(Transition::reveal(&self.layout)));
         self
+    }
+
+    pub fn active_drag(&self) -> Option<&PendingDrag> {
+        self.drag.as_ref().filter(|d| d.dragging)
+    }
+
+    pub fn dropping_on_collector(&self) -> bool {
+        self.over_collector && self.active_drag().is_some()
     }
 
     pub fn can_back(&self) -> bool {
@@ -563,8 +590,13 @@ impl Browser {
         }
     }
 
+    fn visible_children_with_sizes(&self, id: NodeId) -> impl Iterator<Item = (NodeId, u64)> + '_ {
+        let relevant = |c: NodeId| self.search.as_ref().is_none_or(|s| s.is_relevant(c));
+        self.exclusions.children_with_sizes(&self.tree, id).filter(move |&(c, _)| relevant(c))
+    }
+
     fn visible_children(&self, id: NodeId) -> impl Iterator<Item = NodeId> + '_ {
-        self.exclusions.children(&self.tree, id).filter(|&c| self.search.as_ref().is_none_or(|s| s.is_relevant(c)))
+        self.visible_children_with_sizes(id).map(|(c, _)| c)
     }
 
     fn sync_list(&mut self) {
@@ -574,34 +606,34 @@ impl Browser {
             return;
         }
         let total = self.size(subject).max(1);
-        let children: Vec<NodeId> = self.visible_children(subject).collect();
-        let rows = children
-            .iter()
-            .take(MAX_LIST_ROWS)
-            .map(|&id| {
-                let node = self.tree.node(id);
-                let size = self.size(id);
-                let mut name = truncate(&self.tree.name(id), 44);
-                if node.is_dir() {
-                    name.push('/');
-                }
-                if node.is_unreadable() {
-                    name.push_str("  (no access)");
-                } else if node.is_clone_copy() {
-                    name.push_str("  (clone)");
-                } else if node.shares_blocks_counted_elsewhere() {
-                    name.push_str("  (partly a clone)");
-                } else if node.is_hardlink_copy() {
-                    name.push_str("  (hard link)");
-                }
-                ListRow { id, name, size: format_size(size), fraction_of_listed_folder: size as f32 / total as f32 }
-            })
-            .collect();
-        let cut_off_rows_summary = (children.len() > MAX_LIST_ROWS).then(|| {
-            let rest: u64 = children[MAX_LIST_ROWS..].iter().map(|&c| self.size(c)).sum();
-            format!("… {} more items · {}", thousands((children.len() - MAX_LIST_ROWS) as u64), format_size(rest))
-        });
+        let mut children = self.visible_children_with_sizes(subject);
+        let rows = children.by_ref().take(MAX_LIST_ROWS).map(|(id, size)| self.list_row(id, size, total)).collect();
+        let (cut_off, cut_off_bytes) =
+            children.fold((0u64, 0u64), |(count, bytes), (_, size)| (count + 1, bytes + size));
+        let cut_off_rows_summary =
+            (cut_off > 0).then(|| format!("… {} more items · {}", thousands(cut_off), format_size(cut_off_bytes)));
         self.list = ListView { built_for: source, rows, cut_off_rows_summary };
+    }
+
+    fn list_row(&self, id: NodeId, size: u64, listed_folder_size: u64) -> ListRow {
+        let node = self.tree.node(id);
+        let mut name = truncate(&self.tree.name(id), 44);
+        if node.is_dir() {
+            name.push('/');
+        }
+        name.push_str(match node.accounting() {
+            Accounting::Counted => "",
+            Accounting::Unreadable => "  (no access)",
+            Accounting::CloneCopy => "  (clone)",
+            Accounting::SharesBlocksCountedElsewhere => "  (partly a clone)",
+            Accounting::HardLinkCopy => "  (hard link)",
+        });
+        ListRow {
+            id,
+            name,
+            size: format_size(size),
+            fraction_of_listed_folder: size as f32 / listed_folder_size as f32,
+        }
     }
 
     fn set_focus(&mut self, id: NodeId, record: bool) {
@@ -672,6 +704,18 @@ impl Browser {
         }
     }
 
+    fn sibling_beside(&self, id: NodeId, after: bool) -> Option<NodeId> {
+        let parent = self.tree.parent(id).unwrap_or(self.focus);
+        let mut siblings = self.visible_children(parent);
+        let i = siblings.position(|s| s == id)?;
+        let beside = if after {
+            siblings.next()
+        } else {
+            i.checked_sub(1).and_then(|before| self.visible_children(parent).nth(before))
+        };
+        Some(beside.unwrap_or(id))
+    }
+
     fn move_selection(&mut self, key: Named) {
         let Some(sel) = self.selected.filter(|&s| self.tree.is_strict_ancestor_of(self.focus, s)) else {
             let first = self.visible_children(self.focus).next();
@@ -680,11 +724,8 @@ impl Browser {
         };
         match key {
             Named::ArrowLeft | Named::ArrowRight => {
-                let parent = self.tree.parent(sel).unwrap_or(self.focus);
-                let sibs: Vec<NodeId> = self.visible_children(parent).collect();
-                if let Some(i) = sibs.iter().position(|&s| s == sel) {
-                    let j = if key == Named::ArrowRight { (i + 1).min(sibs.len() - 1) } else { i.saturating_sub(1) };
-                    self.selected = Some(sibs[j]);
+                if let Some(sibling) = self.sibling_beside(sel, key == Named::ArrowRight) {
+                    self.selected = Some(sibling);
                 }
             }
             Named::ArrowUp => {
@@ -702,12 +743,23 @@ impl Browser {
         }
     }
 
+    fn has_query(&self) -> bool {
+        !self.search_text.trim().is_empty()
+    }
+
     fn run_search(&mut self) -> Task<Message> {
+        let search = self.restart_search();
+        if !self.has_query() {
+            self.relayout();
+        }
+        search
+    }
+
+    fn restart_search(&mut self) -> Task<Message> {
         self.search_cancel.cancel();
         self.search_cancel = CancelToken::default();
-        if self.search_text.trim().is_empty() {
+        if !self.has_query() {
             self.search = None;
-            self.relayout();
             return Task::none();
         }
         let (tree, query, cancel) = (Arc::clone(&self.tree), self.search_text.clone(), self.search_cancel.clone());
@@ -786,49 +838,90 @@ impl Browser {
     }
 
     fn remove_collected(&mut self, removal: Removal) -> Task<Message> {
-        self.removal_waiting_for_tree = Some(PendingRemoval { removal, items: self.collector.items().to_vec() });
-        self.remove_waiting_batch()
+        let Some((id, plan)) = self.start_removal(removal) else { return Task::none() };
+        Task::perform(off_thread(move || Arc::new(plan.carry_out())), move |outcome| Message::RemovalDone {
+            id,
+            outcome,
+        })
     }
 
-    fn remove_waiting_batch(&mut self) -> Task<Message> {
+    fn start_removal(&mut self, removal: Removal) -> Option<(RemovalId, RemovalPlan)> {
+        if self.removal.is_some() {
+            return None;
+        }
+        let id = next_removal_id();
+        self.removal = Some(RemovalProgress::OnDisk(id));
+        Some((id, RemovalPlan::new(&self.tree, self.collector.items(), removal)))
+    }
+
+    fn started_removal(&self, id: RemovalId) -> bool {
+        matches!(self.removal, Some(RemovalProgress::OnDisk(started)) if started == id)
+    }
+
+    fn removal_left_the_disk(&mut self, outcome: Result<Arc<RemovalReport>, PanicMessage>) {
+        self.removal = Some(RemovalProgress::Finished(outcome));
+    }
+
+    fn apply_finished_removal(&mut self) -> Task<Message> {
+        match self.removal.take() {
+            Some(RemovalProgress::Finished(Ok(report))) => self.apply_removal_report(report),
+            Some(RemovalProgress::Finished(Err(panic))) => {
+                self.show_notice(NoticeKind::Error, format!("Removing failed unexpectedly: {panic}"));
+                Task::none()
+            }
+            still_on_disk => {
+                self.removal = still_on_disk;
+                Task::none()
+            }
+        }
+    }
+
+    fn apply_removal_report(&mut self, report: Arc<RemovalReport>) -> Task<Message> {
         self.search_cancel.cancel();
         let Some(tree) = Arc::get_mut(&mut self.tree) else {
+            self.removal = Some(RemovalProgress::Finished(Ok(report)));
             return Self::wait_for_the_cancelled_search_to_report_done();
         };
-        let Some(PendingRemoval { removal, items }) = self.removal_waiting_for_tree.take() else {
-            return Task::none();
-        };
-        let report = actions::remove_from_disk(tree, &items, removal);
+        report.apply_to(tree);
         self.collector.prune(&self.tree);
-        let items_phrase = format!("{} item{}", report.removed, if report.removed == 1 { "" } else { "s" });
-        let mut msg = match removal {
+        let items = items_phrase(report.removed());
+        let mut msg = match report.removal {
             Removal::MoveToTrash => format!(
-                "Moved {items_phrase} ({}) to the {TRASH_NAME}. Empty the {TRASH_NAME} to free the space.",
+                "Moved {items} ({}) to the {TRASH_NAME}. Empty the {TRASH_NAME} to free the space.",
                 format_size(report.bytes)
             ),
             Removal::DeletePermanently => {
-                format!("Deleted {items_phrase} permanently, freeing {}.", format_size(report.bytes))
+                format!("Deleted {items} permanently, freeing {}.", format_size(report.bytes))
             }
         };
         let kind = match report.failed.first() {
             None => NoticeKind::Done,
             Some((_, err)) => {
                 msg.push_str(&format!(" {} failed: {err}", report.failed.len()));
-                if report.removed == 0 { NoticeKind::Error } else { NoticeKind::Warning }
+                if report.removed() == 0 { NoticeKind::Error } else { NoticeKind::Warning }
             }
         };
         self.show_notice(kind, msg);
         self.focus = self.tree.nearest_live(self.focus);
         self.selected = self.selected.filter(|&s| self.tree.is_live(s));
         self.search_gen += 1;
+        let search = self.restart_search();
         self.collector_changed();
-        self.run_search()
+        search
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        self.updating(|b| b.handle(message))
+    }
+
+    fn resume(&mut self) -> Task<Message> {
+        self.updating(Self::apply_finished_removal)
+    }
+
+    fn updating(&mut self, change: impl FnOnce(&mut Self) -> Task<Message>) -> Task<Message> {
         let before = (self.hovered, self.selected);
         let deadline_before = self.notice_expires_at;
-        let task = self.handle(message);
+        let task = change(self);
         if (self.hovered, self.selected) != before {
             self.highlight_cache.clear();
         }
@@ -877,9 +970,11 @@ impl Browser {
                     self.search = result;
                     self.relayout();
                 }
-                if self.removal_waiting_for_tree.is_some() {
-                    return self.remove_waiting_batch();
-                }
+                return self.apply_finished_removal();
+            }
+            Message::RemovalDone { id, outcome } if self.started_removal(id) => {
+                self.removal_left_the_disk(outcome);
+                return self.apply_finished_removal();
             }
             Message::ClearSearch => {
                 self.search_text.clear();
@@ -993,7 +1088,22 @@ impl Browser {
 }
 
 #[cfg(test)]
+pub(crate) mod test_util {
+    use super::*;
+
+    pub fn scanned(opts: ScanOptions) -> Browser {
+        let tree = dscan_core::scan(&opts, &Progress::default(), &CancelToken::default()).unwrap();
+        Browser::new(tree, opts)
+    }
+
+    pub fn descend(tree: &Tree, names: &[&str]) -> NodeId {
+        names.iter().fold(tree.root(), |at, name| tree.children(at).find(|&c| tree.name(c) == *name).expect(name))
+    }
+}
+
+#[cfg(test)]
 mod tests {
+    use super::test_util::{descend, scanned};
     use super::*;
 
     fn browser(dir: &std::path::Path) -> Browser {
@@ -1002,13 +1112,7 @@ mod tests {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, vec![1u8; size]).unwrap();
         }
-        let opts = ScanOptions::folder(dir);
-        let tree = dscan_core::scan(&opts, &Progress::default(), &CancelToken::default()).unwrap();
-        Browser::new(tree, opts)
-    }
-
-    fn child(b: &Browser, parent: NodeId, name: &str) -> NodeId {
-        b.tree.children(parent).find(|&c| b.tree.name(c) == name).unwrap()
+        scanned(ScanOptions::folder(dir))
     }
 
     fn remove_focused_folder_as_trashing_does(b: &mut Browser) {
@@ -1016,12 +1120,8 @@ mod tests {
         b.focus = b.tree.nearest_live(b.focus);
     }
 
-    fn abandon_waiting_trash_batch_so_the_real_trash_is_never_touched(b: &mut Browser) {
-        b.removal_waiting_for_tree = None;
-    }
-
-    fn waiting_items(b: &Browser) -> Option<&[NodeId]> {
-        b.removal_waiting_for_tree.as_ref().map(|pending| &pending.items[..])
+    fn carry_out_as_the_background_task_does(b: &mut Browser, (id, plan): (RemovalId, RemovalPlan)) {
+        let _ = b.update(Message::RemovalDone { id, outcome: Ok(Arc::new(plan.carry_out())) });
     }
 
     #[test]
@@ -1029,7 +1129,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut b = browser(dir.path());
         let root = b.tree.root();
-        let movies = child(&b, root, "Movies");
+        let movies = descend(&b.tree, &["Movies"]);
         let _ = b.update(Message::Navigate(movies));
         remove_focused_folder_as_trashing_does(&mut b);
         assert_eq!(b.focus, root);
@@ -1044,10 +1144,10 @@ mod tests {
     }
 
     #[test]
-    fn holding_delete_for_three_seconds_deletes_the_collected_items_permanently() {
+    fn holding_delete_for_three_seconds_starts_deleting_the_collected_items_permanently() {
         let dir = tempfile::tempdir().unwrap();
         let mut b = browser(dir.path());
-        let movies = child(&b, b.tree.root(), "Movies");
+        let movies = descend(&b.tree, &["Movies"]);
         b.collector.add(&b.tree, movies).unwrap();
 
         let _ = b.update(Message::DeleteHoldStart);
@@ -1058,10 +1158,24 @@ mod tests {
         assert!((0.3..0.4).contains(&progress), "one of three seconds held: {progress}");
 
         pretend_held_for(&mut b, HOLD_TO_DELETE);
-        let _ = b.update(Message::DeleteHoldTick);
+        let deleting = b.update(Message::DeleteHoldTick);
+        assert!(deleting.units() > 0 && b.delete_hold_started.is_none(), "three seconds start the deletion");
+        assert!(dir.path().join("Movies").exists(), "the disk work runs off the UI thread");
+        assert!(b.start_removal(Removal::DeletePermanently).is_none(), "one removal at a time");
+    }
+
+    #[test]
+    fn a_finished_removal_updates_the_tree_and_says_what_was_freed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut b = browser(dir.path());
+        let movies = descend(&b.tree, &["Movies"]);
+        b.collector.add(&b.tree, movies).unwrap();
+
+        let removal = b.start_removal(Removal::DeletePermanently).unwrap();
+        carry_out_as_the_background_task_does(&mut b, removal);
+
         assert!(!dir.path().join("Movies").exists());
         assert!(!b.tree.is_live(movies) && b.collector.is_empty());
-        assert!(b.delete_hold_started.is_none());
         assert!(
             b.notice
                 .as_ref()
@@ -1075,7 +1189,7 @@ mod tests {
     fn releasing_or_leaving_the_button_early_cancels_the_delete() {
         let dir = tempfile::tempdir().unwrap();
         let mut b = browser(dir.path());
-        let movies = child(&b, b.tree.root(), "Movies");
+        let movies = descend(&b.tree, &["Movies"]);
         b.collector.add(&b.tree, movies).unwrap();
         for early_end in [Message::DeleteHoldCancel, Message::MouseReleased] {
             let _ = b.update(Message::DeleteHoldStart);
@@ -1095,24 +1209,43 @@ mod tests {
     }
 
     #[test]
-    fn deferred_trash_keeps_the_confirmed_batch() {
+    fn a_removal_removes_only_what_was_collected_when_it_started_and_waits_for_a_running_search() {
         let dir = tempfile::tempdir().unwrap();
         let mut b = browser(dir.path());
-        let root = b.tree.root();
-        let (movies, music) = (child(&b, root, "Movies"), child(&b, root, "Music"));
+        let (movies, music) = (descend(&b.tree, &["Movies"]), descend(&b.tree, &["Music"]));
         b.collector.add(&b.tree, movies).unwrap();
-        let running_search = Arc::clone(&b.tree);
 
-        let _ = b.update(Message::ConfirmTrash);
-        assert_eq!(waiting_items(&b), Some(&[movies][..]), "deferred while the search holds the tree");
-        let _ = b.update(Message::Navigate(root));
+        let removal = b.start_removal(Removal::DeletePermanently).unwrap();
         let _ = b.update(Message::Press(Segment::Node(music)));
         let _ = b.update(Message::CollectSelected);
-        assert_eq!(b.collector.items(), &[movies, music]);
-        assert_eq!(waiting_items(&b), Some(&[movies][..]), "later additions are not trashed");
+        let running_search = Arc::clone(&b.tree);
+        carry_out_as_the_background_task_does(&mut b, removal);
 
-        abandon_waiting_trash_batch_so_the_real_trash_is_never_touched(&mut b);
+        assert!(dir.path().join("Music").exists(), "later additions are not removed");
+        assert!(b.tree.is_live(movies), "the tree changes only once the search lets go of it");
         drop(running_search);
+        let _ = b.update(Message::SearchDone(b.search_gen, None));
+        assert!(!b.tree.is_live(movies));
+        assert_eq!(b.collector.items(), &[music]);
+    }
+
+    #[test]
+    fn a_removal_finishing_after_going_home_is_applied_on_returning_to_its_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut b = browser(dir.path());
+        let movies = descend(&b.tree, &["Movies"]);
+        b.collector.add(&b.tree, movies).unwrap();
+        let (id, plan) = b.start_removal(Removal::DeletePermanently).unwrap();
+        let (mut app, _) = App::new(None);
+        app.screen = Screen::Browse(Box::new(b));
+
+        let _ = app.update(Message::GoHome);
+        let _ = app.update(Message::RemovalDone { id, outcome: Ok(Arc::new(plan.carry_out())) });
+        let _ = app.update(Message::ResumeParked(0));
+
+        let Screen::Browse(b) = &app.screen else { panic!("the parked result is open again") };
+        assert!(!b.tree.is_live(movies) && b.collector.is_empty());
+        assert!(b.notice.as_ref().is_some_and(|n| n.kind == NoticeKind::Done), "{:?}", b.notice);
     }
 
     #[test]
@@ -1120,7 +1253,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut b = browser(dir.path());
         let root = b.tree.root();
-        let movies = child(&b, root, "Movies");
+        let movies = descend(&b.tree, &["Movies"]);
         let _ = b.update(Message::Navigate(movies));
         let press = |button| {
             let event = iced::Event::Mouse(mouse::Event::ButtonPressed(button));

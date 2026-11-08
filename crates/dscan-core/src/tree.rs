@@ -22,10 +22,18 @@ pub(crate) mod flags {
     pub const REMOVED: u8 = 2;
     pub const HARDLINK_DUP: u8 = 4;
     pub const UNREADABLE: u8 = 8;
-    pub const SYNTHETIC: u8 = 16;
     pub const SYMLINK: u8 = 32;
     pub const CLONE_DUP: u8 = 64;
     pub const SHARES_COUNTED_BLOCKS: u8 = 128;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Accounting {
+    Counted,
+    Unreadable,
+    CloneCopy,
+    SharesBlocksCountedElsewhere,
+    HardLinkCopy,
 }
 
 #[derive(Clone, Debug)]
@@ -73,23 +81,21 @@ impl Node {
     }
     #[inline]
     pub fn is_synthetic(&self) -> bool {
-        self.flags & flags::SYNTHETIC != 0
+        self.kind().is_synthetic()
     }
-    #[inline]
-    pub fn is_unreadable(&self) -> bool {
-        self.flags & flags::UNREADABLE != 0
-    }
-    #[inline]
-    pub fn is_hardlink_copy(&self) -> bool {
-        self.flags & flags::HARDLINK_DUP != 0
-    }
-    #[inline]
-    pub fn is_clone_copy(&self) -> bool {
-        self.flags & flags::CLONE_DUP != 0
-    }
-    #[inline]
-    pub fn shares_blocks_counted_elsewhere(&self) -> bool {
-        self.flags & flags::SHARES_COUNTED_BLOCKS != 0
+    pub fn accounting(&self) -> Accounting {
+        let has = |flag: u8| self.flags & flag != 0;
+        if has(flags::UNREADABLE) {
+            Accounting::Unreadable
+        } else if has(flags::CLONE_DUP) {
+            Accounting::CloneCopy
+        } else if has(flags::SHARES_COUNTED_BLOCKS) {
+            Accounting::SharesBlocksCountedElsewhere
+        } else if has(flags::HARDLINK_DUP) {
+            Accounting::HardLinkCopy
+        } else {
+            Accounting::Counted
+        }
     }
     #[inline]
     pub fn size(&self) -> u64 {
@@ -106,7 +112,6 @@ pub struct ScanStats {
     pub files: u64,
     pub dirs: u64,
     pub errors: u64,
-    pub error_samples: Vec<PathBuf>,
     pub duration: Duration,
     pub hidden: u64,
     pub purgeable: u64,
@@ -168,13 +173,10 @@ impl Tree {
     }
 
     pub fn children(&self, id: NodeId) -> impl DoubleEndedIterator<Item = NodeId> + '_ {
-        let n = &self.nodes[id.idx()];
-        let start = n.first_child as usize;
-        let end = start + n.child_count as usize;
-        self.children_largest_first[start..end].iter().map(|&c| NodeId(c)).filter(|c| !self.nodes[c.idx()].is_removed())
+        self.children_including_removed(id).filter(|&c| self.is_live(c))
     }
 
-    fn children_including_removed(&self, id: NodeId) -> impl Iterator<Item = NodeId> + '_ {
+    fn children_including_removed(&self, id: NodeId) -> impl DoubleEndedIterator<Item = NodeId> + '_ {
         let n = &self.nodes[id.idx()];
         let start = n.first_child as usize;
         self.children_largest_first[start..start + n.child_count as usize].iter().map(|&c| NodeId(c))
@@ -255,10 +257,10 @@ impl Tree {
     }
 
     fn move_shrunken_child_to_its_new_rank(&mut self, parent: NodeId, child: NodeId) {
-        let Tree { nodes, children_largest_first, .. } = self;
+        let Tree { nodes, children_largest_first: order, .. } = self;
         let n = &nodes[parent.idx()];
         let range = n.first_child as usize..(n.first_child + n.child_count) as usize;
-        let slice = &mut children_largest_first[range];
+        let slice = &mut order[range];
         let Some(i) = slice.iter().position(|&c| c == child.0) else { return };
         let size = nodes[child.idx()].size();
         let shift = slice[i + 1..].partition_point(|&c| nodes[c as usize].size() > size);
@@ -418,7 +420,7 @@ pub(crate) fn build(
             } else {
                 let s = &synth[i - nd - nf];
                 let name = push_name(&mut names, s.name.as_bytes());
-                nodes.push(Node::new(id, name, s.kind, flags::SYNTHETIC, 0, s.size));
+                nodes.push(Node::new(id, name, s.kind, 0, 0, s.size));
             }
         }
     }
@@ -459,11 +461,15 @@ pub(crate) mod test_util {
     pub fn tree_at(root: &str, kids: Vec<T>) -> Tree {
         build(to_dir("root", kids), PathBuf::from(root), "root", false, vec![], ScanStats::default())
     }
+
+    pub fn scan_folder(root: &Path) -> Tree {
+        crate::scan(&crate::ScanOptions::folder(root), &Default::default(), &Default::default()).unwrap()
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::test_util::{T::*, tree};
+    use super::test_util::{T::*, descend, tree};
     use super::*;
 
     fn sample() -> Tree {
@@ -507,9 +513,7 @@ mod tests {
     #[test]
     fn paths_depths_and_ancestry() {
         let t = sample();
-        let a = t.children(t.root()).next().unwrap();
-        let deep = t.children(a).find(|&c| t.name(c) == "deep").unwrap();
-        let z = t.children(deep).next().unwrap();
+        let (a, z) = (descend(&t, &["a"]), descend(&t, &["a", "deep", "z.rs"]));
         assert_eq!(t.path(z), PathBuf::from("/r/a/deep/z.rs"));
         assert_eq!(t.path(t.root()), PathBuf::from("/r"));
         assert_eq!(t.depth(z), 3);
@@ -540,9 +544,7 @@ mod tests {
     #[test]
     fn removing_a_folder_marks_its_whole_subtree_removed() {
         let mut t = sample();
-        let a = t.children(t.root()).next().unwrap();
-        let deep = t.children(a).find(|&c| t.name(c) == "deep").unwrap();
-        let z = t.children(deep).next().unwrap();
+        let (a, z) = (descend(&t, &["a"]), descend(&t, &["a", "deep", "z.rs"]));
         assert!(t.remove(a));
         assert!(t.node(z).is_removed(), "descendants of a removed folder are removed too");
         assert_eq!(t.nearest_live(z), t.root());

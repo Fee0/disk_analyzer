@@ -42,7 +42,7 @@ fn platform_window_settings() -> window::settings::PlatformSpecific {
 }
 
 fn folder_to_scan_at_launch() -> Option<PathBuf> {
-    std::env::args_os().nth(1).map(PathBuf::from).filter(|p| p.is_dir()).map(|p| p.canonicalize().unwrap_or(p))
+    std::env::args_os().nth(1).map(PathBuf::from).and_then(dscan_core::existing_folder)
 }
 
 fn main() -> iced::Result {

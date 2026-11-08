@@ -5,28 +5,26 @@ use objc2::rc::autoreleasepool;
 use objc2_foundation::{NSArray, NSNumber, NSString, NSURL, NSURLResourceKey};
 
 use crate::hidden::SpaceInfo;
-use crate::platform::unix::c_path;
+use crate::platform::unix;
 
 pub(super) fn space_info(path: &Path) -> io::Result<SpaceInfo> {
-    use std::os::unix::ffi::OsStrExt;
-    let c = c_path(path.as_os_str().as_bytes())?;
+    let c = unix::c_path(&unix::path_bytes(path))?;
     let mut s: libc::statfs = unsafe { std::mem::zeroed() };
     if unsafe { libc::statfs(c.as_ptr(), &mut s) } != 0 {
         return Err(io::Error::last_os_error());
     }
-    let block = s.f_bsize as u64;
-    let total = s.f_blocks * block;
-    let free = s.f_bfree * block;
-    let available = s.f_bavail * block;
-    let available_for_important_use =
+    let reported = space_reported_by(&s);
+    let available_important =
         url_u64(path, unsafe { objc2_foundation::NSURLVolumeAvailableCapacityForImportantUsageKey })
-            .unwrap_or(available);
-    Ok(SpaceInfo {
-        total,
-        used: total.saturating_sub(free),
-        available,
-        available_important: available_for_important_use,
-    })
+            .unwrap_or(reported.available);
+    Ok(SpaceInfo { available_important, ..reported })
+}
+
+pub(super) fn space_reported_by(s: &libc::statfs) -> SpaceInfo {
+    let block = s.f_bsize as u64;
+    let available = s.f_bavail * block;
+    let total = s.f_blocks * block;
+    SpaceInfo { total, used: total.saturating_sub(s.f_bfree * block), available, available_important: available }
 }
 
 pub(super) fn volume_name(path: &Path) -> Option<String> {
