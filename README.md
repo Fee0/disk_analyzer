@@ -50,10 +50,19 @@ Download the file for your system from the
 Privacy & Security). On Windows and Linux, run it as administrator or root.
 Folders it can't read are counted as hidden space.
 
+## Build from source
+
+Requires [Rust](https://rustup.rs).
+
+```sh
+cargo run --release
+```
+
 ## Usage
 
-Click **Scan** next to a disk, or **Scan Folder…** for any folder. To scan a
-folder at launch, pass it as an argument: `disk-analyzer ~/Downloads`.
+Click **Scan** next to a disk, or **Scan Folder…** for any folder. 
+
+To scan a folder at launch, pass it as an argument: `disk-analyzer ~/Downloads`
 
 | Action | Windows and Linux | macOS | Mouse |
 |---|---|---|---|
@@ -80,10 +89,3 @@ and remove any you change your mind about. Then either:
 - hold **Hold 3 s to delete permanently** until it finishes. Letting go early
   cancels.
 
-## Build from source
-
-Requires [Rust](https://rustup.rs).
-
-```sh
-cargo run --release
-```
