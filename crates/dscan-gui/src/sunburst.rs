@@ -1,8 +1,9 @@
-use std::f32::consts::{FRAC_PI_2, TAU};
 use std::time::{Duration, Instant};
 
 use dscan_core::transition::at_rest;
-use dscan_core::{Arc, ArcStyle, FrameArc, Layout, MAX_DEPTH, NodeId, Segment, Tree, format_size};
+use dscan_core::{
+    Arc, ArcStyle, ChartGeometry, ChartHit, ChartPoint, FrameArc, Layout, NodeId, Segment, Tree, format_size,
+};
 use iced::widget::canvas::{self, Cache, Event, Frame, Geometry, Path, Stroke, Text, gradient};
 use iced::{Color, Pixels, Point, Rectangle, Renderer, Size, Theme, Vector, alignment, mouse};
 
@@ -46,31 +47,21 @@ pub struct State {
 
 #[derive(Clone, Copy)]
 struct Geo {
+    chart: ChartGeometry,
     center: Point,
-    r0: f32,
-    ring_w: f32,
 }
 
 impl Geo {
     fn new(size: Size) -> Self {
-        let r = (size.width.min(size.height) / 2.0 - 16.0).max(60.0);
-        let r0 = r * 0.22;
-        Geo { center: Point::new(size.width / 2.0, size.height / 2.0), r0, ring_w: (r - r0) / MAX_DEPTH as f32 }
-    }
-
-    fn angle(frac: f64) -> f32 {
-        frac as f32 * TAU - FRAC_PI_2
-    }
-
-    fn radius(&self, ring: f64) -> f32 {
-        self.r0 + ring as f32 * self.ring_w
+        let chart = ChartGeometry::fitting(size.width, size.height);
+        Geo { chart, center: Point::new(chart.center.x, chart.center.y) }
     }
 
     fn sector(&self, inner_ring: f64, outer_ring: f64, start: f64, end: f64) -> Path {
         let half_gap = SEPARATOR_GAP / 2.0;
-        let inner_radius = self.radius(inner_ring) + half_gap;
-        let outer_radius = (self.radius(outer_ring) - half_gap).max(inner_radius);
-        let (a0, a1) = (Self::angle(start), Self::angle(end));
+        let inner_radius = self.chart.radius(inner_ring) + half_gap;
+        let outer_radius = (self.chart.radius(outer_ring) - half_gap).max(inner_radius);
+        let (a0, a1) = (ChartGeometry::angle(start), ChartGeometry::angle(end));
         let gaps_would_hide_the_color = (a1 - a0) * inner_radius <= SEPARATOR_GAP + SLIVER_MAX_ARC_LENGTH;
         let edge = |radius: f32| {
             let angular_half_gap = if gaps_would_hide_the_color { 0.0 } else { half_gap / radius };
@@ -99,12 +90,6 @@ fn frame_arc_color(a: &FrameArc, style_progress: f64) -> Color {
         return style_color(a.style_after, ring);
     }
     theme::mix(style_color(a.style_before, ring), style_color(a.style_after, ring), style_progress as f32)
-}
-
-enum Hit<'a> {
-    Center,
-    Arc(&'a Arc),
-    Nothing,
 }
 
 #[derive(Clone, Copy)]
@@ -155,15 +140,8 @@ fn rim() -> Stroke<'static> {
 }
 
 impl Sunburst<'_> {
-    fn locate(&self, geo: &Geo, p: Point) -> Hit<'_> {
-        let dist = p.distance(geo.center);
-        if dist < geo.r0 {
-            return Hit::Center;
-        }
-        let d = p - geo.center;
-        let ring = ((dist - geo.r0) / geo.ring_w) as usize;
-        let frac = ((d.y.atan2(d.x) + FRAC_PI_2) / TAU).rem_euclid(1.0) as f64;
-        self.layout.hit(ring, frac).map_or(Hit::Nothing, Hit::Arc)
+    fn locate(&self, geo: &Geo, p: Point) -> ChartHit<'_> {
+        geo.chart.hit(self.layout, ChartPoint { x: p.x, y: p.y })
     }
 
     fn can_go_up(&self) -> bool {
@@ -178,16 +156,17 @@ impl Sunburst<'_> {
     }
 
     fn draw_center_disc_with_focus_size(&self, frame: &mut Frame, geo: &Geo) {
-        let radius = geo.r0 - CENTER_DISC_INSET;
+        let radius = geo.chart.hole_radius - CENTER_DISC_INSET;
         let dropped = geo.center + Vector::new(0.0, SOFT_SHADOW_DROP);
         fill_soft_shadow(frame, |outset| Path::circle(dropped, radius + outset));
         let disc = Path::circle(geo.center, radius);
         frame.fill(&disc, lit_from_above(theme::PANEL, geo.center.y - radius, geo.center.y + radius));
         frame.stroke(&disc, rim());
         let focus = self.layout.focus;
-        let label_width = geo.r0 * CENTER_LABEL_WIDTH_PER_HOLE_RADIUS;
+        let label_width = geo.chart.hole_radius * CENTER_LABEL_WIDTH_PER_HOLE_RADIUS;
         let total = format_size(self.moving.map_or(self.layout.total, |m| m.total));
-        let total_size = (geo.r0 * 0.28).clamp(10.0, 26.0).min(label_width / generous_text_width(&total, 1.0));
+        let total_size =
+            (geo.chart.hole_radius * 0.28).clamp(10.0, 26.0).min(label_width / generous_text_width(&total, 1.0));
         frame.fill_text(Text {
             content: total,
             position: geo.center - Vector::new(0.0, 6.0),
@@ -197,10 +176,10 @@ impl Sunburst<'_> {
             align_y: alignment::Vertical::Center,
             ..Text::default()
         });
-        let name_size = (geo.r0 * 0.15).clamp(10.0, 14.0);
+        let name_size = (geo.chart.hole_radius * 0.15).clamp(10.0, 14.0);
         frame.fill_text(Text {
             content: fit_width(&self.tree.name(focus), label_width, name_size),
-            position: geo.center + Vector::new(0.0, geo.r0 * 0.30),
+            position: geo.center + Vector::new(0.0, geo.chart.hole_radius * 0.30),
             color: theme::TEXT_DIM,
             size: Pixels(name_size),
             align_x: alignment::Horizontal::Center.into(),
@@ -281,11 +260,11 @@ impl Sunburst<'_> {
         let mut overlay = Frame::new(renderer, bounds.size());
         if let Some(p) = cursor.position_in(bounds) {
             match self.locate(geo, p) {
-                Hit::Center if self.can_go_up() => overlay.stroke(
-                    &Path::circle(geo.center, geo.r0 - CENTER_DISC_INSET),
+                ChartHit::Hole if self.can_go_up() => overlay.stroke(
+                    &Path::circle(geo.center, geo.chart.hole_radius - CENTER_DISC_INSET),
                     Stroke::default().with_color(Color::WHITE.scale_alpha(0.5)).with_width(2.0),
                 ),
-                Hit::Arc(a) => self.draw_tooltip(&mut overlay, bounds, p, a),
+                ChartHit::Arc(a) => self.draw_tooltip(&mut overlay, bounds, p, a),
                 _ => {}
             }
         }
@@ -311,7 +290,7 @@ impl canvas::Program<Message> for Sunburst<'_> {
         match event {
             Event::Mouse(mouse::Event::CursorMoved { .. } | mouse::Event::CursorLeft) => {
                 let hit = match cursor.position_in(bounds).map(|p| self.locate(&geo, p)) {
-                    Some(Hit::Arc(a)) => Some(a.segment),
+                    Some(ChartHit::Arc(a)) => Some(a.segment),
                     _ => None,
                 };
                 let browser_forgot_the_arc_under_the_cursor = hit.is_some() && hit != self.hovered;
@@ -324,8 +303,8 @@ impl canvas::Program<Message> for Sunburst<'_> {
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 let p = cursor.position_in(bounds)?;
                 let msg = match self.locate(&geo, p) {
-                    Hit::Center => Message::GoUp,
-                    Hit::Arc(a) => {
+                    ChartHit::Hole => Message::GoUp,
+                    ChartHit::Arc(a) => {
                         let (seg, now) = (a.segment, Instant::now());
                         if matches!(state.last_click, Some((t, s)) if s == seg && now - t < DOUBLE_CLICK) {
                             state.last_click = None;
@@ -335,7 +314,7 @@ impl canvas::Program<Message> for Sunburst<'_> {
                             Message::Press(seg)
                         }
                     }
-                    Hit::Nothing => Message::Deselect,
+                    ChartHit::Nothing => Message::Deselect,
                 };
                 Some(canvas::Action::publish(msg).and_capture())
             }
@@ -368,8 +347,8 @@ impl canvas::Program<Message> for Sunburst<'_> {
     fn mouse_interaction(&self, _state: &State, bounds: Rectangle, cursor: mouse::Cursor) -> mouse::Interaction {
         let geo = Geo::new(bounds.size());
         match cursor.position_in(bounds).map(|p| self.locate(&geo, p)) {
-            Some(Hit::Arc(_)) => mouse::Interaction::Pointer,
-            Some(Hit::Center) if self.can_go_up() => mouse::Interaction::Pointer,
+            Some(ChartHit::Arc(_)) => mouse::Interaction::Pointer,
+            Some(ChartHit::Hole) if self.can_go_up() => mouse::Interaction::Pointer,
             _ => mouse::Interaction::default(),
         }
     }
@@ -389,7 +368,7 @@ mod tests {
         grid.clone()
             .flat_map(|x| grid.clone().map(move |y| Point::new(x as f32, y as f32)))
             .find_map(|p| match chart.locate(geo, p) {
-                Hit::Arc(a) => Some((p, a.segment)),
+                ChartHit::Arc(a) => Some((p, a.segment)),
                 _ => None,
             })
             .expect("the chart draws at least one arc")

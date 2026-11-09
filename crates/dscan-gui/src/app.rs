@@ -5,15 +5,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use dscan_core::{
-    Accounting, CancelToken, Collection, DesktopError, Exclusions, Layout, LayoutParams, NodeId, PREVIEW_ACTION,
-    Progress, ProgressSnapshot, REVEAL_ACTION, Refusal, Removal, RemovalPlan, RemovalReport, ScanError, ScanOptions,
-    SearchResult, Segment, TRASH_NAME, Transition, Tree, Volume, desktop, format_size,
+    Accounting, CancelToken, DesktopError, Layout, LayoutParams, NodeId, PREVIEW_ACTION, Progress, ProgressSnapshot,
+    REVEAL_ACTION, Refusal, Removal, RemovalPlan, RemovalReport, ScanError, ScanOptions, SearchResult, Segment,
+    TRASH_NAME, Transition, Tree, Volume, desktop, format_size,
 };
 use iced::keyboard::{self, Key, key::Named};
 use iced::widget::canvas::Cache;
 use iced::{Point, Subscription, Task, event, mouse};
 
 use crate::animation::{Advance, ChartAnimation};
+use crate::collector::Collector;
 use crate::fmt::{NAME_IN_A_MESSAGE_MAX_CHARS, count_phrase, items_phrase, truncate, with_folder_mark};
 
 pub const APP_NAME: &str = "Disk Analyzer";
@@ -169,12 +170,9 @@ pub struct Browser {
     search_cancel: CancelToken,
     pub search: Option<Arc<SearchResult>>,
     pub list: ListView,
-    pub collector: Collection,
-    pub exclusions: Exclusions,
+    pub collector: Collector,
     pub animation: Option<ChartAnimation>,
     pub over_collector: bool,
-    pub collected_list_open: bool,
-    pub confirm_trash: bool,
     removal: Option<RemovalProgress>,
     pub(crate) delete_hold_started: Option<Instant>,
     pub drag: Option<PendingDrag>,
@@ -571,12 +569,9 @@ impl Browser {
             search_cancel: CancelToken::default(),
             search: None,
             list: ListView::default(),
-            collector: Collection::default(),
-            exclusions: Exclusions::default(),
+            collector: Collector::default(),
             animation: None,
             over_collector: false,
-            collected_list_open: false,
-            confirm_trash: false,
             removal: None,
             delete_hold_started: None,
             drag: None,
@@ -611,7 +606,13 @@ impl Browser {
     }
 
     fn computed_layout(&self) -> Layout {
-        dscan_core::sunburst(&self.tree, self.focus, LayoutParams::default(), self.search.as_deref(), &self.exclusions)
+        dscan_core::sunburst(
+            &self.tree,
+            self.focus,
+            LayoutParams::default(),
+            self.search.as_deref(),
+            self.collector.exclusions(),
+        )
     }
 
     fn relayout(&mut self) {
@@ -632,7 +633,7 @@ impl Browser {
     }
 
     pub fn size(&self, id: NodeId) -> u64 {
-        self.exclusions.size(&self.tree, id)
+        self.collector.exclusions().size(&self.tree, id)
     }
 
     pub fn listed_folder(&self) -> NodeId {
@@ -644,7 +645,7 @@ impl Browser {
 
     fn visible_children_with_sizes(&self, id: NodeId) -> impl Iterator<Item = (NodeId, u64)> + '_ {
         let relevant = |c: NodeId| self.search.as_ref().is_none_or(|s| s.is_relevant(c));
-        self.exclusions.children_with_sizes(&self.tree, id).filter(move |&(c, _)| relevant(c))
+        self.collector.exclusions().children_with_sizes(&self.tree, id).filter(move |&(c, _)| relevant(c))
     }
 
     fn visible_children(&self, id: NodeId) -> impl Iterator<Item = NodeId> + '_ {
@@ -853,9 +854,6 @@ impl Browser {
     }
 
     fn collector_changed(&mut self) {
-        self.collected_list_open &= !self.collector.is_empty();
-        self.confirm_trash &= !self.collector.is_empty();
-        self.exclusions = self.collector.exclusions(&self.tree);
         if self.selected.is_some_and(|s| self.collector.covers(&self.tree, s)) {
             self.selected = None;
         }
@@ -1078,13 +1076,10 @@ impl Browser {
                         }
                     }
                     Key::Named(Named::Escape) => {
-                        if self.confirm_trash {
-                            self.confirm_trash = false;
-                        } else if self.collected_list_open {
-                            self.collected_list_open = false;
-                        } else if !self.search_text.is_empty() {
-                            return self.handle(Message::ClearSearch);
-                        } else {
+                        if !self.collector.close_the_innermost_panel() {
+                            if !self.search_text.is_empty() {
+                                return self.handle(Message::ClearSearch);
+                            }
                             self.selected = None;
                         }
                     }
@@ -1115,27 +1110,24 @@ impl Browser {
             }
             Message::CollectorEnter => self.over_collector = true,
             Message::CollectorExit => self.over_collector = false,
-            Message::ToggleCollectedList => {
-                self.collected_list_open = !self.collected_list_open && !self.collector.is_empty();
-            }
+            Message::ToggleCollectedList => self.collector.toggle_list(),
             Message::CollectSelected => {
                 if let Some(s) = self.selected {
                     self.collect(s);
                 }
             }
             Message::Uncollect(id) => {
-                self.collector.remove(id);
+                self.collector.remove(&self.tree, id);
                 self.collector_changed();
             }
             Message::ClearCollector => {
                 self.collector.clear();
-                self.confirm_trash = false;
                 self.collector_changed();
             }
-            Message::AskTrash => self.confirm_trash = !self.collector.is_empty(),
-            Message::CancelTrash => self.confirm_trash = false,
+            Message::AskTrash => self.collector.ask_to_trash(),
+            Message::CancelTrash => self.collector.stop_asking_to_trash(),
             Message::ConfirmTrash => {
-                self.confirm_trash = false;
+                self.collector.stop_asking_to_trash();
                 return self.remove_collected(Removal::MoveToTrash);
             }
             Message::DeleteHoldStart if !self.collector.is_empty() => self.delete_hold_started = Some(Instant::now()),

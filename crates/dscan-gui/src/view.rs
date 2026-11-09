@@ -850,7 +850,7 @@ fn hold_to_delete_button(b: &Browser, fit: CollectorFit) -> Element<'_, Message>
 fn collector(b: &Browser, layer: iced::Size) -> Element<'_, Message> {
     let dragging = b.active_drag().is_some();
     let hot = b.dropping_on_collector();
-    let list_open = b.collected_list_open;
+    let list_open = b.collector.list_open();
 
     let bar = container(responsive(move |size| collector_content(b, size.width)))
         .padding(COLLECTOR_PADDING)
@@ -942,7 +942,7 @@ fn collected_row(b: &Browser, id: NodeId, row_width: f32) -> Element<'_, Message
 }
 
 fn collector_chevron<'a>(b: &Browser) -> Element<'a, Message> {
-    if b.collected_list_open {
+    if b.collector.list_open() {
         icon::chevron_down(COLLECTOR_CHEVRON_SIZE, theme::TEXT_DIM).into()
     } else {
         icon::chevron_up(COLLECTOR_CHEVRON_SIZE, theme::TEXT_DIM).into()
@@ -966,7 +966,7 @@ fn collector_ring<'a>(b: &Browser) -> Element<'a, Message> {
 }
 
 fn collector_content(b: &Browser, width: f32) -> Element<'_, Message> {
-    let (fit, body) = if b.confirm_trash {
+    let (fit, body) = if b.collector.confirming_trash() {
         trash_confirmation(b, width)
     } else if b.collector.is_empty() {
         (CollectorFit::Full, empty_collector_hint(b))

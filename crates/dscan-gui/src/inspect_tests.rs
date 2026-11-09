@@ -124,7 +124,7 @@ fn inspect_start() -> Result<(), Error> {
     let (app, _) = App::new(None);
     let mut ui = sim(&app);
     println!("{}", ui_inspect::report(&mut ui, VIEW));
-    shoot(&mut ui, "start")?;
+    shoot(&mut ui, "start-without-scans")?;
     Ok(())
 }
 
@@ -749,8 +749,9 @@ fn collector_fixed_height_fits_every_state_without_clipping() -> Result<(), Erro
     shot(&app, "collector-one")?;
     let kids: Vec<_> = on_screen(&app).tree.children(root).skip(1).collect();
     for id in kids {
-        let b = on_screen_mut(&mut app);
-        b.collector.add(&b.tree, id).unwrap();
+        let _ = app.update(Message::Press(dscan_core::Segment::Node(id)));
+        let _ = app.update(Message::MouseReleased);
+        let _ = app.update(Message::CollectSelected);
     }
     assert!(on_screen(&app).collector.len() > 4);
     shot(&app, "collector-many")?;
@@ -891,17 +892,17 @@ fn collected_items_are_listed_only_after_clicking_the_collector() -> Result<(), 
     for m in msgs {
         let _ = app.update(m);
     }
-    assert!(on_screen(&app).collected_list_open, "removing one item keeps the list open");
+    assert!(on_screen(&app).collector.list_open(), "removing one item keeps the list open");
     assert_eq!(collected_rows_over_the_chart(&mut sim(&app), &names), ["Movies/", "Pictures/"]);
 
     key(&mut app, Key::Named(Named::Escape), false);
-    assert!(!on_screen(&app).collected_list_open, "Escape closes the list");
+    assert!(!on_screen(&app).collector.list_open(), "Escape closes the list");
 
     let _ = app.update(Message::ToggleCollectedList);
     let _ = app.update(Message::ClearCollector);
-    assert!(!on_screen(&app).collected_list_open, "an emptied collector closes its list");
+    assert!(!on_screen(&app).collector.list_open(), "an emptied collector closes its list");
     let _ = app.update(Message::ToggleCollectedList);
-    assert!(!on_screen(&app).collected_list_open, "an empty collector has no list to open");
+    assert!(!on_screen(&app).collector.list_open(), "an empty collector has no list to open");
     Ok(())
 }
 

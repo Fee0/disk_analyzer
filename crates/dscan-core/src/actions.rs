@@ -15,6 +15,7 @@ pub enum Refusal {
 #[derive(Clone, Debug, Default)]
 pub struct Collection {
     items: Vec<NodeId>,
+    exclusions: Exclusions,
 }
 
 impl Collection {
@@ -32,8 +33,12 @@ impl Collection {
         self.items.iter().any(|&c| tree.is_ancestor_of(c, id))
     }
 
-    pub fn exclusions(&self, tree: &Tree) -> Exclusions {
-        Exclusions::new(tree, &self.items)
+    pub fn exclusions(&self) -> &Exclusions {
+        &self.exclusions
+    }
+
+    fn exclude_the_items(&mut self, tree: &Tree) {
+        self.exclusions = Exclusions::new(tree, &self.items);
     }
 
     pub fn add(&mut self, tree: &Tree, id: NodeId) -> Result<(), Refusal> {
@@ -48,19 +53,22 @@ impl Collection {
         }
         self.items.retain(|&c| !tree.is_ancestor_of(id, c));
         self.items.push(id);
+        self.exclude_the_items(tree);
         Ok(())
     }
 
-    pub fn remove(&mut self, id: NodeId) {
+    pub fn remove(&mut self, tree: &Tree, id: NodeId) {
         self.items.retain(|&c| c != id);
+        self.exclude_the_items(tree);
     }
 
     pub fn clear(&mut self) {
-        self.items.clear();
+        *self = Collection::default();
     }
 
     pub fn prune(&mut self, tree: &Tree) {
         self.items.retain(|&c| tree.is_actionable(c));
+        self.exclude_the_items(tree);
     }
 
     pub fn size(&self, tree: &Tree) -> u64 {
@@ -170,6 +178,27 @@ mod tests {
         assert_eq!(c.add(&t, x), Err(Refusal::AlreadyCoveredByCollectedFolder));
         assert!(c.covers(&t, x) && c.covers(&t, a), "a collected folder covers itself and what is inside it");
         assert_eq!(c.size(&t), 8, "size counts allocated bytes");
+    }
+
+    #[test]
+    fn what_a_collection_excludes_follows_every_change_to_its_items() {
+        let mut t = tree(vec![D("a", vec![F("x", 5), F("y", 3)]), F("z", 1)]);
+        let (a, x, y, z) =
+            (descend(&t, &["a"]), descend(&t, &["a", "x"]), descend(&t, &["a", "y"]), descend(&t, &["z"]));
+        let shown = |c: &Collection, t: &Tree| c.exclusions().size(t, t.root());
+        let mut c = Collection::default();
+        c.add(&t, x).unwrap();
+        c.add(&t, z).unwrap();
+        assert_eq!(shown(&c, &t), 3, "adding excludes the item");
+        c.remove(&t, z);
+        assert_eq!(shown(&c, &t), 4, "removing brings the item back");
+        c.add(&t, y).unwrap();
+        t.remove(x);
+        c.prune(&t);
+        assert_eq!(c.items(), &[y]);
+        assert_eq!(c.exclusions().size(&t, a), 0, "pruning recounts against the changed tree");
+        c.clear();
+        assert_eq!(shown(&c, &t), t.size(t.root()), "a cleared collection excludes nothing");
     }
 
     #[test]

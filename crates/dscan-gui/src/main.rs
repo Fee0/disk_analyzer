@@ -2,6 +2,7 @@
 
 mod animation;
 mod app;
+mod collector;
 mod depth;
 mod fmt;
 #[cfg(test)]
