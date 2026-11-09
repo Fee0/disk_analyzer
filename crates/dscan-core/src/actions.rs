@@ -27,9 +27,6 @@ impl Collection {
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
-    pub fn contains(&self, id: NodeId) -> bool {
-        self.items.contains(&id)
-    }
 
     pub fn covers(&self, tree: &Tree, id: NodeId) -> bool {
         self.items.iter().any(|&c| tree.is_ancestor_of(c, id))

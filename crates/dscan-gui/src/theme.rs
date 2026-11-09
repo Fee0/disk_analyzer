@@ -100,7 +100,7 @@ pub fn mix(a: Color, b: Color, t: f32) -> Color {
 
 pub fn app_theme() -> iced::Theme {
     iced::Theme::custom(
-        "Disk Analyzer".to_string(),
+        crate::app::APP_NAME.to_string(),
         iced::theme::Palette {
             background: BG,
             text: TEXT,

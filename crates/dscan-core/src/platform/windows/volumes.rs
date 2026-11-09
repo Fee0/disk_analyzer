@@ -8,8 +8,8 @@ use windows_sys::Win32::Storage::FileSystem::{
 use super::drives;
 use super::handle::wide_nul_terminated;
 use crate::hidden::SpaceInfo;
-use crate::platform::answered_within;
-use crate::volumes::{MountedFileSystem, NETWORK_ANSWER_LIMIT, Volume};
+use crate::platform::asked_of_a_share_that_may_not_answer;
+use crate::volumes::{MountedFileSystem, Volume};
 
 const MAX_LABEL_UNITS: usize = 261;
 const MAX_FILE_SYSTEM_NAME_UNITS: usize = 261;
@@ -21,12 +21,7 @@ pub(super) fn space_info(path: &Path) -> io::Result<SpaceInfo> {
     if unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut available_to_user, &mut total, &mut free) } == 0 {
         return Err(io::Error::last_os_error());
     }
-    Ok(SpaceInfo {
-        total,
-        used: total.saturating_sub(free),
-        available: available_to_user,
-        available_important: available_to_user,
-    })
+    Ok(SpaceInfo::without_purgeable(total, free, available_to_user))
 }
 
 fn from_wide(buffer: &[u16]) -> String {
@@ -68,8 +63,7 @@ fn facts_of(root: &str) -> Option<DriveFacts> {
 }
 
 fn facts_of_a_share_that_may_not_answer(root: &str) -> Option<DriveFacts> {
-    let root = root.to_owned();
-    answered_within(NETWORK_ANSWER_LIMIT, move || facts_of(&root)).flatten()
+    asked_of_a_share_that_may_not_answer(root.to_owned(), |root| facts_of(root))
 }
 
 pub(super) fn system_drive_letter() -> char {

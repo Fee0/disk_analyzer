@@ -15,7 +15,10 @@ use iced::{Alignment, Color, Element, Fill, Length, Theme};
 use crate::animation::ChartAnimation;
 use crate::app::{App, Browser, HOLD_TO_DELETE, ListRow, Message, Notice, NoticeKind, SEARCH_ID, ScanJob, Screen};
 use crate::depth::{self, Elevation};
-use crate::fmt::{fit_width, fit_width_keeping_both_ends, generous_text_width, items_phrase, thousands, truncate};
+use crate::fmt::{
+    NAME_IN_A_MESSAGE_MAX_CHARS, count_phrase, fit_width, fit_width_keeping_both_ends, generous_text_width,
+    items_phrase, thousands, truncate, with_folder_mark,
+};
 use crate::icon;
 use crate::sunburst::Sunburst;
 use crate::theme;
@@ -33,6 +36,10 @@ pub fn view(app: &App) -> Element<'_, Message> {
 
 fn rounded_box(bg: Color, radius: f32) -> container::Style {
     container::Style::default().background(bg).border(border::rounded(radius)).color(theme::TEXT)
+}
+
+fn outlined_box(bg: Color, radius: f32, outline: Color) -> container::Style {
+    rounded_box(bg, radius).border(depth::outline(radius, outline))
 }
 
 fn dot<'a>(color: Color, size: f32) -> Element<'a, Message> {
@@ -210,7 +217,7 @@ fn start_content(app: &App, width: f32) -> Column<'_, Message> {
             )
             .padding(14)
             .width(Fill)
-            .style(move |_| rounded_box(warn.scale_alpha(0.15), 10.0).border(border::rounded(10).width(1).color(warn.scale_alpha(0.5)))),
+            .style(move |_| outlined_box(warn.scale_alpha(0.15), 10.0, warn.scale_alpha(0.5))),
         );
     }
     if let Some(err) = &app.error {
@@ -369,7 +376,7 @@ fn scanning_row<'a>(identity: DiskIdentity<'a>, job: &ScanJob, text_width: f32) 
             RESUME_LABEL,
         )
     } else {
-        (theme::ACCENT, format!("{} · {} files", format_size(s.bytes), thousands(s.files)), PAUSE_LABEL)
+        (theme::ACCENT, format!("{} · {}", format_size(s.bytes), count_phrase(s.files, "file", "files")), PAUSE_LABEL)
     };
     let controls = scan_button(pause_or_resume, Message::TogglePause(job.id));
     let meter =
@@ -430,7 +437,7 @@ fn open_result_rows(app: &App, list_width: f32) -> Element<'_, Message> {
     for b in &app.parked_newest_first {
         let t = &b.tree;
         let root = t.root();
-        let meta = format!("{} files", thousands(t.node(root).items() as u64));
+        let meta = count_phrase(t.node(root).items() as u64, "file", "files");
         let content = row![
             dot(theme::kind_color(t.node(root).kind()), RESULT_DOT),
             column![
@@ -483,7 +490,11 @@ fn browse(b: &Browser) -> Element<'_, Message> {
 
     match b.active_drag() {
         Some(d) => {
-            let label = format!("{}  {}", truncate(&b.tree.name(d.item), 40), format_size(b.size(d.item)));
+            let label = format!(
+                "{}  {}",
+                truncate(&b.tree.name(d.item), NAME_IN_A_MESSAGE_MAX_CHARS),
+                format_size(b.size(d.item))
+            );
             let chip = container(text(label).size(13)).padding([6, 10]).style(|_| {
                 rounded_box(theme::ACCENT.scale_alpha(0.92), 8.0).color(Color::WHITE).shadow(floating_shadow())
             });
@@ -728,11 +739,7 @@ fn notice_banner(notice: &Notice) -> Element<'_, Message> {
     )
     .padding(NOTICE_PADDING)
     .max_width(NOTICE_MAX_WIDTH)
-    .style(move |_| {
-        rounded_box(theme::PANEL_HI, NOTICE_RADIUS)
-            .border(border::rounded(NOTICE_RADIUS).width(1).color(tint))
-            .shadow(floating_shadow())
-    });
+    .style(move |_| outlined_box(theme::PANEL_HI, NOTICE_RADIUS, tint).shadow(floating_shadow()));
     mouse_area(banner)
         .on_enter(Message::NoticeEnter)
         .on_exit(Message::NoticeExit)
@@ -810,7 +817,9 @@ fn hold_to_delete_button(b: &Browser, fit: CollectorFit) -> Element<'_, Message>
     let progress = b.delete_hold_progress();
     let width = fit.hold_button_width();
     let held_part = container(Space::new()).width(width * progress.unwrap_or(0.0)).height(Fill).style(|_| {
-        container::Style::default().background(depth::lit_from_above(theme::DANGER)).border(border::rounded(6))
+        container::Style::default()
+            .background(depth::lit_from_above(theme::DANGER))
+            .border(border::rounded(FILLED_BUTTON_RADIUS))
     });
     let label = center(
         text(hold_to_delete_label(progress, fit))
@@ -821,10 +830,7 @@ fn hold_to_delete_button(b: &Browser, fit: CollectorFit) -> Element<'_, Message>
     let face = container(stack![held_part, label].width(Fill).height(Fill))
         .width(width)
         .height(HOLD_BUTTON_HEIGHT)
-        .style(|_| {
-            rounded_box(theme::mix(theme::DANGER, theme::PANEL, 0.65), 6.0)
-                .border(border::rounded(6).width(1).color(theme::DANGER))
-        });
+        .style(|_| outlined_box(theme::mix(theme::DANGER, theme::PANEL, 0.65), FILLED_BUTTON_RADIUS, theme::DANGER));
     let button = depth::casting_shadow(
         mouse_area(face)
             .on_press(Message::DeleteHoldStart)
@@ -904,10 +910,7 @@ fn collected_list(b: &Browser, room: iced::Size) -> Element<'_, Message> {
 
 fn collected_row(b: &Browser, id: NodeId, row_width: f32) -> Element<'_, Message> {
     let node = b.tree.node(id);
-    let mut name = b.tree.name(id).into_owned();
-    if node.is_dir() {
-        name.push('/');
-    }
+    let name = with_folder_mark(b.tree.name(id).into_owned(), node.is_dir());
     let name_width = row_width
         - 2.0 * LIST_ROW_PADDING_X
         - LIST_ROW_DOT
@@ -1146,7 +1149,7 @@ fn list_panel_content(b: &Browser, panel_size: iced::Size) -> Element<'_, Messag
 
     let mut header = column![name_and_size_title(b, subject, width, LIST_HEADER_TITLE)].spacing(4);
     if let Some(s) = &b.search {
-        let search_summary = format!("{} matches for “{}”", thousands(s.matches as u64), s.query);
+        let search_summary = format!("{} for “{}”", count_phrase(s.matches as u64, "match", "matches"), s.query);
         header = header.push(
             text(fit_width(&search_summary, width, LIST_SUMMARY_TEXT_SIZE))
                 .size(LIST_SUMMARY_TEXT_SIZE)
@@ -1256,7 +1259,7 @@ fn unscanned_space_explanation(
 ) -> Element<'_, Message> {
     let mut body = column![details_text(explanation.summary).color(theme::TEXT_DIM)].spacing(DETAILS_SPACING);
     if let Some(unreadable) = dscan_core::hidden::unreadable_items_behind(&b.tree, id) {
-        let note = format!("{} folders couldn't be read in this scan.", thousands(unreadable));
+        let note = format!("{} couldn't be read in this scan.", count_phrase(unreadable, "folder", "folders"));
         body = body.push(details_text(note).color(theme::WARNING));
     }
     for cause in explanation.causes {
@@ -1277,14 +1280,8 @@ fn list_row<'a>(b: &'a Browser, r: &'a ListRow, columns: &ListColumns) -> Elemen
     let id = r.id;
     let n = b.tree.node(id);
     let kind_color = theme::kind_color(n.kind());
-    let collected = b.collector.contains(id);
-    let name_color = if collected && !columns.shows_bar {
-        theme::DANGER
-    } else if n.is_synthetic() || n.accounting() == Accounting::Unreadable {
-        theme::TEXT_DIM
-    } else {
-        theme::TEXT
-    };
+    let name_color =
+        if n.is_synthetic() || n.accounting() == Accounting::Unreadable { theme::TEXT_DIM } else { theme::TEXT };
 
     let mut content = row![
         dot(kind_color, LIST_ROW_DOT),
@@ -1298,15 +1295,10 @@ fn list_row<'a>(b: &'a Browser, r: &'a ListRow, columns: &ListColumns) -> Elemen
     .spacing(LIST_ROW_SPACING)
     .align_y(Alignment::Center);
     if columns.shows_bar {
-        let slot: Element<'a, Message> = if collected {
-            text("collected").size(11).color(theme::DANGER).wrapping(Wrapping::None).into()
-        } else {
-            container(Space::new())
-                .width(Length::Fixed((r.fraction_of_listed_folder * LIST_BAR_MAX_WIDTH).max(1.0)))
-                .height(3)
-                .style(move |_| container::background(kind_color.scale_alpha(0.7)))
-                .into()
-        };
+        let slot = container(Space::new())
+            .width(Length::Fixed((r.fraction_of_listed_folder * LIST_BAR_MAX_WIDTH).max(1.0)))
+            .height(3)
+            .style(move |_| container::background(kind_color.scale_alpha(0.7)));
         content = content.push(container(slot).width(LIST_BAR_SLOT_WIDTH).align_x(Alignment::End));
     }
     let content = content.push(

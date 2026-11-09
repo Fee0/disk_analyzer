@@ -24,7 +24,7 @@ pub(super) fn space_reported_by(s: &libc::statfs) -> SpaceInfo {
     let block = s.f_bsize as u64;
     let available = s.f_bavail * block;
     let total = s.f_blocks * block;
-    SpaceInfo { total, used: total.saturating_sub(s.f_bfree * block), available, available_important: available }
+    SpaceInfo::without_purgeable(total, s.f_bfree * block, available)
 }
 
 pub(super) fn volume_name(path: &Path) -> Option<String> {

@@ -9,7 +9,7 @@ use iced::{Color, Pixels, Point, Rectangle, Renderer, Size, Theme, Vector, align
 use crate::animation::MovingChart;
 use crate::app::Message;
 use crate::depth::{self, Shading};
-use crate::fmt::{fit_width, generous_text_width, truncate};
+use crate::fmt::{count_phrase, fit_width, generous_text_width, truncate};
 use crate::theme;
 
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
@@ -22,6 +22,11 @@ const SOFT_SHADOW_LAYER_ALPHA: f32 = 0.05;
 const SOFT_SHADOW_DROP: f32 = 2.0;
 const TOOLTIP_RADIUS: f32 = 6.0;
 const TOOLTIP_SHADOW_DROP: f32 = 4.0;
+const TOOLTIP_NAME_MAX_CHARS: usize = 48;
+const TOOLTIP_NAME_SIZE: f32 = 13.0;
+const TOOLTIP_DETAIL_SIZE: f32 = 12.0;
+const TOOLTIP_PADDING_X: f32 = 10.0;
+const TOOLTIP_MIN_WIDTH: f32 = 80.0;
 
 pub struct Sunburst<'a> {
     pub tree: &'a Tree,
@@ -229,12 +234,14 @@ impl Sunburst<'_> {
     fn draw_tooltip(&self, frame: &mut Frame, bounds: Rectangle, p: Point, arc: &Arc) {
         let name = match arc.segment {
             Segment::Node(n) => self.tree.name(n).into_owned(),
-            Segment::Small { count, .. } => format!("{count} smaller items"),
+            Segment::Small { count, .. } => count_phrase(count as u64, "smaller item", "smaller items"),
         };
         let pct = if self.layout.total > 0 { arc.size as f64 * 100.0 / self.layout.total as f64 } else { 0.0 };
-        let line1 = truncate(&name, 48);
+        let line1 = truncate(&name, TOOLTIP_NAME_MAX_CHARS);
         let line2 = format!("{} · {:.1}%", format_size(arc.size), pct);
-        let w = (line1.chars().count().max(line2.len()) as f32 * 7.4 + 20.0).max(80.0);
+        let text_width =
+            generous_text_width(&line1, TOOLTIP_NAME_SIZE).max(generous_text_width(&line2, TOOLTIP_DETAIL_SIZE));
+        let w = (text_width + 2.0 * TOOLTIP_PADDING_X).max(TOOLTIP_MIN_WIDTH);
         let h = 44.0;
         let mut pos = p + Vector::new(14.0, 14.0);
         if pos.x + w > bounds.width {
@@ -252,10 +259,11 @@ impl Sunburst<'_> {
         let card = Path::rounded_rectangle(pos, size, TOOLTIP_RADIUS.into());
         frame.fill(&card, lit_from_above(theme::PANEL_HI, pos.y, pos.y + h));
         frame.stroke(&card, rim());
-        for (content, dy, color, size) in [(line1, 7.0, theme::TEXT, 13.0), (line2, 24.0, theme::TEXT_DIM, 12.0)] {
+        let lines = [(line1, 7.0, theme::TEXT, TOOLTIP_NAME_SIZE), (line2, 24.0, theme::TEXT_DIM, TOOLTIP_DETAIL_SIZE)];
+        for (content, dy, color, size) in lines {
             frame.fill_text(Text {
                 content,
-                position: pos + Vector::new(10.0, dy),
+                position: pos + Vector::new(TOOLTIP_PADDING_X, dy),
                 color,
                 size: Pixels(size),
                 ..Text::default()

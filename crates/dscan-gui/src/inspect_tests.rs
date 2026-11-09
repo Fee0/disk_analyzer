@@ -1,18 +1,27 @@
 use std::path::Path;
 
-use dscan_core::{CancelToken, Progress, ScanOptions};
+use dscan_core::ScanOptions;
+use dscan_core::hidden::HIDDEN_SPACE_NAME;
 use iced::Settings;
 use iced_test::{Error, Simulator};
 
-use crate::app::test_util::{app_showing, descend, on_screen, on_screen_mut, scanned};
+use crate::app::test_util::{app_showing, descend, on_screen, on_screen_mut, scan_result, scanned};
 use crate::app::{App, Browser, Message, Notice, NoticeKind, Screen};
 use crate::iced_inspect as ui_inspect;
 use crate::{theme, view};
 
-const VIEW: (f32, f32) = (1280.0, 820.0);
+const VIEW: (f32, f32) = (view::DEFAULT_WINDOW_SIZE.width, view::DEFAULT_WINDOW_SIZE.height);
 const OUT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/iced-inspect");
 const A_CHART_SEGMENT: (f32, f32) = (440.0, 320.0);
 const CLOSE_BUTTON_COLUMN_X: f32 = 960.0;
+
+pub(crate) fn write_files(root: &Path, files: &[(&str, usize)], fill: u8) {
+    for &(relative, size) in files {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, vec![fill; size]).unwrap();
+    }
+}
 
 fn fixture(root: &Path) {
     let files: &[(&str, usize)] = &[
@@ -31,11 +40,7 @@ fn fixture(root: &Path) {
         ("Documents/report.pdf", 250_000),
         ("notes.txt", 20_000),
     ];
-    for (p, size) in files {
-        let path = root.join(p);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, vec![0x5au8; *size]).unwrap();
-    }
+    write_files(root, files, 0x5a);
 }
 
 fn scanned_fixture(dir: &Path) -> Browser {
@@ -647,8 +652,7 @@ fn scanning_the_same_place_again_replaces_its_running_scan() {
 
 fn finish_scan_of(app: &mut App, job_id: u64, folder: &Path) {
     let job = app.scans.iter().find(|job| job.id == job_id).expect("the scan is running");
-    *job.result_slot.lock() =
-        Some(dscan_core::scan(&ScanOptions::folder(folder), &Progress::default(), &CancelToken::default()));
+    *job.result_slot.lock() = Some(scan_result(&ScanOptions::folder(folder)));
     let _ = app.update(Message::ScanFinished { job_id, crash: None });
 }
 
@@ -716,8 +720,7 @@ fn inspect_open_results() -> Result<(), Error> {
     let _ = app.update(Message::FolderPicked(Some(dirs[0].path().to_path_buf())));
     let job = app.scans.last().expect("scanning");
     let job_id = job.id;
-    let fresh_scan =
-        dscan_core::scan(&ScanOptions::folder(dirs[0].path()), &Progress::default(), &CancelToken::default());
+    let fresh_scan = scan_result(&ScanOptions::folder(dirs[0].path()));
     *job.result_slot.lock() = Some(fresh_scan);
     let _ = app.update(Message::ScanFinished { job_id, crash: None });
     assert!(matches!(app.screen, Screen::Browse(_)));
@@ -917,7 +920,7 @@ fn messages_float_over_the_chart_instead_of_a_status_line() -> Result<(), Error>
         );
     }
 
-    let _ = app.update(Message::DesktopActionFinished { failure: Some(LONG_FAILURE.to_string()) });
+    let _ = app.update(Message::DesktopActionFailed(LONG_FAILURE.to_string()));
     let msgs = {
         let mut ui = sim(&app);
         let chart_side = list_panel_left(&mut ui);
@@ -935,7 +938,7 @@ fn messages_float_over_the_chart_instead_of_a_status_line() -> Result<(), Error>
     }
     assert!(!texts_on_screen(&mut sim(&app)).iter().any(|t| t == LONG_FAILURE), "a dismissed notice is gone");
 
-    let _ = app.update(Message::DesktopActionFinished { failure: Some(LONG_FAILURE.to_string()) });
+    let _ = app.update(Message::DesktopActionFailed(LONG_FAILURE.to_string()));
     let (hovering, clicking_the_text) = {
         let mut ui = sim(&app);
         let message = bounds_of_text(&mut ui, LONG_FAILURE);
@@ -1051,7 +1054,7 @@ fn every_screen_stays_readable_from_the_default_window_down_to_the_minimum_size(
     let _ = collected_list_open.update(Message::ToggleCollectedList);
 
     let mut long_notice = browser_app(dir.path());
-    let _ = long_notice.update(Message::DesktopActionFinished { failure: Some(LONG_FAILURE.to_string()) });
+    let _ = long_notice.update(Message::DesktopActionFailed(LONG_FAILURE.to_string()));
 
     let mut long_file_selected = browser_app(dir.path());
     let long_folder = descend(&on_screen(&long_file_selected).tree, &[long_name]);
@@ -1104,8 +1107,6 @@ fn whole_disk_scan_of(dir: &Path) -> App {
     fixture(dir);
     app_showing(scanned(ScanOptions::volume(dir, "Test Disk")))
 }
-
-const HIDDEN_SPACE_NAME: &str = "Hidden space";
 
 #[test]
 fn a_selected_file_offers_preview_and_reveal_and_the_buttons_only_send_messages() -> Result<(), Error> {

@@ -61,8 +61,12 @@ fn pressed_in(base: Color) -> Background {
     top_to_bottom(bottom, top)
 }
 
+pub fn outline(radius: f32, color: Color) -> Border {
+    border::rounded(radius).width(1).color(color)
+}
+
 pub fn rim(radius: f32) -> Border {
-    border::rounded(radius).width(1).color(Color::WHITE.scale_alpha(RIM_ALPHA))
+    outline(radius, Color::WHITE.scale_alpha(RIM_ALPHA))
 }
 
 pub fn surface(base: Color, radius: f32) -> container::Style {
@@ -79,7 +83,7 @@ fn sunken(base: Color) -> Background {
 }
 
 fn well_edge(radius: f32) -> Border {
-    border::rounded(radius).width(1).color(Color::BLACK.scale_alpha(WELL_EDGE_ALPHA))
+    outline(radius, Color::BLACK.scale_alpha(WELL_EDGE_ALPHA))
 }
 
 pub fn casting_shadow<'a, Message: 'a>(
@@ -111,7 +115,7 @@ pub fn raised_button(base: Color, text_color: Color, radius: f32) -> impl Fn(&Th
 pub fn well_input(radius: f32) -> impl Fn(&Theme, text_input::Status) -> text_input::Style {
     move |t, status| {
         let focused = matches!(status, text_input::Status::Focused { .. });
-        let border = if focused { border::rounded(radius).width(1).color(theme::ACCENT) } else { well_edge(radius) };
+        let border = if focused { outline(radius, theme::ACCENT) } else { well_edge(radius) };
         text_input::Style { background: sunken(theme::WELL), border, ..text_input::default(t, status) }
     }
 }

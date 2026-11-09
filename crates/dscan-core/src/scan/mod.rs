@@ -241,7 +241,7 @@ pub fn scan(opts: &ScanOptions, progress: &Progress, cancel: &CancelToken) -> Re
     let root_dev = Current::device_of(&root).map_err(unreadable_root(&root))?;
     ensure_readable(&root)?;
 
-    let space = opts.whole_disk.then(|| hidden::space_info(&root).ok()).flatten();
+    let space = opts.whole_disk.then(|| Current::space_info(&root).ok()).flatten();
     if let Some(space) = &space {
         progress.expected_bytes_or_zero.store(space.used, Relaxed);
     }
@@ -277,27 +277,22 @@ pub fn scan(opts: &ScanOptions, progress: &Progress, cancel: &CancelToken) -> Re
         return Err(ScanError::Cancelled);
     }
 
-    let mut stats = ScanStats {
+    let (hidden, purgeable) = space.map_or((0, 0), |space| space.split_unscanned(root_node.alloc));
+    let stats = ScanStats {
         files: progress.files.load(Relaxed),
         dirs: progress.dirs.load(Relaxed),
         errors: ctx.errors.load(Relaxed),
         duration: started.elapsed().saturating_sub(cancel.paused_for()),
-        hidden: 0,
-        purgeable: 0,
+        hidden,
+        purgeable,
     };
-
-    let mut synthetic = Vec::new();
-    if let Some(space) = space {
-        let (hidden, purgeable) = space.split_unscanned(root_node.alloc);
-        stats.hidden = hidden;
-        stats.purgeable = purgeable;
-        if purgeable > 0 {
-            synthetic.push(Synthetic { name: "Purgeable space", kind: Kind::Purgeable, size: purgeable });
-        }
-        if hidden > 0 {
-            synthetic.push(Synthetic { name: "Hidden space", kind: Kind::Hidden, size: hidden });
-        }
-    }
+    let synthetic: Vec<Synthetic> = [
+        Synthetic { name: hidden::PURGEABLE_SPACE_NAME, kind: Kind::Purgeable, size: purgeable },
+        Synthetic { name: hidden::HIDDEN_SPACE_NAME, kind: Kind::Hidden, size: hidden },
+    ]
+    .into_iter()
+    .filter(|s| s.size > 0)
+    .collect();
     Ok(tree::build(root_node, root, &opts.display_name(), opts.whole_disk, synthetic, stats))
 }
 

@@ -14,7 +14,7 @@ pub(super) fn space_info(path: &Path) -> io::Result<SpaceInfo> {
     let total = s.f_blocks as u64 * fragment;
     let free = s.f_bfree as u64 * fragment;
     let available = s.f_bavail as u64 * fragment;
-    Ok(SpaceInfo { total, used: total.saturating_sub(free), available, available_important: available })
+    Ok(SpaceInfo::without_purgeable(total, free, available))
 }
 
 #[cfg(test)]

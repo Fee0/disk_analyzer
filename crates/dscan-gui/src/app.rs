@@ -14,9 +14,11 @@ use iced::widget::canvas::Cache;
 use iced::{Point, Subscription, Task, event, mouse};
 
 use crate::animation::{Advance, ChartAnimation};
-use crate::fmt::{items_phrase, thousands, truncate};
+use crate::fmt::{NAME_IN_A_MESSAGE_MAX_CHARS, count_phrase, items_phrase, truncate, with_folder_mark};
 
+pub const APP_NAME: &str = "Disk Analyzer";
 pub const SEARCH_ID: &str = "search";
+const LIST_ROW_NAME_MAX_CHARS: usize = 44;
 pub const MAX_LIST_ROWS: usize = 400;
 const DRAG_THRESHOLD: f32 = 4.0;
 pub const HOLD_TO_DELETE: Duration = Duration::from_secs(3);
@@ -27,22 +29,15 @@ const SEARCH_TYPING_PAUSE: Duration = Duration::from_millis(150);
 
 pub type PanicMessage = String;
 
-pub type RemovalId = u64;
-
-fn next_removal_id() -> RemovalId {
-    static NEXT: AtomicU64 = AtomicU64::new(1);
-    NEXT.fetch_add(1, Ordering::Relaxed)
-}
-
 pub type BrowserId = u64;
 
-fn next_browser_id() -> BrowserId {
+fn next_id() -> u64 {
     static NEXT: AtomicU64 = AtomicU64::new(1);
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
 enum RemovalProgress {
-    OnDisk(RemovalId),
+    OnDisk,
     Finished(Result<Arc<RemovalReport>, PanicMessage>),
 }
 
@@ -75,7 +70,6 @@ pub struct App {
     pub parked_newest_first: Vec<Browser>,
     pub scans: Vec<ScanJob>,
     stepped_back_from_newest_parked: bool,
-    next_job: u64,
 }
 
 pub enum Screen {
@@ -130,15 +124,9 @@ pub struct ListRow {
     pub fraction_of_listed_folder: f32,
 }
 
-#[derive(Clone, Copy, PartialEq)]
-struct ListSource {
-    folder: NodeId,
-    layout_revision: u64,
-}
-
 #[derive(Default)]
 pub struct ListView {
-    built_for: Option<ListSource>,
+    built_for: Option<NodeId>,
     pub rows: Vec<ListRow>,
     pub cut_off_rows_summary: Option<String>,
 }
@@ -171,7 +159,6 @@ pub struct Browser {
     history: Vec<NodeId>,
     forward: Vec<NodeId>,
     pub layout: Layout,
-    layout_revision: u64,
     pub chart_cache: Cache,
     pub highlight_cache: Cache,
     pub hovered: Option<Segment>,
@@ -238,7 +225,7 @@ pub enum Message {
     DeleteHoldStart,
     DeleteHoldCancel,
     DeleteHoldTick,
-    RemovalDone { id: RemovalId, outcome: Result<Arc<RemovalReport>, PanicMessage> },
+    RemovalDone { outcome: Result<Arc<RemovalReport>, PanicMessage> },
     Rescan,
     GoHome,
     ResumeParked(BrowserId),
@@ -249,7 +236,7 @@ pub enum Message {
     NoticeExit,
     Preview,
     Reveal,
-    DesktopActionFinished { failure: Option<String> },
+    DesktopActionFailed(String),
     ForBrowser(BrowserId, Box<Message>),
 }
 
@@ -263,7 +250,6 @@ impl App {
             parked_newest_first: Vec::new(),
             scans: Vec::new(),
             stepped_back_from_newest_parked: false,
-            next_job: 1,
         };
         let load = Self::load_volumes();
         let task = match initial {
@@ -282,12 +268,12 @@ impl App {
 
     pub fn title(&self) -> String {
         match &self.screen {
-            Screen::Start if self.scans.is_empty() => "Disk Analyzer".into(),
+            Screen::Start if self.scans.is_empty() => APP_NAME.into(),
             Screen::Start => {
                 let names: Vec<String> = self.scans.iter().map(|job| job.opts.display_name()).collect();
-                format!("Scanning {} — Disk Analyzer", names.join(", "))
+                format!("Scanning {} — {APP_NAME}", names.join(", "))
             }
-            Screen::Browse(b) => format!("{} — Disk Analyzer", b.tree.name(b.focus)),
+            Screen::Browse(b) => format!("{} — {APP_NAME}", b.tree.name(b.focus)),
         }
     }
 
@@ -319,8 +305,7 @@ impl App {
     }
 
     fn start_scan(&mut self, opts: ScanOptions) -> Task<Message> {
-        let id = self.next_job;
-        self.next_job += 1;
+        let id = next_id();
         let progress = Arc::new(Progress::default());
         let cancel = CancelToken::default();
         let result_slot: ScanResultSlot = Default::default();
@@ -569,14 +554,13 @@ impl Browser {
     pub fn new(tree: Tree, opts: ScanOptions) -> Self {
         let root = tree.root();
         let mut b = Browser {
-            id: next_browser_id(),
+            id: next_id(),
             tree: Arc::new(tree),
             opts,
             focus: root,
             history: Vec::new(),
             forward: Vec::new(),
             layout: Layout::default(),
-            layout_revision: 0,
             chart_cache: Cache::new(),
             highlight_cache: Cache::new(),
             hovered: None,
@@ -642,7 +626,7 @@ impl Browser {
 
     fn install_layout(&mut self, layout: Layout) {
         self.layout = layout;
-        self.layout_revision += 1;
+        self.list.built_for = None;
         self.chart_cache.clear();
         self.highlight_cache.clear();
     }
@@ -669,8 +653,7 @@ impl Browser {
 
     fn sync_list(&mut self) {
         let subject = self.listed_folder();
-        let source = Some(ListSource { folder: subject, layout_revision: self.layout_revision });
-        if self.list.built_for == source {
+        if self.list.built_for == Some(subject) {
             return;
         }
         let total = self.size(subject).max(1);
@@ -678,17 +661,15 @@ impl Browser {
         let rows = children.by_ref().take(MAX_LIST_ROWS).map(|(id, size)| self.list_row(id, size, total)).collect();
         let (cut_off, cut_off_bytes) =
             children.fold((0u64, 0u64), |(count, bytes), (_, size)| (count + 1, bytes + size));
-        let cut_off_rows_summary =
-            (cut_off > 0).then(|| format!("… {} more items · {}", thousands(cut_off), format_size(cut_off_bytes)));
-        self.list = ListView { built_for: source, rows, cut_off_rows_summary };
+        let cut_off_rows_summary = (cut_off > 0).then(|| {
+            format!("… {} · {}", count_phrase(cut_off, "more item", "more items"), format_size(cut_off_bytes))
+        });
+        self.list = ListView { built_for: Some(subject), rows, cut_off_rows_summary };
     }
 
     fn list_row(&self, id: NodeId, size: u64, listed_folder_size: u64) -> ListRow {
         let node = self.tree.node(id);
-        let mut name = truncate(&self.tree.name(id), 44);
-        if node.is_dir() {
-            name.push('/');
-        }
+        let mut name = with_folder_mark(truncate(&self.tree.name(id), LIST_ROW_NAME_MAX_CHARS), node.is_dir());
         name.push_str(match node.accounting() {
             Accounting::Counted => "",
             Accounting::Unreadable => "  (no access)",
@@ -774,14 +755,10 @@ impl Browser {
 
     fn sibling_beside(&self, id: NodeId, after: bool) -> Option<NodeId> {
         let parent = self.tree.parent(id).unwrap_or(self.focus);
-        let mut siblings = self.visible_children(parent);
-        let i = siblings.position(|s| s == id)?;
-        let beside = if after {
-            siblings.next()
-        } else {
-            i.checked_sub(1).and_then(|before| self.visible_children(parent).nth(before))
-        };
-        Some(beside.unwrap_or(id))
+        let siblings: Vec<NodeId> = self.visible_children(parent).collect();
+        let i = siblings.iter().position(|&s| s == id)?;
+        let beside = if after { i.checked_add(1) } else { i.checked_sub(1) };
+        Some(beside.and_then(|j| siblings.get(j).copied()).unwrap_or(id))
     }
 
     fn move_selection(&mut self, key: Named) {
@@ -846,7 +823,7 @@ impl Browser {
                 NoticeKind::Warning,
                 format!(
                     "“{}” is a protected system location and can't be moved to the {TRASH_NAME}.",
-                    truncate(&self.tree.name(id), 40)
+                    truncate(&self.tree.name(id), NAME_IN_A_MESSAGE_MAX_CHARS)
                 ),
             ),
             Err(Refusal::NotActionable | Refusal::AlreadyCoveredByCollectedFolder) => {}
@@ -877,6 +854,7 @@ impl Browser {
 
     fn collector_changed(&mut self) {
         self.collected_list_open &= !self.collector.is_empty();
+        self.confirm_trash &= !self.collector.is_empty();
         self.exclusions = self.collector.exclusions(&self.tree);
         if self.selected.is_some_and(|s| self.collector.covers(&self.tree, s)) {
             self.selected = None;
@@ -892,21 +870,16 @@ impl Browser {
     ) -> Task<Message> {
         let Some(id) = self.selected.filter(|&s| self.tree.is_actionable(s)) else { return Task::none() };
         let path = self.tree.path(id);
-        let name = truncate(&self.tree.name(id), 40);
+        let name = truncate(&self.tree.name(id), NAME_IN_A_MESSAGE_MAX_CHARS);
         Task::perform(off_thread(move || action(&path)), move |outcome| {
             let why = match outcome {
-                Ok(Ok(())) => None,
-                Ok(Err(e)) => Some(e.to_string()),
-                Err(panic) => Some(panic),
+                Ok(Ok(())) => return None,
+                Ok(Err(e)) => e.to_string(),
+                Err(panic) => panic,
             };
-            Message::DesktopActionFinished {
-                failure: why.map(|why| format!("{action_name} failed for “{name}”: {why}")),
-            }
+            Some(Message::DesktopActionFailed(format!("{action_name} failed for “{name}”: {why}")))
         })
-    }
-
-    fn wait_for_the_cancelled_search_to_report_done() -> Task<Message> {
-        Task::none()
+        .and_then(Task::done)
     }
 
     pub fn delete_hold_progress(&self) -> Option<f32> {
@@ -915,24 +888,20 @@ impl Browser {
     }
 
     fn remove_collected(&mut self, removal: Removal) -> Task<Message> {
-        let Some((id, plan)) = self.start_removal(removal) else { return Task::none() };
-        Task::perform(off_thread(move || Arc::new(plan.carry_out())), move |outcome| Message::RemovalDone {
-            id,
-            outcome,
-        })
+        let Some(plan) = self.start_removal(removal) else { return Task::none() };
+        Task::perform(off_thread(move || Arc::new(plan.carry_out())), |outcome| Message::RemovalDone { outcome })
     }
 
-    fn start_removal(&mut self, removal: Removal) -> Option<(RemovalId, RemovalPlan)> {
+    fn start_removal(&mut self, removal: Removal) -> Option<RemovalPlan> {
         if self.removal.is_some() {
             return None;
         }
-        let id = next_removal_id();
-        self.removal = Some(RemovalProgress::OnDisk(id));
-        Some((id, RemovalPlan::new(&self.tree, self.collector.items(), removal)))
+        self.removal = Some(RemovalProgress::OnDisk);
+        Some(RemovalPlan::new(&self.tree, self.collector.items(), removal))
     }
 
-    fn started_removal(&self, id: RemovalId) -> bool {
-        matches!(self.removal, Some(RemovalProgress::OnDisk(started)) if started == id)
+    fn removal_is_on_disk(&self) -> bool {
+        matches!(self.removal, Some(RemovalProgress::OnDisk))
     }
 
     fn removal_left_the_disk(&mut self, outcome: Result<Arc<RemovalReport>, PanicMessage>) {
@@ -957,7 +926,7 @@ impl Browser {
         self.search_cancel.cancel();
         let Some(tree) = Arc::get_mut(&mut self.tree) else {
             self.removal = Some(RemovalProgress::Finished(Ok(report)));
-            return Self::wait_for_the_cancelled_search_to_report_done();
+            return Task::none();
         };
         report.apply_to(tree);
         self.collector.prune(&self.tree);
@@ -1002,6 +971,8 @@ impl Browser {
 
     fn park(&mut self) {
         self.let_go_of_the_pointer();
+        self.chart_cache.clear();
+        self.animation = None;
         if self.search_status == SearchStatus::Running {
             self.search_cancel.cancel();
             self.search_gen += 1;
@@ -1011,8 +982,8 @@ impl Browser {
 
     fn note_while_parked(&mut self, message: Message) {
         match message {
-            Message::RemovalDone { id, outcome } if self.started_removal(id) => self.removal_left_the_disk(outcome),
-            Message::DesktopActionFinished { failure: Some(why) } => self.show_notice(NoticeKind::Error, why),
+            Message::RemovalDone { outcome } if self.removal_is_on_disk() => self.removal_left_the_disk(outcome),
+            Message::DesktopActionFailed(why) => self.show_notice(NoticeKind::Error, why),
             _ => {}
         }
     }
@@ -1022,9 +993,9 @@ impl Browser {
             if b.notice.is_some() {
                 b.notice_expires_at = Some(Instant::now() + NOTICE_LIFETIME);
             }
-            let removal = b.apply_finished_removal();
+            let removal_before_the_search_holds_the_tree = b.apply_finished_removal();
             let search = if b.search_status == SearchStatus::Due { b.run_search() } else { Task::none() };
-            Task::batch([removal, search])
+            Task::batch([removal_before_the_search_holds_the_tree, search])
         })
     }
 
@@ -1032,6 +1003,7 @@ impl Browser {
         let before = (self.hovered, self.selected);
         let deadline_before = self.notice_expires_at;
         let task = change(self);
+        let task = Task::batch([task, self.apply_finished_removal()]);
         if (self.hovered, self.selected) != before {
             self.highlight_cache.clear();
         }
@@ -1084,12 +1056,8 @@ impl Browser {
                     self.search_status = SearchStatus::Shown;
                     self.relayout();
                 }
-                return self.apply_finished_removal();
             }
-            Message::RemovalDone { id, outcome } if self.started_removal(id) => {
-                self.removal_left_the_disk(outcome);
-                return self.apply_finished_removal();
-            }
+            Message::RemovalDone { outcome } if self.removal_is_on_disk() => self.removal_left_the_disk(outcome),
             Message::ClearSearch => {
                 self.search_text.clear();
                 self.search_gen += 1;
@@ -1194,7 +1162,7 @@ impl Browser {
             }
             Message::Preview => return self.hand_selection_to_desktop(PREVIEW_ACTION, desktop::preview),
             Message::Reveal => return self.hand_selection_to_desktop(REVEAL_ACTION, desktop::reveal),
-            Message::DesktopActionFinished { failure: Some(why) } => self.show_notice(NoticeKind::Error, why),
+            Message::DesktopActionFailed(why) => self.show_notice(NoticeKind::Error, why),
             _ => {}
         }
         Task::none()
@@ -1205,9 +1173,12 @@ impl Browser {
 pub(crate) mod test_util {
     use super::*;
 
+    pub fn scan_result(opts: &ScanOptions) -> Result<Tree, ScanError> {
+        dscan_core::scan(opts, &Progress::default(), &CancelToken::default())
+    }
+
     pub fn scanned(opts: ScanOptions) -> Browser {
-        let tree = dscan_core::scan(&opts, &Progress::default(), &CancelToken::default()).unwrap();
-        Browser::new(tree, opts)
+        Browser::new(scan_result(&opts).unwrap(), opts)
     }
 
     pub fn descend(tree: &Tree, names: &[&str]) -> NodeId {
@@ -1239,13 +1210,10 @@ pub(crate) mod test_util {
 mod tests {
     use super::test_util::{app_showing, descend, on_screen, on_screen_mut, scanned};
     use super::*;
+    use crate::inspect_tests::write_files;
 
     fn browser(dir: &std::path::Path) -> Browser {
-        for (p, size) in [("Movies/a.mov", 3000), ("Movies/b.mov", 2000), ("Music/c.mp3", 1000)] {
-            let path = dir.join(p);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, vec![1u8; size]).unwrap();
-        }
+        write_files(dir, &[("Movies/a.mov", 3000), ("Movies/b.mov", 2000), ("Music/c.mp3", 1000)], 1);
         scanned(ScanOptions::folder(dir))
     }
 
@@ -1254,8 +1222,8 @@ mod tests {
         b.focus = b.tree.nearest_live(b.focus);
     }
 
-    fn carry_out_as_the_background_task_does(b: &mut Browser, (id, plan): (RemovalId, RemovalPlan)) {
-        let _ = b.update(Message::RemovalDone { id, outcome: Ok(Arc::new(plan.carry_out())) });
+    fn carry_out_as_the_background_task_does(b: &mut Browser, plan: RemovalPlan) {
+        let _ = b.update(Message::RemovalDone { outcome: Ok(Arc::new(plan.carry_out())) });
     }
 
     #[test]
@@ -1373,12 +1341,12 @@ mod tests {
         let mut b = browser(dir.path());
         let movies = descend(&b.tree, &["Movies"]);
         b.collector.add(&b.tree, movies).unwrap();
-        let (id, plan) = b.start_removal(Removal::DeletePermanently).unwrap();
+        let plan = b.start_removal(Removal::DeletePermanently).unwrap();
         let b_id = b.id;
         let mut app = app_showing(b);
 
         let _ = app.update(Message::GoHome);
-        let _ = app.update(to(b_id, Message::RemovalDone { id, outcome: Ok(Arc::new(plan.carry_out())) }));
+        let _ = app.update(to(b_id, Message::RemovalDone { outcome: Ok(Arc::new(plan.carry_out())) }));
         let _ = app.update(to(b_id, Message::SearchDone { generation: 0, result: None }));
         let parked = &app.parked_newest_first[0];
         assert!(parked.tree.is_live(movies) && parked.notice.is_none(), "nothing changes while it is parked");
@@ -1479,7 +1447,7 @@ mod tests {
         let mut app = app_showing(a);
         park_and_show(&mut app, other);
 
-        let failed = Message::DesktopActionFinished { failure: Some("Reveal failed".into()) };
+        let failed = Message::DesktopActionFailed("Reveal failed".into());
         assert_eq!(app.update(to(a_id, failed)).units(), 0, "a parked result starts no notice timer");
         assert!(on_screen(&app).notice.is_none(), "the result on screen is not told");
         assert!(app.parked_newest_first[0].notice.is_some(), "the result that asked is");
@@ -1516,7 +1484,7 @@ mod tests {
     fn a_notice_left_showing_when_going_home_gets_a_full_lifetime_on_return() {
         let dir = tempfile::tempdir().unwrap();
         let mut b = browser(dir.path());
-        let _ = b.update(Message::DesktopActionFinished { failure: Some("shown".into()) });
+        let _ = b.update(Message::DesktopActionFailed("shown".into()));
         let _ = b.update(Message::NoticeEnter);
         let mut app = app_showing(b);
 
@@ -1570,16 +1538,20 @@ mod tests {
     fn a_failed_desktop_action_is_reported_in_a_notice() {
         let dir = tempfile::tempdir().unwrap();
         let mut b = browser(dir.path());
-        let failure = Some("Quick Look failed for “a.mov”: not found".to_string());
-        let _ = b.update(Message::DesktopActionFinished { failure: failure.clone() });
-        assert_eq!(
-            b.notice,
-            failure.map(|text| Notice { kind: NoticeKind::Error, text }),
-            "a failure shows as an error"
-        );
-        let _ = b.update(Message::DismissNotice);
-        let _ = b.update(Message::DesktopActionFinished { failure: None });
-        assert_eq!(b.notice, None, "success needs no message");
+        let failure = "Quick Look failed for “a.mov”: not found".to_string();
+        let _ = b.update(Message::DesktopActionFailed(failure.clone()));
+        assert_eq!(b.notice, Some(Notice { kind: NoticeKind::Error, text: failure }), "a failure shows as an error");
+    }
+
+    #[test]
+    fn a_desktop_action_answers_only_when_it_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut b = browser(dir.path());
+        b.selected = Some(descend(&b.tree, &["Movies", "a.mov"]));
+        let worked = b.hand_selection_to_desktop(PREVIEW_ACTION, |_| Ok(()));
+        assert!(outputs(worked).is_empty(), "success needs no message");
+        let failed = b.hand_selection_to_desktop(PREVIEW_ACTION, |_| Err(DesktopError::WouldRunAProgram));
+        assert!(matches!(outputs(failed).as_slice(), [Message::DesktopActionFailed(why)] if why.contains("a.mov")));
     }
 
     fn pretend_the_notice_lifetime_passed(b: &mut Browser) {
@@ -1592,7 +1564,7 @@ mod tests {
     fn a_notice_disappears_after_its_lifetime_but_not_while_hovered() {
         let dir = tempfile::tempdir().unwrap();
         let mut b = browser(dir.path());
-        let failed = |why: &str| Message::DesktopActionFinished { failure: Some(why.to_string()) };
+        let failed = |why: &str| Message::DesktopActionFailed(why.to_string());
 
         let timer = b.update(failed("first"));
         assert!(timer.units() > 0, "showing a notice starts its timer");

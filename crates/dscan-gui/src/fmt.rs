@@ -10,8 +10,21 @@ pub fn thousands(n: u64) -> String {
     out
 }
 
+pub const NAME_IN_A_MESSAGE_MAX_CHARS: usize = 40;
+
+pub fn count_phrase(count: u64, one: &str, many: &str) -> String {
+    if count == 1 { format!("1 {one}") } else { format!("{} {many}", thousands(count)) }
+}
+
 pub fn items_phrase(count: usize) -> String {
-    if count == 1 { "1 item".to_string() } else { format!("{} items", thousands(count as u64)) }
+    count_phrase(count as u64, "item", "items")
+}
+
+pub fn with_folder_mark(mut name: String, is_folder: bool) -> String {
+    if is_folder {
+        name.push('/');
+    }
+    name
 }
 
 pub fn truncate(s: &str, max_chars: usize) -> String {

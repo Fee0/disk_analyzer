@@ -38,8 +38,6 @@ impl Volume {
     }
 }
 
-pub(crate) const NETWORK_ANSWER_LIMIT: std::time::Duration = std::time::Duration::from_secs(2);
-
 pub fn list_volumes() -> Vec<Volume> {
     let mut volumes = Current::mounted_volumes();
     volumes.sort_by_key(|v| (!v.is_root, v.name.clone()));

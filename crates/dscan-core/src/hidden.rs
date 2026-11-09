@@ -1,9 +1,9 @@
-use std::io;
-use std::path::Path;
-
 use crate::kind::Kind;
 use crate::platform::{Current, Platform};
 use crate::tree::{NodeId, Tree};
+
+pub const HIDDEN_SPACE_NAME: &str = "Hidden space";
+pub const PURGEABLE_SPACE_NAME: &str = "Purgeable space";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Remedy {
@@ -44,6 +44,10 @@ pub struct SpaceInfo {
 }
 
 impl SpaceInfo {
+    pub(crate) fn without_purgeable(total: u64, free: u64, available: u64) -> Self {
+        SpaceInfo { total, used: total.saturating_sub(free), available, available_important: available }
+    }
+
     pub fn purgeable(&self) -> u64 {
         self.available_important.saturating_sub(self.available)
     }
@@ -54,10 +58,6 @@ impl SpaceInfo {
         let hidden = unscanned - purgeable_outside_scan;
         (hidden, purgeable_outside_scan)
     }
-}
-
-pub(crate) fn space_info(path: &Path) -> io::Result<SpaceInfo> {
-    Current::space_info(path)
 }
 
 #[cfg(test)]
@@ -79,22 +79,22 @@ mod tests {
         root.push_file(b"real.mov", Kind::Video, 0, 10);
         root.finish(None);
         let synthetic = vec![
-            Synthetic { name: "Hidden space", kind: Kind::Hidden, size: 5 },
-            Synthetic { name: "Purgeable space", kind: Kind::Purgeable, size: 3 },
+            Synthetic { name: HIDDEN_SPACE_NAME, kind: Kind::Hidden, size: 5 },
+            Synthetic { name: PURGEABLE_SPACE_NAME, kind: Kind::Purgeable, size: 3 },
         ];
         let stats = ScanStats { errors: 3, ..ScanStats::default() };
         let tree = build(root, "/r".into(), "root", true, synthetic, stats);
         let named = |name| crate::tree::test_util::descend(&tree, &[name]);
         assert_eq!(
-            unreadable_items_behind(&tree, named("Hidden space")),
+            unreadable_items_behind(&tree, named(HIDDEN_SPACE_NAME)),
             Some(3),
             "unreadable items show up as hidden"
         );
-        assert_eq!(unreadable_items_behind(&tree, named("Purgeable space")), None);
+        assert_eq!(unreadable_items_behind(&tree, named(PURGEABLE_SPACE_NAME)), None);
 
-        let hidden = explain(&tree, named("Hidden space")).expect("hidden space is explained");
+        let hidden = explain(&tree, named(HIDDEN_SPACE_NAME)).expect("hidden space is explained");
         assert!(!hidden.causes.is_empty(), "every OS names what hidden space can be");
-        assert!(explain(&tree, named("Purgeable space")).is_some());
+        assert!(explain(&tree, named(PURGEABLE_SPACE_NAME)).is_some());
         assert!(explain(&tree, named("real.mov")).is_none(), "real files need no explanation");
         assert!(explain(&tree, tree.root()).is_none());
     }

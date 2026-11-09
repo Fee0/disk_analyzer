@@ -5,8 +5,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::{apfs, file_systems, space};
 use crate::hidden::SpaceInfo;
-use crate::platform::{DeviceId, answered_within, unix};
-use crate::volumes::{MountedFileSystem, NETWORK_ANSWER_LIMIT, Volume};
+use crate::platform::{DeviceId, asked_of_a_share_that_may_not_answer, unix};
+use crate::volumes::{MountedFileSystem, Volume};
 
 const SPARE_SLOTS_FOR_MOUNTS_APPEARING_BETWEEN_CALLS: usize = 4;
 const TCC_PROTECTED_HOME_FOLDERS: [&str; 2] = ["Library/Mail", "Library/Safari"];
@@ -37,8 +37,7 @@ impl Mount {
 }
 
 fn space_of_a_share_that_may_not_answer(m: &Mount) -> SpaceInfo {
-    let on = m.on.clone();
-    answered_within(NETWORK_ANSWER_LIMIT, move || space::space_info(&on).ok()).flatten().unwrap_or(m.space_when_listed)
+    asked_of_a_share_that_may_not_answer(m.on.clone(), |on| space::space_info(on).ok()).unwrap_or(m.space_when_listed)
 }
 
 fn cstr(buf: &[libc::c_char]) -> String {

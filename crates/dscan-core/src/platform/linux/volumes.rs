@@ -4,8 +4,8 @@ use rustc_hash::FxHashSet;
 
 use super::{mountinfo, space};
 use crate::hidden::SpaceInfo;
-use crate::platform::{DeviceId, ScanBoundaries, ScanExtent, answered_within, unix};
-use crate::volumes::{MountedFileSystem, NETWORK_ANSWER_LIMIT, Volume};
+use crate::platform::{DeviceId, ScanBoundaries, ScanExtent, asked_of_a_share_that_may_not_answer, unix};
+use crate::volumes::{MountedFileSystem, Volume};
 
 const MOUNTINFO: &str = "/proc/self/mountinfo";
 const LABELS: &str = "/dev/disk/by-label";
@@ -58,8 +58,7 @@ fn facts_of(mount_point: &Path) -> Option<FolderFacts> {
 }
 
 fn facts_of_a_share_that_may_not_answer(mount_point: &Path) -> Option<FolderFacts> {
-    let mount_point = mount_point.to_owned();
-    answered_within(NETWORK_ANSWER_LIMIT, move || facts_of(&mount_point)).flatten()
+    asked_of_a_share_that_may_not_answer(mount_point.to_owned(), |mount_point| facts_of(mount_point))
 }
 
 pub(super) fn mounted_volumes() -> Vec<Volume> {

@@ -22,18 +22,11 @@ impl Exclusions {
         Exclusions { excluded_items, excluded_bytes_below_or_at }
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.excluded_bytes_below_or_at.is_empty()
-    }
-
     fn touches(&self, id: NodeId) -> bool {
-        !self.is_empty() && self.excluded_bytes_below_or_at.contains_key(&id)
+        self.excluded_bytes_below_or_at.contains_key(&id)
     }
 
     pub fn size(&self, tree: &Tree, id: NodeId) -> u64 {
-        if self.is_empty() {
-            return tree.size(id);
-        }
         let excluded = self.excluded_bytes_below_or_at.get(&id).copied().unwrap_or(0);
         tree.size(id).saturating_sub(excluded)
     }
@@ -53,10 +46,6 @@ impl Exclusions {
             .collect();
         kept.sort_by_key(|&(_, size)| Reverse(size));
         ChildOrder::Resorted(kept.into_iter())
-    }
-
-    pub fn children<'t>(&self, tree: &'t Tree, id: NodeId) -> impl Iterator<Item = NodeId> + 't {
-        self.children_with_sizes(tree, id).map(|(child, _)| child)
     }
 }
 
@@ -81,6 +70,10 @@ mod tests {
     use super::*;
     use crate::tree::test_util::{T::*, descend, tree};
 
+    fn listed_names(ex: &Exclusions, t: &Tree, folder: NodeId) -> Vec<String> {
+        ex.children_with_sizes(t, folder).map(|(c, _)| t.name(c).into_owned()).collect()
+    }
+
     #[test]
     fn excluding_an_item_shrinks_every_ancestor_and_hides_the_item() {
         let t = tree(vec![D("a", vec![F("big", 600), F("mid", 300)]), D("b", vec![F("w", 500)])]);
@@ -90,7 +83,7 @@ mod tests {
         assert_eq!(ex.size(&t, big), 0);
         assert_eq!(ex.size(&t, a), t.size(a) - t.size(big));
         assert_eq!(ex.size(&t, t.root()), t.size(t.root()) - t.size(big), "the root shrinks too");
-        let names = |p| ex.children(&t, p).map(|c| t.name(c).into_owned()).collect::<Vec<_>>();
+        let names = |p| listed_names(&ex, &t, p);
         assert_eq!(names(a), ["mid"], "an excluded item is no longer listed");
         assert_eq!(names(t.root()), ["b", "a"], "a shrunken folder moves to its new rank among its siblings");
         assert!(
@@ -105,8 +98,11 @@ mod tests {
         let (a, photo, inside) =
             (descend(&t, &["a"]), descend(&t, &["a", "photo"]), descend(&t, &["a", "emptied", "inside"]));
         let ex = Exclusions::new(&t, &[photo, inside]);
-        let names = ex.children(&t, a).map(|c| t.name(c).into_owned()).collect::<Vec<_>>();
-        assert_eq!(names, ["empty"], "only what the exclusion emptied is hidden, not what was empty to begin with");
+        assert_eq!(
+            listed_names(&ex, &t, a),
+            ["empty"],
+            "only what the exclusion emptied is hidden, not what was empty to begin with"
+        );
     }
 
     #[test]
@@ -115,7 +111,7 @@ mod tests {
         let (a, cache, lock) =
             (descend(&t, &["a"]), descend(&t, &["a", "cache"]), descend(&t, &["a", "cache", "lock"]));
         let ex = Exclusions::new(&t, &[lock]);
-        let names = |p| ex.children(&t, p).map(|c| t.name(c).into_owned()).collect::<Vec<_>>();
+        let names = |p| listed_names(&ex, &t, p);
         assert_eq!(names(cache), ["pid"], "the excluded empty file is hidden");
         assert_eq!(names(a), ["photo", "cache"], "its folder was empty before and stays listed");
     }
@@ -124,8 +120,7 @@ mod tests {
     fn without_exclusions_sizes_and_children_are_the_tree_s_own() {
         let t = tree(vec![D("a", vec![F("x", 5)]), F("z", 9)]);
         let ex = Exclusions::default();
-        assert!(ex.is_empty());
         assert_eq!(ex.size(&t, t.root()), t.size(t.root()));
-        assert!(ex.children(&t, t.root()).eq(t.children(t.root())));
+        assert!(ex.children_with_sizes(&t, t.root()).map(|(c, _)| c).eq(t.children(t.root())));
     }
 }

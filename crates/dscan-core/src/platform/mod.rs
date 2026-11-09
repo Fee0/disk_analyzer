@@ -108,11 +108,13 @@ pub(crate) trait Platform {
     fn remove_link(path: &Path, link: FileType) -> io::Result<()>;
 }
 
-pub(crate) fn answered_within<T: Send + 'static>(
-    limit: Duration,
-    question: impl FnOnce() -> T + Send + 'static,
+const NETWORK_ANSWER_LIMIT: Duration = Duration::from_secs(2);
+
+pub(crate) fn asked_of_a_share_that_may_not_answer<S: Send + 'static, T: Send + 'static>(
+    share: S,
+    question: impl FnOnce(&S) -> Option<T> + Send + 'static,
 ) -> Option<T> {
     let (answer, answered) = mpsc::channel();
-    std::thread::spawn(move || answer.send(question()));
-    answered.recv_timeout(limit).ok()
+    std::thread::spawn(move || answer.send(question(&share)));
+    answered.recv_timeout(NETWORK_ANSWER_LIMIT).ok().flatten()
 }
