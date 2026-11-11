@@ -27,6 +27,17 @@ pub fn with_folder_mark(mut name: String, is_folder: bool) -> String {
     name
 }
 
+const SECONDS_PER_MINUTE: u64 = 60;
+
+pub fn elapsed_phrase(elapsed: std::time::Duration) -> String {
+    let seconds = elapsed.as_secs();
+    if seconds < SECONDS_PER_MINUTE {
+        format!("{seconds} s")
+    } else {
+        format!("{} min {:02} s", seconds / SECONDS_PER_MINUTE, seconds % SECONDS_PER_MINUTE)
+    }
+}
+
 pub fn truncate(s: &str, max_chars: usize) -> String {
     if s.chars().count() <= max_chars {
         s.to_string()

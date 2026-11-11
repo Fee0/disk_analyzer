@@ -1,4 +1,7 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Acquire, Ordering::Relaxed, Ordering::Release};
 
 use crate::exclusions::Exclusions;
 use crate::platform::{Current, Platform};
@@ -89,27 +92,34 @@ struct RemovalTarget {
 }
 
 pub struct RemovalPlan {
-    removal: Removal,
     targets: Vec<RemovalTarget>,
     refused: Vec<(PathBuf, String)>,
+    progress: Arc<RemovalProgress>,
 }
 
 impl RemovalPlan {
     pub fn new(tree: &Tree, items: &[NodeId], removal: Removal) -> Self {
-        let mut plan = RemovalPlan { removal, targets: Vec::new(), refused: Vec::new() };
+        let mut targets = Vec::new();
+        let mut refused = Vec::new();
         for &id in items.iter().filter(|&&id| tree.is_actionable(id)) {
             let path = tree.path(id);
             if is_protected(&path) {
-                plan.refused.push((path, "protected system location".into()));
+                refused.push((path, "protected system location".into()));
             } else {
-                plan.targets.push(RemovalTarget { id, path, size: tree.size(id) });
+                targets.push(RemovalTarget { id, path, size: tree.size(id) });
             }
         }
-        plan
+        let progress = Arc::new(RemovalProgress::new(removal, &targets));
+        RemovalPlan { targets, refused, progress }
+    }
+
+    pub fn progress(&self) -> Arc<RemovalProgress> {
+        Arc::clone(&self.progress)
     }
 
     pub fn carry_out(self) -> RemovalReport {
-        let RemovalPlan { removal, targets, refused } = self;
+        let RemovalPlan { targets, refused, progress } = self;
+        let removal = progress.removal;
         let mut report = RemovalReport { removal, removed: Vec::new(), bytes: 0, failed: refused };
         let trash = Current::trash_context();
         for RemovalTarget { id, path, size } in targets {
@@ -117,15 +127,122 @@ impl RemovalPlan {
                 Removal::MoveToTrash => trash.delete(&path).map_err(|e| e.to_string()),
                 Removal::DeletePermanently => delete_permanently(&path).map_err(|e| e.to_string()),
             };
+            let position = progress.items_finished.load(Relaxed);
             match outcome {
                 Ok(()) => {
                     report.removed.push(id);
                     report.bytes += size;
                 }
-                Err(e) => report.failed.push((path, e)),
+                Err(e) => {
+                    progress.failed[position].store(true, Relaxed);
+                    report.failed.push((path, e));
+                }
             }
+            progress.items_finished.fetch_add(1, Release);
         }
         report
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ItemRemoval {
+    Removed,
+    Failed,
+    Underway,
+    Waiting,
+}
+
+#[derive(Debug)]
+pub struct RemovalProgress {
+    removal: Removal,
+    order: Vec<NodeId>,
+    sizes: Vec<u64>,
+    position: HashMap<NodeId, usize>,
+    failed: Vec<AtomicBool>,
+    items_finished: AtomicUsize,
+}
+
+impl RemovalProgress {
+    fn new(removal: Removal, targets: &[RemovalTarget]) -> Self {
+        let order: Vec<NodeId> = targets.iter().map(|target| target.id).collect();
+        RemovalProgress {
+            removal,
+            sizes: targets.iter().map(|target| target.size).collect(),
+            position: order.iter().enumerate().map(|(at, &id)| (id, at)).collect(),
+            failed: targets.iter().map(|_| AtomicBool::new(false)).collect(),
+            order,
+            items_finished: AtomicUsize::new(0),
+        }
+    }
+
+    pub fn items_finished(&self) -> usize {
+        self.items_finished.load(Acquire)
+    }
+
+    pub fn at(&self, items_finished: usize) -> RemovalStatus<'_> {
+        RemovalStatus { progress: self, items_finished: items_finished.min(self.order.len()) }
+    }
+
+    pub fn holds_anything_inside(&self, tree: &Tree, folder: NodeId) -> bool {
+        self.order.iter().any(|&item| tree.is_ancestor_of(folder, item))
+    }
+}
+
+pub struct RemovalStatus<'a> {
+    progress: &'a RemovalProgress,
+    items_finished: usize,
+}
+
+impl RemovalStatus<'_> {
+    pub fn removal(&self) -> Removal {
+        self.progress.removal
+    }
+
+    pub fn total_items(&self) -> usize {
+        self.progress.order.len()
+    }
+
+    pub fn current(&self) -> Option<NodeId> {
+        self.progress.order.get(self.items_finished).copied()
+    }
+
+    pub fn position_of_current(&self) -> usize {
+        (self.items_finished + 1).min(self.total_items())
+    }
+
+    fn finished(&self) -> impl Iterator<Item = (u64, bool)> + '_ {
+        let progress = self.progress;
+        (0..self.items_finished).map(|at| (progress.sizes[at], progress.failed[at].load(Relaxed)))
+    }
+
+    pub fn bytes_removed(&self) -> u64 {
+        self.finished().filter(|&(_, failed)| !failed).map(|(size, _)| size).sum()
+    }
+
+    pub fn items_failed(&self) -> usize {
+        self.finished().filter(|&(_, failed)| failed).count()
+    }
+
+    pub fn total_bytes(&self) -> u64 {
+        self.progress.sizes.iter().sum()
+    }
+
+    pub fn fraction(&self) -> f32 {
+        let attempted: u64 = self.finished().map(|(size, _)| size).sum();
+        match self.total_bytes() {
+            0 => self.items_finished as f32 / self.total_items().max(1) as f32,
+            total => attempted as f32 / total as f32,
+        }
+    }
+
+    pub fn of_item(&self, id: NodeId) -> Option<ItemRemoval> {
+        let &position = self.progress.position.get(&id)?;
+        Some(match position.cmp(&self.items_finished) {
+            std::cmp::Ordering::Less if self.progress.failed[position].load(Relaxed) => ItemRemoval::Failed,
+            std::cmp::Ordering::Less => ItemRemoval::Removed,
+            std::cmp::Ordering::Equal => ItemRemoval::Underway,
+            std::cmp::Ordering::Greater => ItemRemoval::Waiting,
+        })
     }
 }
 
@@ -222,6 +339,46 @@ mod tests {
         assert!(root.join("keep.txt").exists());
         assert_eq!(t.size(t.root()), total_before - report.bytes);
         assert!(items.iter().all(|&id| !t.is_live(id)));
+    }
+
+    #[test]
+    fn progress_follows_plan_order_and_never_counts_a_failed_item_as_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("gone.bin"), vec![1u8; 40_000]).unwrap();
+        std::fs::write(root.join("big.bin"), vec![1u8; 80_000]).unwrap();
+        let t = scan_folder(root);
+        let (gone, big) = (descend(&t, &["gone.bin"]), descend(&t, &["big.bin"]));
+        let plan = RemovalPlan::new(&t, &[gone, big], Removal::DeletePermanently);
+        let progress = plan.progress();
+        assert!(progress.holds_anything_inside(&t, t.root()) && progress.holds_anything_inside(&t, big));
+
+        let start = progress.at(progress.items_finished());
+        assert_eq!(start.removal(), Removal::DeletePermanently);
+        assert_eq!((start.current(), start.position_of_current(), start.total_items()), (Some(gone), 1, 2));
+        assert_eq!(start.of_item(gone), Some(ItemRemoval::Underway), "the first collected item goes first");
+        assert_eq!(start.of_item(big), Some(ItemRemoval::Waiting));
+        assert_eq!(start.of_item(t.root()), None, "only planned items have a stage");
+        assert_eq!(
+            (start.bytes_removed(), start.total_bytes(), start.fraction()),
+            (0, t.size(gone) + t.size(big), 0.0)
+        );
+
+        std::fs::remove_file(root.join("gone.bin")).unwrap();
+        let report = plan.carry_out();
+        assert_eq!((report.removed(), report.failed.len()), (1, 1), "an item already gone fails");
+
+        let halfway = progress.at(1);
+        assert_eq!(halfway.of_item(gone), Some(ItemRemoval::Failed));
+        assert_eq!((halfway.current(), halfway.position_of_current()), (Some(big), 2));
+        assert_eq!((halfway.bytes_removed(), halfway.items_failed()), (0, 1), "a failed item frees nothing");
+        assert!(halfway.fraction() > 0.0, "a failed item is still work done");
+
+        let end = progress.at(progress.items_finished());
+        assert_eq!(progress.items_finished(), 2, "every item is attempted, so progress reaches the end");
+        assert_eq!(end.of_item(big), Some(ItemRemoval::Removed));
+        assert_eq!((end.current(), end.position_of_current(), end.fraction()), (None, 2, 1.0));
+        assert_eq!(end.bytes_removed(), report.bytes, "progress and the report agree on what was freed");
     }
 
     #[cfg(unix)]

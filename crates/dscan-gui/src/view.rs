@@ -1,8 +1,8 @@
 use std::sync::LazyLock;
 
 use dscan_core::{
-    Accounting, COMMAND_KEY, NodeId, PREVIEW_ACTION, RESCAN_SHORTCUT, REVEAL_ACTION, Remedy, Segment, SpaceExplanation,
-    TRASH_NAME, Volume, format_size,
+    Accounting, COMMAND_KEY, ItemRemoval, NodeId, PREVIEW_ACTION, RESCAN_SHORTCUT, REVEAL_ACTION, Remedy, Removal,
+    Segment, SpaceExplanation, TRASH_NAME, Volume, format_size,
 };
 use iced::border;
 use iced::widget::text::Wrapping;
@@ -13,11 +13,13 @@ use iced::widget::{
 use iced::{Alignment, Color, Element, Fill, Length, Theme};
 
 use crate::animation::ChartAnimation;
-use crate::app::{App, Browser, HOLD_TO_DELETE, ListRow, Message, Notice, NoticeKind, SEARCH_ID, ScanJob, Screen};
+use crate::app::{
+    App, Browser, HOLD_TO_DELETE, ListRow, Message, Notice, NoticeKind, RemovalUnderway, SEARCH_ID, ScanJob, Screen,
+};
 use crate::depth::{self, Elevation};
 use crate::fmt::{
-    NAME_IN_A_MESSAGE_MAX_CHARS, count_phrase, fit_width, fit_width_keeping_both_ends, generous_text_width,
-    items_phrase, thousands, truncate, with_folder_mark,
+    NAME_IN_A_MESSAGE_MAX_CHARS, count_phrase, elapsed_phrase, fit_width, fit_width_keeping_both_ends,
+    generous_text_width, items_phrase, thousands, truncate, with_folder_mark,
 };
 use crate::icon;
 use crate::sunburst::Sunburst;
@@ -775,6 +777,13 @@ const HOLD_BUTTON_FULL_WIDTH: f32 = 228.0;
 const HOLD_BUTTON_COMPACT_WIDTH: f32 = 120.0;
 const HOLD_BUTTON_HEIGHT: f32 = 29.0;
 const LINES_THAT_FIT_IN_THE_COLLECTOR: f32 = 2.0;
+const REMOVAL_BAR_HEIGHT: f32 = 6.0;
+const REMOVAL_STATUS_LINE_GAP: f32 = 8.0;
+const REMOVAL_DETAIL_SHARE_OF_THE_ROOM: f32 = 0.6;
+const BUSY_PULSE_PERIOD: std::time::Duration = std::time::Duration::from_millis(1200);
+const BUSY_PULSE_DIMMEST: f32 = 0.35;
+const UNDERWAY_ROW_DOT: f32 = 8.0;
+const FINISHED_ROW_TEXT_ALPHA: f32 = 0.55;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum CollectorFit {
@@ -917,15 +926,28 @@ fn collected_row(b: &Browser, id: NodeId, row_width: f32) -> Element<'_, Message
         - 3.0 * LIST_ROW_SPACING
         - LIST_SIZE_COLUMN_WIDTH
         - COLLECTED_ROW_REMOVE_WIDTH;
-    let remove = button(icon::close(COLLECTED_ROW_REMOVE_ICON, theme::TEXT_DIM))
-        .padding(COLLECTED_ROW_REMOVE_PADDING)
-        .style(quiet_button_style(theme::TEXT_DIM))
-        .on_press(Message::Uncollect(id));
+    let underway = b.removal_underway();
+    let stage = underway.and_then(|underway| underway.status().of_item(id));
+    let name_color = match stage {
+        Some(ItemRemoval::Removed) => theme::TEXT.scale_alpha(FINISHED_ROW_TEXT_ALPHA),
+        _ => theme::TEXT,
+    };
+    let trailing: Element<'_, Message> = match (underway, stage) {
+        (Some(underway), Some(stage)) => {
+            container(item_removal_mark(underway, stage)).center(COLLECTED_ROW_REMOVE_WIDTH).into()
+        }
+        _ => button(icon::close(COLLECTED_ROW_REMOVE_ICON, theme::TEXT_DIM))
+            .padding(COLLECTED_ROW_REMOVE_PADDING)
+            .style(quiet_button_style(theme::TEXT_DIM))
+            .on_press(Message::Uncollect(id))
+            .into(),
+    };
     let content = row![
         dot(theme::kind_color(node.kind()), LIST_ROW_DOT),
         clipped(
             text(fit_width(&name, name_width, COLLECTED_ROW_TEXT_SIZE))
                 .size(COLLECTED_ROW_TEXT_SIZE)
+                .color(name_color)
                 .wrapping(Wrapping::None)
         ),
         text(format_size(b.tree.size(id)))
@@ -934,11 +956,26 @@ fn collected_row(b: &Browser, id: NodeId, row_width: f32) -> Element<'_, Message
             .width(LIST_SIZE_COLUMN_WIDTH)
             .align_x(Alignment::End)
             .wrapping(Wrapping::None),
-        remove,
+        trailing,
     ]
     .spacing(LIST_ROW_SPACING)
     .align_y(Alignment::Center);
     container(content).padding([2.0, LIST_ROW_PADDING_X]).width(Fill).into()
+}
+
+fn item_removal_mark<'a>(underway: &RemovalUnderway, stage: ItemRemoval) -> Element<'a, Message> {
+    match stage {
+        ItemRemoval::Removed => icon::check_circle(COLLECTED_ROW_REMOVE_ICON, theme::SUCCESS).into(),
+        ItemRemoval::Failed => icon::warning_triangle(COLLECTED_ROW_REMOVE_ICON, theme::WARNING).into(),
+        ItemRemoval::Underway => dot(busy_color(underway), UNDERWAY_ROW_DOT),
+        ItemRemoval::Waiting => Space::new().into(),
+    }
+}
+
+fn busy_color(underway: &RemovalUnderway) -> Color {
+    let turns = underway.started.elapsed().as_secs_f32() / BUSY_PULSE_PERIOD.as_secs_f32();
+    let brightness = 0.5 + 0.5 * (turns * std::f32::consts::TAU).cos();
+    theme::DANGER.scale_alpha(BUSY_PULSE_DIMMEST + (1.0 - BUSY_PULSE_DIMMEST) * brightness)
 }
 
 fn collector_chevron<'a>(b: &Browser) -> Element<'a, Message> {
@@ -955,7 +992,11 @@ fn with_chevron<'a>(b: &Browser, label: impl Into<Element<'a, Message>>) -> Elem
 
 fn collector_ring<'a>(b: &Browser) -> Element<'a, Message> {
     let ring_color = if b.dropping_on_collector() { theme::ACCENT } else { theme::TEXT_DIM };
-    let fill = if b.collector.is_empty() { theme::PANEL_HI } else { theme::DANGER };
+    let fill = match b.removal_underway() {
+        Some(underway) => busy_color(underway),
+        None if b.collector.is_empty() => theme::PANEL_HI,
+        None => theme::DANGER,
+    };
     container(dot(fill, COLLECTOR_RING_DOT))
         .padding(COLLECTOR_RING_PADDING)
         .style(move |_| {
@@ -966,7 +1007,9 @@ fn collector_ring<'a>(b: &Browser) -> Element<'a, Message> {
 }
 
 fn collector_content(b: &Browser, width: f32) -> Element<'_, Message> {
-    let (fit, body) = if b.collector.confirming_trash() {
+    let (fit, body) = if let Some(underway) = b.removal_underway() {
+        removal_status(b, underway, width)
+    } else if b.collector.confirming_trash() {
         trash_confirmation(b, width)
     } else if b.collector.is_empty() {
         (CollectorFit::Full, empty_collector_hint(b))
@@ -978,6 +1021,72 @@ fn collector_content(b: &Browser, width: f32) -> Element<'_, Message> {
         content = content.push(collector_ring(b));
     }
     content.push(body).into()
+}
+
+fn removal_status<'a>(b: &Browser, underway: &RemovalUnderway, width: f32) -> (CollectorFit, Element<'a, Message>) {
+    let fit = CollectorFit::Full;
+    let room = width - fit.ring_width();
+    let detail_room = REMOVAL_DETAIL_SHARE_OF_THE_ROOM * room;
+    let detail = removal_detail(underway, detail_room);
+    let detail_width = generous_text_width(&detail, COLLECTOR_BUTTON_TEXT_SIZE).min(detail_room);
+    let bar = progress_bar(0.0..=1.0, underway.status().fraction())
+        .girth(REMOVAL_BAR_HEIGHT)
+        .style(|_| depth::meter(theme::DANGER, REMOVAL_BAR_HEIGHT / 2.0));
+    let body = column![
+        text(fit_width(&removal_headline(b, underway), room, COLLECTOR_TEXT_SIZE))
+            .size(COLLECTOR_TEXT_SIZE)
+            .wrapping(Wrapping::None),
+        row![
+            bar,
+            text(fit_width(&detail, detail_width, COLLECTOR_BUTTON_TEXT_SIZE))
+                .size(COLLECTOR_BUTTON_TEXT_SIZE)
+                .color(theme::TEXT_DIM)
+                .width(detail_width)
+                .align_x(Alignment::End)
+                .wrapping(Wrapping::None)
+        ]
+        .spacing(COLLECTOR_BUTTON_SPACING)
+        .align_y(Alignment::Center),
+    ]
+    .spacing(REMOVAL_STATUS_LINE_GAP)
+    .width(Fill)
+    .clip(true)
+    .into();
+    (fit, body)
+}
+
+fn removal_headline(b: &Browser, underway: &RemovalUnderway) -> String {
+    let status = underway.status();
+    let Some(current) = status.current() else {
+        return "Finishing…".to_string();
+    };
+    let name = with_folder_mark(b.tree.name(current).into_owned(), b.tree.node(current).is_dir());
+    let name = truncate(&name, NAME_IN_A_MESSAGE_MAX_CHARS);
+    match status.removal() {
+        Removal::MoveToTrash => format!("Moving “{name}” to the {TRASH_NAME}…"),
+        Removal::DeletePermanently => format!("Deleting “{name}” permanently…"),
+    }
+}
+
+fn removal_detail(underway: &RemovalUnderway, room: f32) -> String {
+    let elapsed = elapsed_phrase(underway.started.elapsed());
+    let status = underway.status();
+    let total = status.total_items();
+    if total <= 1 {
+        return elapsed;
+    }
+    let count = format!("{} of {total}", status.position_of_current());
+    let failed = match status.items_failed() {
+        0 => String::new(),
+        failures => format!(" · {failures} failed"),
+    };
+    let removed = format!("{} of {} removed", format_size(status.bytes_removed()), format_size(status.total_bytes()));
+    let full = format!("{count} · {removed}{failed} · {elapsed}");
+    if generous_text_width(&full, COLLECTOR_BUTTON_TEXT_SIZE) <= room {
+        full
+    } else {
+        format!("{count}{failed} · {elapsed}")
+    }
 }
 
 fn empty_collector_hint<'a>(b: &Browser) -> Element<'a, Message> {

@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 
 use dscan_core::{
     Accounting, CancelToken, DesktopError, Layout, LayoutParams, NodeId, PREVIEW_ACTION, Progress, ProgressSnapshot,
-    REVEAL_ACTION, Refusal, Removal, RemovalPlan, RemovalReport, ScanError, ScanOptions, SearchResult, Segment,
-    TRASH_NAME, Transition, Tree, Volume, desktop, format_size,
+    REVEAL_ACTION, Refusal, Removal, RemovalPlan, RemovalProgress, RemovalReport, RemovalStatus, ScanError,
+    ScanOptions, SearchResult, Segment, TRASH_NAME, Transition, Tree, Volume, desktop, format_size,
 };
 use iced::keyboard::{self, Key, key::Named};
 use iced::widget::canvas::Cache;
@@ -26,6 +26,7 @@ pub const HOLD_TO_DELETE: Duration = Duration::from_secs(3);
 const NOTICE_LIFETIME: Duration = Duration::from_secs(4);
 const HOLD_PROGRESS_REFRESH: Duration = Duration::from_millis(33);
 const SCAN_PROGRESS_REFRESH: Duration = Duration::from_millis(100);
+const REMOVAL_PROGRESS_REFRESH: Duration = Duration::from_millis(50);
 const SEARCH_TYPING_PAUSE: Duration = Duration::from_millis(150);
 
 pub type PanicMessage = String;
@@ -37,9 +38,17 @@ fn next_id() -> u64 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
-enum RemovalProgress {
-    OnDisk,
-    Finished(Result<Arc<RemovalReport>, PanicMessage>),
+pub struct RemovalUnderway {
+    pub started: Instant,
+    progress: Arc<RemovalProgress>,
+    items_finished: usize,
+    outcome: Option<Result<Arc<RemovalReport>, PanicMessage>>,
+}
+
+impl RemovalUnderway {
+    pub fn status(&self) -> RemovalStatus<'_> {
+        self.progress.at(self.items_finished)
+    }
 }
 
 fn panic_message(payload: Box<dyn Any + Send>) -> PanicMessage {
@@ -173,7 +182,7 @@ pub struct Browser {
     pub collector: Collector,
     pub animation: Option<ChartAnimation>,
     pub over_collector: bool,
-    removal: Option<RemovalProgress>,
+    removal: Option<RemovalUnderway>,
     pub(crate) delete_hold_started: Option<Instant>,
     pub drag: Option<PendingDrag>,
     pub notice: Option<Notice>,
@@ -223,6 +232,7 @@ pub enum Message {
     DeleteHoldStart,
     DeleteHoldCancel,
     DeleteHoldTick,
+    RemovalProgressTick,
     RemovalDone { outcome: Result<Arc<RemovalReport>, PanicMessage> },
     Rescan,
     GoHome,
@@ -292,6 +302,10 @@ impl App {
                 }
                 if b.delete_hold_started.is_some() {
                     subscriptions.push(iced::time::every(HOLD_PROGRESS_REFRESH).map(|_| Message::DeleteHoldTick));
+                }
+                if b.removal_is_on_disk() {
+                    subscriptions
+                        .push(iced::time::every(REMOVAL_PROGRESS_REFRESH).map(|_| Message::RemovalProgressTick));
                 }
                 Subscription::batch(subscriptions)
             }
@@ -818,6 +832,16 @@ impl Browser {
     }
 
     fn collect(&mut self, id: NodeId) {
+        if self.removal.as_ref().is_some_and(|underway| underway.progress.holds_anything_inside(&self.tree, id)) {
+            let name = with_folder_mark(self.tree.name(id).into_owned(), self.tree.node(id).is_dir());
+            return self.show_notice(
+                NoticeKind::Warning,
+                format!(
+                    "“{}” holds items being removed. Collect it once the removal is done.",
+                    truncate(&name, NAME_IN_A_MESSAGE_MAX_CHARS)
+                ),
+            );
+        }
         match self.collector.add(&self.tree, id) {
             Ok(()) => self.collector_changed(),
             Err(Refusal::Protected) => self.show_notice(
@@ -894,39 +918,58 @@ impl Browser {
         if self.removal.is_some() {
             return None;
         }
-        self.removal = Some(RemovalProgress::OnDisk);
-        Some(RemovalPlan::new(&self.tree, self.collector.items(), removal))
+        let plan = RemovalPlan::new(&self.tree, self.collector.items(), removal);
+        self.removal = Some(RemovalUnderway {
+            started: Instant::now(),
+            progress: plan.progress(),
+            items_finished: 0,
+            outcome: None,
+        });
+        Some(plan)
+    }
+
+    pub fn removal_underway(&self) -> Option<&RemovalUnderway> {
+        self.removal.as_ref()
     }
 
     fn removal_is_on_disk(&self) -> bool {
-        matches!(self.removal, Some(RemovalProgress::OnDisk))
+        self.removal.as_ref().is_some_and(|underway| underway.outcome.is_none())
+    }
+
+    fn is_being_removed(&self, id: NodeId) -> bool {
+        self.removal.as_ref().is_some_and(|underway| underway.status().of_item(id).is_some())
+    }
+
+    fn refresh_removal_progress(&mut self) {
+        if let Some(underway) = &mut self.removal {
+            underway.items_finished = underway.progress.items_finished();
+        }
     }
 
     fn removal_left_the_disk(&mut self, outcome: Result<Arc<RemovalReport>, PanicMessage>) {
-        self.removal = Some(RemovalProgress::Finished(outcome));
+        self.refresh_removal_progress();
+        if let Some(underway) = &mut self.removal {
+            underway.outcome = Some(outcome);
+        }
     }
 
     fn apply_finished_removal(&mut self) -> Task<Message> {
-        match self.removal.take() {
-            Some(RemovalProgress::Finished(Ok(report))) => self.apply_removal_report(report),
-            Some(RemovalProgress::Finished(Err(panic))) => {
+        match self.removal.as_ref().and_then(|underway| underway.outcome.clone()) {
+            Some(Ok(report)) => self.apply_removal_report(report),
+            Some(Err(panic)) => {
+                self.removal = None;
                 self.show_notice(NoticeKind::Error, format!("Removing failed unexpectedly: {panic}"));
                 Task::none()
             }
-            still_on_disk => {
-                self.removal = still_on_disk;
-                Task::none()
-            }
+            None => Task::none(),
         }
     }
 
     fn apply_removal_report(&mut self, report: Arc<RemovalReport>) -> Task<Message> {
         self.search_cancel.cancel();
-        let Some(tree) = Arc::get_mut(&mut self.tree) else {
-            self.removal = Some(RemovalProgress::Finished(Ok(report)));
-            return Task::none();
-        };
+        let Some(tree) = Arc::get_mut(&mut self.tree) else { return Task::none() };
         report.apply_to(tree);
+        self.removal = None;
         self.collector.prune(&self.tree);
         let items = items_phrase(report.removed());
         let mut msg = match report.removal {
@@ -1048,12 +1091,10 @@ impl Browser {
                 });
             }
             Message::SearchFire { generation } if generation == self.search_gen => return self.run_search(),
-            Message::SearchDone { generation, result } => {
-                if generation == self.search_gen {
-                    self.search = result;
-                    self.search_status = SearchStatus::Shown;
-                    self.relayout();
-                }
+            Message::SearchDone { generation, result } if generation == self.search_gen => {
+                self.search = result;
+                self.search_status = SearchStatus::Shown;
+                self.relayout();
             }
             Message::RemovalDone { outcome } if self.removal_is_on_disk() => self.removal_left_the_disk(outcome),
             Message::ClearSearch => {
@@ -1116,22 +1157,25 @@ impl Browser {
                     self.collect(s);
                 }
             }
-            Message::Uncollect(id) => {
+            Message::Uncollect(id) if !self.is_being_removed(id) => {
                 self.collector.remove(&self.tree, id);
                 self.collector_changed();
             }
-            Message::ClearCollector => {
+            Message::ClearCollector if self.removal.is_none() => {
                 self.collector.clear();
                 self.collector_changed();
             }
-            Message::AskTrash => self.collector.ask_to_trash(),
+            Message::AskTrash if self.removal.is_none() => self.collector.ask_to_trash(),
             Message::CancelTrash => self.collector.stop_asking_to_trash(),
             Message::ConfirmTrash => {
                 self.collector.stop_asking_to_trash();
                 return self.remove_collected(Removal::MoveToTrash);
             }
-            Message::DeleteHoldStart if !self.collector.is_empty() => self.delete_hold_started = Some(Instant::now()),
+            Message::DeleteHoldStart if !self.collector.is_empty() && self.removal.is_none() => {
+                self.delete_hold_started = Some(Instant::now())
+            }
             Message::DeleteHoldCancel => self.delete_hold_started = None,
+            Message::RemovalProgressTick => self.refresh_removal_progress(),
             Message::DeleteHoldTick
                 if self.delete_hold_started.is_some_and(|started| started.elapsed() >= HOLD_TO_DELETE) =>
             {
@@ -1195,6 +1239,11 @@ pub(crate) mod test_util {
             Screen::Browse(b) => b,
             Screen::Start => panic!("a result is on screen"),
         }
+    }
+
+    pub fn pretend_removal_reached(b: &mut Browser, items_finished: usize) {
+        let Some(underway) = &mut b.removal else { panic!("a removal is underway") };
+        underway.items_finished = items_finished;
     }
 }
 
@@ -1280,6 +1329,65 @@ mod tests {
     }
 
     #[test]
+    fn progress_ticks_show_which_items_are_already_removed_before_the_removal_reports_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut b = browser(dir.path());
+        let (movies, music) = (descend(&b.tree, &["Movies"]), descend(&b.tree, &["Music"]));
+        b.collector.add(&b.tree, movies).unwrap();
+        b.collector.add(&b.tree, music).unwrap();
+
+        let removal = b.start_removal(Removal::DeletePermanently).unwrap();
+        let shown = |b: &Browser| b.removal_underway().expect("underway until the report arrives").status().current();
+        assert_eq!(shown(&b), Some(movies), "the removal shows as underway at once");
+
+        let report = Arc::new(removal.carry_out());
+        assert_eq!(shown(&b), Some(movies), "only a tick reads progress");
+        let _ = b.update(Message::RemovalProgressTick);
+        assert_eq!(shown(&b), None, "every item is finished");
+        assert!(b.tree.is_live(movies), "the tree waits for the report");
+
+        let _ = b.update(Message::RemovalDone { outcome: Ok(report) });
+        assert!(b.removal_underway().is_none() && b.collector.is_empty());
+        assert!(!b.tree.is_live(movies) && !b.tree.is_live(music));
+    }
+
+    #[test]
+    fn neither_the_trash_question_nor_the_delete_hold_starts_while_a_removal_is_underway() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut b = browser(dir.path());
+        let movies = descend(&b.tree, &["Movies"]);
+        b.collector.add(&b.tree, movies).unwrap();
+        let _removal = b.start_removal(Removal::DeletePermanently).unwrap();
+
+        let _ = b.update(Message::AskTrash);
+        let _ = b.update(Message::DeleteHoldStart);
+        assert!(!b.collector.confirming_trash(), "no second removal is offered");
+        assert!(b.delete_hold_progress().is_none(), "no second removal can be held down");
+    }
+
+    #[test]
+    fn while_a_removal_runs_its_items_stay_collected_and_their_folders_cannot_be_collected() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut b = browser(dir.path());
+        let (movies, clip) = (descend(&b.tree, &["Movies"]), descend(&b.tree, &["Movies", "a.mov"]));
+        b.collector.add(&b.tree, clip).unwrap();
+        let _removal = b.start_removal(Removal::DeletePermanently).unwrap();
+
+        let _ = b.update(Message::Uncollect(clip));
+        let _ = b.update(Message::ClearCollector);
+        assert_eq!(b.collector.items(), &[clip], "an item being removed cannot be taken out");
+
+        let _ = b.update(Message::Press(Segment::Node(movies)));
+        let _ = b.update(Message::CollectSelected);
+        assert_eq!(b.collector.items(), &[clip], "collecting its folder would swallow the item being removed");
+        assert!(
+            b.notice.as_ref().is_some_and(|n| n.kind == NoticeKind::Warning && n.text.starts_with("“Movies/” holds")),
+            "{:?}",
+            b.notice
+        );
+    }
+
+    #[test]
     fn releasing_or_leaving_the_button_early_cancels_the_delete() {
         let dir = tempfile::tempdir().unwrap();
         let mut b = browser(dir.path());
@@ -1317,6 +1425,9 @@ mod tests {
 
         assert!(dir.path().join("Music").exists(), "later additions are not removed");
         assert!(b.tree.is_live(movies), "the tree changes only once the search lets go of it");
+        assert!(b.removal_underway().is_some(), "the status stays up until the tree has changed");
+        let _ = b.update(Message::AskTrash);
+        assert!(!b.collector.confirming_trash(), "no second removal is offered while the first is being applied");
         drop(running_search);
         let _ = b.update(Message::SearchDone { generation: b.search_gen, result: None });
         assert!(!b.tree.is_live(movies));

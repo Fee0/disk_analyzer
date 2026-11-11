@@ -5,7 +5,9 @@ use dscan_core::hidden::HIDDEN_SPACE_NAME;
 use iced::Settings;
 use iced_test::{Error, Simulator};
 
-use crate::app::test_util::{app_showing, descend, on_screen, on_screen_mut, scan_result, scanned};
+use crate::app::test_util::{
+    app_showing, descend, on_screen, on_screen_mut, pretend_removal_reached, scan_result, scanned,
+};
 use crate::app::{App, Browser, Message, Notice, NoticeKind, Screen};
 use crate::iced_inspect as ui_inspect;
 use crate::{theme, view};
@@ -906,6 +908,48 @@ fn collected_items_are_listed_only_after_clicking_the_collector() -> Result<(), 
     Ok(())
 }
 
+#[test]
+fn the_collector_shows_what_a_removal_is_doing_and_which_items_are_done() -> Result<(), Error> {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = browser_app(dir.path());
+    collect_through_the_ui(&mut app, &["Movies", "Downloads", "Pictures"]);
+    let _ = app.update(Message::AskTrash);
+    let carrying_out = app.update(Message::ConfirmTrash);
+    assert!(carrying_out.units() > 0, "confirming hands the removal to a task, which this test never runs");
+    pretend_removal_reached(on_screen_mut(&mut app), 1);
+    let _ = app.update(Message::ToggleCollectedList);
+
+    let mut ui = sim(&app);
+    let report = ui_inspect::report(&mut ui, VIEW);
+    println!("{report}");
+    assert!(!report.contains("clipped:"), "the removal status fits the collector\n{report}");
+    let texts = texts_on_screen(&mut ui);
+    assert!(
+        count_of(&texts, &format!("Moving “Downloads/” to the {}…", dscan_core::TRASH_NAME)) > 0,
+        "the bar names the item being moved: {texts:?}"
+    );
+    assert!(
+        texts.iter().any(|t| t.starts_with("2 of 3 · ") && t.ends_with(" s")),
+        "the bar counts items and the time taken: {texts:?}"
+    );
+    assert!(
+        !texts.iter().any(|t| t.starts_with("Move to ") || t.starts_with("Hold ") || t == "Clear"),
+        "no second removal is offered while one runs: {texts:?}"
+    );
+    shoot(&mut ui, "collector-removing")?;
+    for name in ["Movies/", "Downloads/", "Pictures/"] {
+        let mut ui = sim(&app);
+        let where_the_remove_button_was = remove_button_beside(&mut ui, name);
+        ui_inspect::click_at(&mut ui, where_the_remove_button_was);
+        let msgs = clicks_only(ui.into_messages());
+        assert!(
+            !msgs.iter().any(|m| matches!(m, Message::Uncollect(_))),
+            "{name} is being removed, so its row has no remove button: {msgs:?}"
+        );
+    }
+    Ok(())
+}
+
 const LONG_FAILURE: &str = "Reveal in Explorer failed for “an-extremely-long-folder-name”: the system could not find the file specified, and nothing else could be opened in its place.";
 
 #[test]
@@ -1054,6 +1098,12 @@ fn every_screen_stays_readable_from_the_default_window_down_to_the_minimum_size(
     );
     let _ = collected_list_open.update(Message::ToggleCollectedList);
 
+    let mut removing = browser_app(other_results[2].path());
+    collect_through_the_ui(&mut removing, &["Movies", "Downloads", "Pictures", "Music"]);
+    let _ = removing.update(Message::AskTrash);
+    let _removal_task_never_run = removing.update(Message::ConfirmTrash);
+    pretend_removal_reached(on_screen_mut(&mut removing), 1);
+
     let mut long_notice = browser_app(dir.path());
     let _ = long_notice.update(Message::DesktopActionFailed(LONG_FAILURE.to_string()));
 
@@ -1073,6 +1123,7 @@ fn every_screen_stays_readable_from_the_default_window_down_to_the_minimum_size(
         ("holding", &holding_delete),
         ("long", &long_folder_with_unreadable_parts),
         ("confirm", &confirming_trash),
+        ("removing", &removing),
         ("collected-list", &collected_list_open),
         ("selected", &long_file_selected),
         ("notice", &long_notice),

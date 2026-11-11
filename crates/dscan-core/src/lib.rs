@@ -13,7 +13,9 @@ pub mod transition;
 pub mod tree;
 pub mod volumes;
 
-pub use actions::{Collection, Refusal, Removal, RemovalPlan, RemovalReport};
+pub use actions::{
+    Collection, ItemRemoval, Refusal, Removal, RemovalPlan, RemovalProgress, RemovalReport, RemovalStatus,
+};
 pub use chart_geometry::{ChartGeometry, ChartHit, ChartPoint};
 pub use desktop::{COMMAND_KEY, DesktopError, PREVIEW_ACTION, RESCAN_SHORTCUT, REVEAL_ACTION};
 pub use exclusions::Exclusions;
