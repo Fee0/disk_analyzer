@@ -10,6 +10,7 @@ mod iced_inspect;
 mod icon;
 #[cfg(test)]
 mod inspect_tests;
+mod list_scroll;
 mod sunburst;
 mod theme;
 mod view;

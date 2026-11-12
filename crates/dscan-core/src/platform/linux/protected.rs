@@ -1,5 +1,5 @@
 use crate::platform::unix_syntax::UNIX_PATHS;
-use crate::protection::ProtectedLocations;
+use crate::protection::{OtherLocation, ProtectedLocations};
 
 pub(crate) const PROTECTED: ProtectedLocations = ProtectedLocations {
     syntax: UNIX_PATHS,
@@ -45,6 +45,7 @@ pub(crate) const PROTECTED: ProtectedLocations = ProtectedLocations {
         "/home/*/.local",
         "/home/*/.local/share",
         "/home/*/.local/share/Trash",
+        "/var/lib/flatpak",
         "/media/*",
         "/media/*/*",
         "/mnt/*",
@@ -59,17 +60,21 @@ pub(crate) const PROTECTED: ProtectedLocations = ProtectedLocations {
         "/lib32",
         "/lib64",
         "/libx32",
+        "/nix",
+        "/ostree",
         "/proc",
         "/run",
         "/sbin",
         "/snap",
         "/sys",
+        "/sysroot",
         "/usr",
         "/var/lib/dpkg",
         "/var/lib/pacman",
         "/var/lib/rpm",
     ],
     user_trees_inside_system_trees: &["/usr/local", "/run/media"],
+    listed_location_of: &[OtherLocation { found_at: "/var/home", listed_as: "/home" }],
 };
 
 #[cfg(test)]
@@ -93,6 +98,13 @@ mod tests {
             "/mnt/backup",
             "/run/media/alex/USB",
             "/var/log",
+            "/var/home",
+            "/var/home/alex",
+            "/var/home/alex/Documents",
+            "/nix/store/abc-glibc",
+            "/ostree/repo",
+            "/sysroot/ostree",
+            "/var/lib/flatpak",
         ] {
             assert!(PROTECTED.protects(p), "{p} should be protected");
         }
@@ -101,6 +113,8 @@ mod tests {
             "/home/alex/.cache",
             "/home/alex/.local/share/Steam",
             "/home/alex/code/target",
+            "/var/home/alex/Downloads/big.iso",
+            "/var/home/alex/.cache",
             "/usr/local/lib/node_modules",
             "/var/lib/docker",
             "/var/log/journal",

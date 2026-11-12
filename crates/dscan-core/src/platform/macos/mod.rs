@@ -67,16 +67,18 @@ mod system {
         }
 
         fn scan_boundaries(root: &Path, extent: ScanExtent) -> ScanBoundaries {
+            let local_and_shared = mounts::MountPoints::listed();
+            let firmlinked_duplicates = apfs::firmlinked_duplicate_paths(
+                std::fs::read(FIRMLINKS_FILE).ok().as_deref(),
+                &unix::path_bytes(root),
+            );
             ScanBoundaries {
                 other_devices_of_the_disk: match extent {
                     ScanExtent::WholeDisk => mounts::other_volumes_of_the_same_container(root),
                     ScanExtent::Folder => Default::default(),
                 },
-                duplicate_views: apfs::firmlinked_duplicate_paths(
-                    std::fs::read(FIRMLINKS_FILE).ok().as_deref(),
-                    &unix::path_bytes(root),
-                ),
-                devices_mounted_on: mounts::devices_mounted_on(),
+                folders_never_entered: firmlinked_duplicates.into_iter().chain(local_and_shared.shares).collect(),
+                devices_mounted_on: local_and_shared.local_devices,
             }
         }
 

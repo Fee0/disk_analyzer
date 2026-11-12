@@ -22,9 +22,25 @@ const FE_FLAGS: usize = 40;
 const FIEMAP_EXTENT_LAST: u32 = 0x1;
 const FIEMAP_EXTENT_UNKNOWN: u32 = 0x2;
 const FIEMAP_EXTENT_DELALLOC: u32 = 0x4;
+const FIEMAP_EXTENT_ENCODED: u32 = 0x8;
 const FIEMAP_EXTENT_DATA_INLINE: u32 = 0x200;
 const FIEMAP_EXTENT_SHARED: u32 = 0x2000;
 const WITHOUT_A_DISK_ADDRESS: u32 = FIEMAP_EXTENT_UNKNOWN | FIEMAP_EXTENT_DELALLOC | FIEMAP_EXTENT_DATA_INLINE;
+
+const SMALLEST_EXTENT_ON_DISK: u64 = 4096;
+const LONGEST_COMPRESSED_EXTENT: u64 = 128 << 10;
+const COMPRESSED_SLOT_PER_DISK_BYTE: u64 = LONGEST_COMPRESSED_EXTENT / SMALLEST_EXTENT_ON_DISK;
+const COMPRESSED_EXTENTS_ADDRESS_SPACE: u64 = 1 << 63;
+
+fn claimed_range(physical: u64, length: u64, flags: u32) -> Range<u64> {
+    let length_says_nothing_about_the_space_on_disk = flags & FIEMAP_EXTENT_ENCODED != 0;
+    if length_says_nothing_about_the_space_on_disk {
+        let own_slot = COMPRESSED_EXTENTS_ADDRESS_SPACE | physical.wrapping_mul(COMPRESSED_SLOT_PER_DISK_BYTE);
+        own_slot..own_slot.saturating_add(length.min(LONGEST_COMPRESSED_EXTENT))
+    } else {
+        physical..physical.saturating_add(length)
+    }
+}
 
 const EXTENTS_PER_CALL: usize = 128;
 const BYTES_PER_WORD: usize = 8;
@@ -103,7 +119,7 @@ pub(super) fn collect_shared_extents(buffer: &[u64; FIEMAP_BUFFER_WORDS], shared
         let (physical, length, flags) =
             (u64_at(extent, FE_PHYSICAL), u64_at(extent, FE_LENGTH), u32_at(extent, FE_FLAGS));
         if flags & FIEMAP_EXTENT_SHARED != 0 && flags & WITHOUT_A_DISK_ADDRESS == 0 {
-            shared.push(physical..physical.saturating_add(length));
+            shared.push(claimed_range(physical, length, flags));
         }
         let is_last_of_the_file = flags & FIEMAP_EXTENT_LAST != 0;
         let filled_the_buffer = index + 1 == EXTENTS_PER_CALL;
@@ -168,6 +184,34 @@ mod tests {
         let mut shared = Vec::new();
         assert_eq!(collect_shared_extents(&buffer, &mut shared), Batch::Complete);
         assert_eq!(shared, [(1 << 20)..(1 << 20) + 4096, (3 << 20)..(3 << 20) + 4096]);
+    }
+
+    #[test]
+    fn compressed_extents_lying_next_to_each_other_on_disk_never_look_shared_with_each_other() {
+        let compressed = FIEMAP_EXTENT_SHARED | FIEMAP_EXTENT_ENCODED;
+        let logical_length_of_a_compressed_extent = LONGEST_COMPRESSED_EXTENT;
+        let neighbours_on_disk =
+            [1 << 20, (1 << 20) + SMALLEST_EXTENT_ON_DISK, (1 << 20) + 2 * SMALLEST_EXTENT_ON_DISK];
+        let extents: Vec<Extent> = neighbours_on_disk
+            .iter()
+            .enumerate()
+            .map(|(i, &physical)| Extent {
+                logical: i as u64 * logical_length_of_a_compressed_extent,
+                physical,
+                length: logical_length_of_a_compressed_extent,
+                flags: compressed,
+            })
+            .collect();
+        let mut shared = Vec::new();
+        collect_shared_extents(&answer(&extents), &mut shared);
+        for pair in shared.windows(2) {
+            assert!(pair[0].end <= pair[1].start, "{pair:?} overlap although they are different extents");
+        }
+        let mut same_extent_again = Vec::new();
+        collect_shared_extents(&answer(&extents[..1]), &mut same_extent_again);
+        assert_eq!(same_extent_again[0], shared[0], "the same extent in another file claims the same range");
+        let plain = claimed_range(1 << 20, 4096, FIEMAP_EXTENT_SHARED);
+        assert!(shared.iter().all(|c| c.start >= plain.end), "compressed extents never meet uncompressed ones");
     }
 
     #[test]

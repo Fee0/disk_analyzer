@@ -74,7 +74,7 @@ pub(crate) enum ScanExtent {
 #[derive(Debug, Default)]
 pub(crate) struct ScanBoundaries {
     pub other_devices_of_the_disk: FxHashSet<DeviceId>,
-    pub duplicate_views: FxHashSet<Vec<u8>>,
+    pub folders_never_entered: FxHashSet<Vec<u8>>,
     pub devices_mounted_on: FxHashMap<Vec<u8>, DeviceId>,
 }
 

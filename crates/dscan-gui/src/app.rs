@@ -16,11 +16,12 @@ use iced::{Point, Subscription, Task, event, mouse};
 use crate::animation::{Advance, ChartAnimation};
 use crate::collector::Collector;
 use crate::fmt::{NAME_IN_A_MESSAGE_MAX_CHARS, count_phrase, items_phrase, truncate, with_folder_mark};
+use crate::list_scroll::{ScrollFrom, show_selected_row};
 
 pub const APP_NAME: &str = "Disk Analyzer";
 pub const SEARCH_ID: &str = "search";
 const LIST_ROW_NAME_MAX_CHARS: usize = 44;
-pub const MAX_LIST_ROWS: usize = 400;
+pub const MAX_LIST_ROWS: usize = 600;
 const DRAG_THRESHOLD: f32 = 4.0;
 pub const HOLD_TO_DELETE: Duration = Duration::from_secs(3);
 const NOTICE_LIFETIME: Duration = Duration::from_secs(4);
@@ -329,9 +330,7 @@ impl App {
         self.stepped_back_from_newest_parked = false;
         self.scans.retain(|job| !job.scans_same_place_as(&opts));
         self.scans.push(ScanJob { id, opts, progress, cancel, snapshot: ProgressSnapshot::default(), result_slot });
-        if let Screen::Browse(b) = std::mem::replace(&mut self.screen, Screen::Start) {
-            drop_off_thread(vec![*b]);
-        }
+        self.park_the_result_on_screen();
         Task::perform(work, move |r| Message::ScanFinished { job_id: id, crash: r.err() })
     }
 
@@ -450,12 +449,19 @@ impl App {
         }
     }
 
-    fn go_home(&mut self) -> Task<Message> {
-        let Screen::Browse(mut b) = std::mem::replace(&mut self.screen, Screen::Start) else {
-            return Task::none();
+    fn park_the_result_on_screen(&mut self) -> bool {
+        let Screen::Browse(mut shown) = std::mem::replace(&mut self.screen, Screen::Start) else {
+            return false;
         };
-        b.park();
-        self.parked_newest_first.insert(0, *b);
+        shown.park();
+        self.parked_newest_first.insert(0, *shown);
+        true
+    }
+
+    fn go_home(&mut self) -> Task<Message> {
+        if !self.park_the_result_on_screen() {
+            return Task::none();
+        }
         self.stepped_back_from_newest_parked = true;
         self.error = None;
         Self::load_volumes()
@@ -512,9 +518,17 @@ fn is_cmd_shortcut_a_text_field_has_no_use_for(key: &Key, modifiers: keyboard::M
     modifiers.command() && matches!(key.as_ref(), Key::Character("f" | "r" | "[" | "]"))
 }
 
+fn as_on_a_latin_keyboard_without_caps_lock_or_shift(key: Key, pressed: keyboard::key::Physical) -> Key {
+    match key.to_latin(pressed) {
+        Some(letter) => Key::Character(letter.to_lowercase().collect::<String>().into()),
+        None => key,
+    }
+}
+
 fn global_event(event: iced::Event, status: event::Status, _window: iced::window::Id) -> Option<Message> {
     match event {
-        iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
+        iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, physical_key, .. }) => {
+            let key = as_on_a_latin_keyboard_without_caps_lock_or_shift(key, physical_key);
             let not_taken_by_focused_widget = status == event::Status::Ignored;
             (not_taken_by_focused_widget || is_cmd_shortcut_a_text_field_has_no_use_for(&key, modifiers))
                 .then_some(Message::Key(key, modifiers))
@@ -768,12 +782,11 @@ impl Browser {
         }
     }
 
-    fn sibling_beside(&self, id: NodeId, after: bool) -> Option<NodeId> {
-        let parent = self.tree.parent(id).unwrap_or(self.focus);
-        let siblings: Vec<NodeId> = self.visible_children(parent).collect();
-        let i = siblings.iter().position(|&s| s == id)?;
+    fn listed_row_beside(&self, id: NodeId, after: bool) -> Option<NodeId> {
+        let rows = &self.list.rows;
+        let i = rows.iter().position(|row| row.id == id)?;
         let beside = if after { i.checked_add(1) } else { i.checked_sub(1) };
-        Some(beside.and_then(|j| siblings.get(j).copied()).unwrap_or(id))
+        Some(beside.and_then(|j| rows.get(j)).map_or(id, |row| row.id))
     }
 
     fn move_selection(&mut self, key: Named) {
@@ -784,7 +797,7 @@ impl Browser {
         };
         match key {
             Named::ArrowLeft | Named::ArrowRight => {
-                if let Some(sibling) = self.sibling_beside(sel, key == Named::ArrowRight) {
+                if let Some(sibling) = self.listed_row_beside(sel, key == Named::ArrowRight) {
                     self.selected = Some(sibling);
                 }
             }
@@ -1042,6 +1055,7 @@ impl Browser {
 
     fn updating(&mut self, change: impl FnOnce(&mut Self) -> Task<Message>) -> Task<Message> {
         let before = (self.hovered, self.selected);
+        let listed_before = self.listed_folder();
         let deadline_before = self.notice_expires_at;
         let task = change(self);
         let task = Task::batch([task, self.apply_finished_removal()]);
@@ -1049,6 +1063,13 @@ impl Browser {
             self.highlight_cache.clear();
         }
         self.sync_list();
+        let selection_moved = self.selected.is_some() && self.selected != before.1;
+        let scroll = match (self.listed_folder() != listed_before, selection_moved) {
+            (true, _) => show_selected_row(ScrollFrom::TheTop),
+            (false, true) => show_selected_row(ScrollFrom::WhereTheListIs),
+            (false, false) => Task::none(),
+        };
+        let task = Task::batch([task, scroll]);
         let task = match self.notice_expires_at {
             Some(deadline) if Some(deadline) != deadline_before => {
                 Task::batch([task, Self::check_the_notice_again_once_its_lifetime_is_up()])
@@ -1705,6 +1726,57 @@ mod tests {
         assert!(b.hand_selection_to_desktop(PREVIEW_ACTION, |_| panic!("nothing is selected")).units() == 0);
         b.selected = Some(b.tree.root());
         assert!(b.hand_selection_to_desktop(REVEAL_ACTION, |_| panic!("the root is not an item")).units() == 0);
+    }
+
+    #[test]
+    fn rescanning_keeps_the_result_on_screen_among_the_open_results_until_the_new_one_replaces_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let shown = browser(dir.path());
+        let (shown_id, opts) = (shown.id, shown.opts.clone());
+        let mut app = app_showing(shown);
+
+        let _ = app.update(Message::Rescan);
+        assert!(matches!(app.screen, Screen::Start), "the scan shows its progress on the start page");
+        assert_eq!(app.parked_newest_first.len(), 1, "the old result is still there if the scan is stopped");
+        assert_eq!(app.parked_newest_first[0].id, shown_id);
+
+        let job = app.scans[0].id;
+        let _ = app.update(Message::StopScan(job));
+        assert_eq!(app.parked_newest_first.len(), 1, "stopping the scan loses nothing");
+
+        let fresh = test_util::scan_result(&opts).unwrap();
+        let _ = app.open_or_park_scan_result(fresh, opts);
+        assert!(app.parked_newest_first.is_empty(), "the new result replaces the old one");
+        assert_ne!(on_screen(&app).id, shown_id);
+    }
+
+    #[test]
+    fn the_list_is_asked_to_show_the_selected_row_whenever_the_selection_or_the_listed_folder_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut b = browser(dir.path());
+        let (movies, music) = (descend(&b.tree, &["Movies"]), descend(&b.tree, &["Music"]));
+
+        assert!(b.update(Message::Press(Segment::Node(music))).units() > 0, "a new selection");
+        assert_eq!(b.update(Message::Press(Segment::Node(music))).units(), 0, "the same selection again");
+        assert_eq!(b.update(Message::Hover(Some(Segment::Node(movies)))).units(), 0, "hovering selects nothing");
+        assert!(b.update(Message::Navigate(movies)).units() > 0, "another folder is listed from its top");
+    }
+
+    #[test]
+    fn letter_shortcuts_work_with_caps_lock_on_and_on_keyboards_without_latin_letters() {
+        use keyboard::key::{Code, Physical};
+        let typed = |letter: &str, pressed: Code| {
+            as_on_a_latin_keyboard_without_caps_lock_or_shift(Key::Character(letter.into()), Physical::Code(pressed))
+        };
+        assert!(matches!(shortcut_message(typed("C", Code::KeyC).as_ref(), false), Some(Message::CollectSelected)));
+        assert!(matches!(navigation_shortcut(typed("R", Code::KeyR).as_ref(), true), Some(Message::Rescan)));
+        assert!(matches!(shortcut_message(typed("а", Code::KeyF).as_ref(), true), Some(Message::FocusSearch)));
+        assert_eq!(typed("[", Code::BracketLeft), Key::Character("[".into()));
+        let arrow = Key::Named(Named::ArrowUp);
+        assert_eq!(
+            as_on_a_latin_keyboard_without_caps_lock_or_shift(arrow.clone(), Physical::Code(Code::ArrowUp)),
+            arrow
+        );
     }
 
     #[test]

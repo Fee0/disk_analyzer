@@ -22,6 +22,7 @@ use crate::fmt::{
     generous_text_width, items_phrase, thousands, truncate, with_folder_mark,
 };
 use crate::icon;
+use crate::list_scroll::{LIST_ID, SELECTED_ROW_ID};
 use crate::sunburst::Sunburst;
 use crate::theme;
 
@@ -1279,9 +1280,11 @@ fn list_panel_content(b: &Browser, panel_size: iced::Size) -> Element<'_, Messag
         rows = rows.push(container(text("Empty").size(13).color(theme::TEXT_DIM)).padding(10));
     }
 
-    let mut panel =
-        column![header, scrollable(rows).height(Fill).spacing(LIST_SCROLLBAR_GAP).style(depth::slim_scrollbar)]
-            .spacing(12);
+    let mut panel = column![
+        header,
+        scrollable(rows).id(LIST_ID).height(Fill).spacing(LIST_SCROLLBAR_GAP).style(depth::slim_scrollbar)
+    ]
+    .spacing(12);
     if let Some(details) = selection_details(b, panel_size) {
         panel = panel.push(column![separator(), details].spacing(12));
     }
@@ -1436,6 +1439,7 @@ fn list_row<'a>(b: &'a Browser, r: &'a ListRow, columns: &ListColumns) -> Elemen
             None => style,
         }
     });
+    let cell = if selected { cell.id(SELECTED_ROW_ID) } else { cell };
     mouse_area(cell)
         .on_enter(Message::Hover(Some(Segment::Node(id))))
         .on_exit(Message::RowExit(id))

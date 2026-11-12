@@ -195,8 +195,8 @@ impl Ctx<'_> {
         child == parent || self.boundaries.other_devices_of_the_disk.contains(&child)
     }
 
-    fn is_duplicate_view(&self, path: &[u8]) -> bool {
-        self.boundaries.duplicate_views.contains(path)
+    fn is_never_entered(&self, path: &[u8]) -> bool {
+        self.boundaries.folders_never_entered.contains(path)
     }
 
     fn device_inside(&self, path: &[u8], as_listed: DeviceId) -> DeviceId {
@@ -377,7 +377,7 @@ fn subdirs_to_descend(
             (child_path, child, child_dev)
         })
         .filter(|&(_, _, child_dev)| ctx.may_enter_device(dev, child_dev))
-        .filter(|(child_path, _, _)| !ctx.is_duplicate_view(child_path))
+        .filter(|(child_path, _, _)| !ctx.is_never_entered(child_path))
         .collect()
 }
 

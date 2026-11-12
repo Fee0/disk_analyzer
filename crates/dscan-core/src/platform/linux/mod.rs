@@ -110,7 +110,7 @@ mod system {
 
         fn would_run_a_program(path: &Path) -> bool {
             let Ok(metadata) = std::fs::metadata(path) else { return false };
-            if metadata.is_dir() {
+            if !metadata.is_file() {
                 return false;
             }
             let executable = metadata.permissions().mode() & ANY_EXECUTE_PERMISSION != 0;
