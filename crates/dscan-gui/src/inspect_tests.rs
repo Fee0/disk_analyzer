@@ -1226,3 +1226,27 @@ fn disk_cards_name_the_file_system_and_mark_network_shares() {
         format!("{} · {} · SMB · network", dscan_core::format_size(2 * TB), Path::new("/Volumes/media").display());
     assert!(texts.contains(&expected), "{texts:?}");
 }
+
+#[test]
+fn the_selected_row_and_the_list_report_where_they_are_so_the_list_can_scroll_to_a_row_below_the_view() {
+    use crate::list_scroll::{LIST_ID, SELECTED_ROW_ID};
+    let dir = tempfile::tempdir().unwrap();
+    let names: Vec<String> = (0..80).map(|i| format!("f{i:02}.bin")).collect();
+    let files: Vec<(&str, usize)> = names.iter().map(|name| (name.as_str(), 20_000)).collect();
+    write_files(dir.path(), &files, 1);
+    let mut app = app_showing(scanned(ScanOptions::folder(dir.path())));
+    let last_row = on_screen(&app).list.rows.last().unwrap().id;
+    let _ = app.update(Message::Press(dscan_core::Segment::Node(last_row)));
+
+    let mut ui = sim(&app);
+    let nodes = ui_inspect::nodes(&mut ui);
+    let with_id = |kind: &str, id: &str| {
+        let mut found = nodes.iter().filter(|n| n.kind == kind && n.id.as_deref() == Some(id));
+        let node = found.next().unwrap_or_else(|| panic!("no {kind} with id {id}"));
+        assert!(found.next().is_none(), "only one {kind} carries the id {id}");
+        node.bounds
+    };
+    let (list, row) = (with_id("scrollable", LIST_ID), with_id("container", SELECTED_ROW_ID));
+    assert!(row.y > list.y + list.height, "the last of 80 rows lies below the view until the list scrolls: {row:?}");
+    assert!(row.height > 0.0 && row.height < list.height);
+}

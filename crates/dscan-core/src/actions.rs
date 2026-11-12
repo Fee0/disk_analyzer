@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fs::FileType;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Acquire, Ordering::Relaxed, Ordering::Release};
@@ -89,7 +90,17 @@ struct RemovalTarget {
     id: NodeId,
     path: PathBuf,
     size: u64,
+    scanned_as_folder: bool,
 }
+
+impl RemovalTarget {
+    fn file_type_unless_replaced_since_the_scan(&self) -> Result<FileType, String> {
+        let now = std::fs::symlink_metadata(&self.path).map_err(|e| e.to_string())?;
+        if now.is_dir() == self.scanned_as_folder { Ok(now.file_type()) } else { Err(CHANGED_SINCE_THE_SCAN.into()) }
+    }
+}
+
+const CHANGED_SINCE_THE_SCAN: &str = "it changed since the scan; scan again before removing it";
 
 pub struct RemovalPlan {
     targets: Vec<RemovalTarget>,
@@ -106,7 +117,8 @@ impl RemovalPlan {
             if is_protected(&path) {
                 refused.push((path, "protected system location".into()));
             } else {
-                targets.push(RemovalTarget { id, path, size: tree.size(id) });
+                let scanned_as_folder = tree.node(id).is_dir();
+                targets.push(RemovalTarget { id, path, size: tree.size(id), scanned_as_folder });
             }
         }
         let progress = Arc::new(RemovalProgress::new(removal, &targets));
@@ -122,11 +134,12 @@ impl RemovalPlan {
         let removal = progress.removal;
         let mut report = RemovalReport { removal, removed: Vec::new(), bytes: 0, failed: refused };
         let trash = Current::trash_context();
-        for RemovalTarget { id, path, size } in targets {
-            let outcome = match removal {
-                Removal::MoveToTrash => trash.delete(&path).map_err(|e| e.to_string()),
-                Removal::DeletePermanently => delete_permanently(&path).map_err(|e| e.to_string()),
-            };
+        for target in targets {
+            let outcome = target.file_type_unless_replaced_since_the_scan().and_then(|file_type| match removal {
+                Removal::MoveToTrash => trash.delete(&target.path).map_err(|e| e.to_string()),
+                Removal::DeletePermanently => delete_permanently(&target.path, file_type).map_err(|e| e.to_string()),
+            });
+            let RemovalTarget { id, path, size, .. } = target;
             let position = progress.items_finished.load(Relaxed);
             match outcome {
                 Ok(()) => {
@@ -266,8 +279,7 @@ impl RemovalReport {
     }
 }
 
-fn delete_permanently(path: &Path) -> std::io::Result<()> {
-    let file_type = std::fs::symlink_metadata(path)?.file_type();
+fn delete_permanently(path: &Path, file_type: FileType) -> std::io::Result<()> {
     if file_type.is_symlink() {
         Current::remove_link(path, file_type)
     } else if file_type.is_dir() {
@@ -379,6 +391,24 @@ mod tests {
         assert_eq!(end.of_item(big), Some(ItemRemoval::Removed));
         assert_eq!((end.current(), end.position_of_current(), end.fraction()), (None, 2, 1.0));
         assert_eq!(end.bytes_removed(), report.bytes, "progress and the report agree on what was freed");
+    }
+
+    #[test]
+    fn a_file_replaced_by_a_folder_since_the_scan_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("report"), vec![1u8; 10_000]).unwrap();
+        let t = scan_folder(root);
+        let report_file = descend(&t, &["report"]);
+        std::fs::remove_file(root.join("report")).unwrap();
+        std::fs::create_dir(root.join("report")).unwrap();
+        std::fs::write(root.join("report/new-work.txt"), b"written after the scan").unwrap();
+
+        let report = RemovalPlan::new(&t, &[report_file], Removal::DeletePermanently).carry_out();
+
+        assert_eq!((report.removed(), report.failed.len()), (0, 1));
+        assert_eq!(report.failed[0].1, CHANGED_SINCE_THE_SCAN);
+        assert!(root.join("report/new-work.txt").exists(), "what replaced the scanned file is not deleted");
     }
 
     #[cfg(unix)]

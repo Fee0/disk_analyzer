@@ -1,4 +1,4 @@
-const LONGEST_KNOWN_EXTENSION_LEN: usize = b"sparsebundle".len();
+const LONGEST_KNOWN_EXTENSION_LEN: usize = b"photoslibrary".len();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 #[repr(u8)]
@@ -51,18 +51,7 @@ impl Kind {
     }
 
     pub fn of_file(name: &[u8]) -> Kind {
-        let Some(dot) = name.iter().rposition(|&b| b == b'.') else {
-            return Kind::Other;
-        };
-        let ext = &name[dot + 1..];
-        let mut lower = [0u8; LONGEST_KNOWN_EXTENSION_LEN];
-        if ext.is_empty() || ext.len() > lower.len() {
-            return Kind::Other;
-        }
-        for (d, s) in lower.iter_mut().zip(ext) {
-            *d = s.to_ascii_lowercase();
-        }
-        Self::of_ext(&lower[..ext.len()])
+        LowercaseExtension::of(name).map_or(Kind::Other, |extension| Self::of_ext(extension.bytes()))
     }
 
     fn of_ext(ext: &[u8]) -> Kind {
@@ -76,7 +65,8 @@ impl Kind {
             b"mp3" | b"m4a" | b"aac" | b"wav" | b"aif" | b"aiff" | b"flac" | b"ogg" | b"opus" | b"alac" | b"caf"
             | b"mid" | b"logicx" => Kind::Audio,
             b"zip" | b"gz" | b"tgz" | b"bz2" | b"xz" | b"zst" | b"7z" | b"rar" | b"tar" | b"lz4" | b"xip" | b"pkg"
-            | b"jar" | b"whl" | b"crate" | b"apk" | b"ipa" | b"aab" => Kind::Archive,
+            | b"jar" | b"whl" | b"crate" | b"apk" | b"ipa" | b"aab" | b"deb" | b"rpm" | b"cab" | b"msi" | b"msix"
+            | b"msu" | b"flatpak" | b"snap" => Kind::Archive,
             b"dmg" | b"iso" | b"img" | b"vmdk" | b"vdi" | b"qcow2" | b"sparseimage" | b"sparsebundle" | b"hdd"
             | b"vhd" | b"vhdx" | b"utm" | b"band" => Kind::DiskImage,
             b"pdf" | b"doc" | b"docx" | b"xls" | b"xlsx" | b"ppt" | b"pptx" | b"key" | b"pages" | b"numbers"
@@ -87,29 +77,48 @@ impl Kind {
             | b"tsx" | b"jsx" | b"java" | b"kt" | b"go" | b"rb" | b"php" | b"cs" | b"json" | b"toml" | b"yaml"
             | b"yml" | b"xml" | b"html" | b"css" | b"sh" | b"lua" | b"zig" | b"o" | b"rlib" | b"rmeta" | b"d"
             | b"pyc" | b"class" | b"wasm" | b"pdb" | b"ll" | b"bc" => Kind::Code,
-            b"dylib" | b"so" | b"a" | b"framework" | b"bundle" | b"dll" | b"tbd" => Kind::Library,
+            b"dylib" | b"so" | b"a" | b"framework" | b"bundle" | b"dll" | b"tbd" | b"lib" | b"sys" => Kind::Library,
+            b"exe" | b"appimage" => Kind::App,
             b"cache" | b"tmp" | b"log" => Kind::Cache,
             _ => Kind::Other,
         }
     }
 
     pub fn of_dir(name: &[u8]) -> Option<Kind> {
-        if name.len() > 4 && name[name.len() - 4..].eq_ignore_ascii_case(b".app") {
-            return Some(Kind::App);
-        }
         match name {
             b"Caches" | b".cache" | b"DerivedData" | b"CachedData" | b"Cache" | b"cache" => Some(Kind::Cache),
-            _ => {
-                let lower_ext = name.iter().rposition(|&b| b == b'.').map(|d| &name[d + 1..]);
-                match lower_ext {
-                    Some(b"framework") => Some(Kind::Library),
-                    Some(b"photoslibrary") => Some(Kind::Image),
-                    Some(b"sparsebundle") => Some(Kind::DiskImage),
-                    Some(b"xcarchive") => Some(Kind::App),
-                    _ => None,
-                }
-            }
+            _ => match LowercaseExtension::of(name)?.bytes() {
+                b"app" | b"xcarchive" => Some(Kind::App),
+                b"framework" => Some(Kind::Library),
+                b"photoslibrary" => Some(Kind::Image),
+                b"sparsebundle" => Some(Kind::DiskImage),
+                _ => None,
+            },
         }
+    }
+}
+
+struct LowercaseExtension {
+    buffer: [u8; LONGEST_KNOWN_EXTENSION_LEN],
+    len: usize,
+}
+
+impl LowercaseExtension {
+    fn of(name: &[u8]) -> Option<Self> {
+        let dot = name.iter().rposition(|&b| b == b'.')?;
+        let extension = &name[dot + 1..];
+        let mut buffer = [0u8; LONGEST_KNOWN_EXTENSION_LEN];
+        if extension.is_empty() || extension.len() > buffer.len() {
+            return None;
+        }
+        for (lower, byte) in buffer.iter_mut().zip(extension) {
+            *lower = byte.to_ascii_lowercase();
+        }
+        Some(LowercaseExtension { buffer, len: extension.len() })
+    }
+
+    fn bytes(&self) -> &[u8] {
+        &self.buffer[..self.len]
     }
 }
 
@@ -128,6 +137,9 @@ mod tests {
         assert_eq!(Kind::of_dir(b"Safari.app"), Some(Kind::App));
         assert_eq!(Kind::of_dir(b"Caches"), Some(Kind::Cache));
         assert_eq!(Kind::of_dir(b"Documents"), None);
+        assert_eq!(Kind::of_dir(b"Photos.PhotosLibrary"), Some(Kind::Image), "bundle folders match in any case");
+        assert_eq!(Kind::of_file(b"setup.exe"), Kind::App);
+        assert_eq!(Kind::of_file(b"package.deb"), Kind::Archive);
         for (i, k) in Kind::ALL.iter().enumerate() {
             assert_eq!(*k as usize, i, "Kind::ALL must list kinds in discriminant order for from_u8");
         }

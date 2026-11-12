@@ -38,8 +38,19 @@ pub(crate) const PROTECTED: ProtectedLocations = ProtectedLocations {
         "/Users/*/.Trash",
         "/Volumes/*",
     ],
-    trees: &["/System", "/bin", "/sbin", "/usr", "/private/var/db"],
+    trees: &[
+        "/System",
+        "/bin",
+        "/sbin",
+        "/usr",
+        "/private/etc",
+        "/private/var/db",
+        "/private/var/root",
+        "/Library/Keychains",
+        "/Users/*/Library/Keychains",
+    ],
     user_trees_inside_system_trees: &["/usr/local"],
+    listed_location_of: &[],
 };
 
 #[cfg(test)]
@@ -59,6 +70,10 @@ mod tests {
             "/usr/local",
             "/private/var",
             "/private/var/db/receipts",
+            "/private/etc/sudoers",
+            "/private/var/root/Library",
+            "/Library/Keychains/System.keychain",
+            "/Users/alex/Library/Keychains/login.keychain-db",
             "/Users/alex",
             "/Users/alex/Library",
             "/Users/alex/Downloads",

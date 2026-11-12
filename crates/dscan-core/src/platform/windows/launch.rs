@@ -33,6 +33,14 @@ const PROGRAM_EXTENSIONS: &[&str] = &[
     "jar",
     "py",
     "pyw",
+    "msu",
+    "chm",
+    "scf",
+    "sct",
+    "wsc",
+    "gadget",
+    "diagcab",
+    "settingcontent-ms",
 ];
 
 pub(crate) fn is_program_name(name: &str) -> bool {
@@ -56,7 +64,17 @@ mod tests {
 
     #[test]
     fn programs_scripts_installers_and_shortcuts_are_recognised_whatever_their_case() {
-        for program in ["setup.exe", "INSTALL.MSI", "run.Bat", "build.cmd", "tool.ps1", "game.lnk", "site.url"] {
+        for program in [
+            "setup.exe",
+            "INSTALL.MSI",
+            "run.Bat",
+            "build.cmd",
+            "tool.ps1",
+            "game.lnk",
+            "site.url",
+            "help.chm",
+            "kb.msu",
+        ] {
             assert!(is_program_name(program), "{program} would run when opened");
         }
         for document in ["photo.jpg", "report.pdf", "notes", "archive.exe.zip", "movie.mov"] {

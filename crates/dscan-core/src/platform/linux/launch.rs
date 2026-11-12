@@ -2,7 +2,7 @@ use std::fmt::Write;
 
 const FILE_URI_SCHEME: &str = "file://";
 const KEPT_AS_IS_IN_A_FILE_URI_PATH: &[u8] = b"-._~/";
-const LAUNCHER_EXTENSIONS: &[&[u8]] = &[b".desktop", b".appimage"];
+const LAUNCHER_EXTENSIONS: &[&[u8]] = &[b".desktop", b".appimage", b".exe", b".msi", b".jar"];
 const PROGRAM_SIGNATURES: &[&[u8]] = &[b"\x7fELF", b"#!"];
 pub(super) const LONGEST_PROGRAM_SIGNATURE: usize = 4;
 
@@ -51,6 +51,8 @@ mod tests {
         assert!(looks_like_a_program(b"build.sh", b"#!/b", true));
         assert!(looks_like_a_program(b"Firefox.desktop", b"[Des", false));
         assert!(looks_like_a_program(b"Krita.AppImage", b"\x7fELF", false));
+        assert!(looks_like_a_program(b"setup.EXE", b"MZ\x90\x00", false), "Wine runs it without the execute bit");
+        assert!(looks_like_a_program(b"tool.jar", b"PK\x03\x04", false), "Java runs it without the execute bit");
         assert!(
             !looks_like_a_program(b"photo.jpg", b"\xff\xd8\xff\xe0", true),
             "FAT and NTFS mark every file executable"

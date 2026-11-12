@@ -88,11 +88,29 @@ pub(super) fn other_volumes_of_the_same_container(root: &Path) -> FxHashSet<Devi
         .collect()
 }
 
-pub(super) fn devices_mounted_on() -> FxHashMap<Vec<u8>, DeviceId> {
-    mounts_via_getfsstat_into_own_buffer()
-        .into_iter()
-        .filter_map(|m| Some((unix::path_bytes(&m.on).into_owned(), unix::device_of(&m.on).ok()?)))
-        .collect()
+#[derive(Default)]
+pub(super) struct MountPoints {
+    pub local_devices: FxHashMap<Vec<u8>, DeviceId>,
+    pub shares: Vec<Vec<u8>>,
+}
+
+impl MountPoints {
+    pub fn listed() -> Self {
+        Self::without_asking_shares_that_may_not_answer(mounts_via_getfsstat_into_own_buffer())
+    }
+
+    fn without_asking_shares_that_may_not_answer(mounts: Vec<Mount>) -> Self {
+        let mut points = MountPoints::default();
+        for m in mounts {
+            let on = unix::path_bytes(&m.on).into_owned();
+            if m.is_network() {
+                points.shares.push(on);
+            } else if let Ok(device) = unix::device_of(&m.on) {
+                points.local_devices.insert(on, device);
+            }
+        }
+        points
+    }
 }
 
 pub(super) fn mounted_volumes() -> Vec<Volume> {
@@ -158,7 +176,7 @@ mod tests {
 
     #[test]
     fn mount_points_map_to_the_device_mounted_there_not_the_one_they_cover() {
-        let mounted = devices_mounted_on();
+        let mounted = MountPoints::listed().local_devices;
         let root = unix::device_of(Path::new("/")).unwrap();
         assert_eq!(mounted.get(&b"/"[..]), Some(&root));
         let preboot =
@@ -167,6 +185,20 @@ mod tests {
             *preboot, root,
             "a separate volume, although getattrlistbulk lists its folder with the root's device"
         );
+    }
+
+    #[test]
+    fn a_share_is_listed_as_never_entered_without_asking_it_for_its_device() {
+        let dead_share = Mount {
+            on: "/Volumes/no-such-share-so-asking-would-fail".into(),
+            from: "//nas/share".into(),
+            fstype: "smbfs".into(),
+            flags: 0,
+            space_when_listed: SpaceInfo::default(),
+        };
+        let points = MountPoints::without_asking_shares_that_may_not_answer(vec![dead_share]);
+        assert_eq!(points.shares, [b"/Volumes/no-such-share-so-asking-would-fail".to_vec()]);
+        assert!(points.local_devices.is_empty());
     }
 
     #[test]

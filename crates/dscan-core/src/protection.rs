@@ -14,16 +14,33 @@ pub(crate) struct ProtectedLocations {
     pub exact: &'static [&'static str],
     pub trees: &'static [&'static str],
     pub user_trees_inside_system_trees: &'static [&'static str],
+    pub listed_location_of: &'static [OtherLocation],
+}
+
+pub(crate) struct OtherLocation {
+    pub found_at: &'static str,
+    pub listed_as: &'static str,
 }
 
 impl ProtectedLocations {
     pub fn protects(&self, path: &str) -> bool {
-        let path = (self.syntax.components)(path);
+        let path = self.as_listed((self.syntax.components)(path));
         let matches_any = |patterns: &[&str], whole: bool| {
             patterns.iter().any(|pattern| self.pattern_matches(&(self.syntax.components)(pattern), &path, whole))
         };
         matches_any(self.exact, true)
             || (matches_any(self.trees, false) && !matches_any(self.user_trees_inside_system_trees, false))
+    }
+
+    fn as_listed<'p>(&self, path: Vec<&'p str>) -> Vec<&'p str> {
+        for other in self.listed_location_of {
+            let found_at = (self.syntax.components)(other.found_at);
+            if self.pattern_matches(&found_at, &path, false) {
+                let listed_as = (self.syntax.components)(other.listed_as);
+                return listed_as.into_iter().chain(path[found_at.len()..].iter().copied()).collect();
+            }
+        }
+        path
     }
 
     fn pattern_matches(&self, pattern: &[&str], path: &[&str], whole_path: bool) -> bool {
@@ -51,6 +68,7 @@ mod tests {
         exact: &["/", "/home/*", "/home/*/Documents"],
         trees: &["/usr"],
         user_trees_inside_system_trees: &["/usr/local"],
+        listed_location_of: &[OtherLocation { found_at: "/var/home", listed_as: "/home" }],
     };
 
     #[test]
@@ -74,12 +92,22 @@ mod tests {
     }
 
     #[test]
+    fn a_folder_found_at_another_location_is_protected_like_the_listed_one() {
+        assert!(!SAMPLE.protects("/var/home"), "/home is not listed, so neither is its other location");
+        assert!(SAMPLE.protects("/var/home/alex"));
+        assert!(SAMPLE.protects("/var/home/alex/Documents"));
+        assert!(!SAMPLE.protects("/var/home/alex/Documents/notes.txt"));
+        assert!(!SAMPLE.protects("/var/homework"), "components are compared whole");
+    }
+
+    #[test]
     fn windows_paths_match_case_insensitively_with_either_separator_and_verbatim_prefixes() {
         let windows = ProtectedLocations {
             syntax: WINDOWS_PATHS,
             exact: &["*", "*/Users/*"],
             trees: &["*/Windows"],
             user_trees_inside_system_trees: &[],
+            listed_location_of: &[],
         };
         assert!(windows.protects(r"C:\"));
         assert!(windows.protects(r"D:"));

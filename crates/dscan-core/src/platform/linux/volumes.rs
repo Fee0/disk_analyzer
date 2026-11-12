@@ -22,7 +22,7 @@ pub(super) fn scan_boundaries(root: &Path, extent: ScanExtent) -> ScanBoundaries
             ScanExtent::WholeDisk => found.entered.iter().filter_map(|m| unix::device_of(m).ok()).collect(),
             ScanExtent::Folder => Default::default(),
         },
-        duplicate_views: found.duplicate_views.iter().map(|m| unix::path_bytes(m).into_owned()).collect(),
+        folders_never_entered: found.duplicate_views.iter().map(|m| unix::path_bytes(m).into_owned()).collect(),
         devices_mounted_on: Default::default(),
     }
 }

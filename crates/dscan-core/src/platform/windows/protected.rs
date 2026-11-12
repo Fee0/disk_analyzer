@@ -8,6 +8,7 @@ pub(crate) const PROTECTED: ProtectedLocations = ProtectedLocations {
         "*/Program Files",
         "*/Program Files (x86)",
         "*/ProgramData",
+        "*/ProgramData/Microsoft",
         "*/Users",
         "*/Users/Public",
         "*/Users/*",
@@ -27,6 +28,10 @@ pub(crate) const PROTECTED: ProtectedLocations = ProtectedLocations {
     trees: &[
         "*/$Recycle.Bin",
         "*/Boot",
+        "*/BOOTNXT",
+        "*/EFI",
+        "*/Program Files/WindowsApps",
+        "*/bootmgr",
         "*/Recovery",
         "*/System Volume Information",
         "*/Windows",
@@ -35,6 +40,7 @@ pub(crate) const PROTECTED: ProtectedLocations = ProtectedLocations {
         "*/swapfile.sys",
     ],
     user_trees_inside_system_trees: &["*/Windows/Temp"],
+    listed_location_of: &[],
 };
 
 #[cfg(test)]
@@ -57,6 +63,10 @@ mod tests {
             r"C:\Users\alex\AppData\Local",
             r"C:\Users\alex\Downloads",
             r"C:\pagefile.sys",
+            r"C:\bootmgr",
+            r"C:\EFI\Microsoft\Boot\BCD",
+            r"C:\Program Files\WindowsApps\Microsoft.WindowsStore",
+            r"C:\ProgramData\Microsoft",
             r"C:\System Volume Information",
             r"\\?\C:\Windows\explorer.exe",
         ] {
@@ -66,6 +76,7 @@ mod tests {
             r"C:\Windows\Temp\setup.log",
             r"C:\Program Files\Some App",
             r"C:\ProgramData\Package Cache",
+            r"C:\ProgramData\Microsoft\Windows\WER",
             r"C:\Users\alex\AppData\Local\Temp",
             r"C:\Users\alex\Downloads\big.iso",
             r"C:\Users\alex\source",

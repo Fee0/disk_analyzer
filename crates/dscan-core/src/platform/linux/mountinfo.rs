@@ -161,7 +161,8 @@ pub(super) fn same_file_system_mounts_below(mounts: &[Mount], root: &Path) -> Sa
     let mut found = SameFileSystemMounts::default();
     let Some(root_index) = mount_holding(mounts, root) else { return found };
     let root_mount = &mounts[root_index];
-    let mut shown: Vec<&Mount> = vec![root_mount];
+    let scanned_part = scanned_part_of(root_mount, root);
+    let mut shown: Vec<&Mount> = vec![&scanned_part];
     for (index, mount) in mounts.iter().enumerate() {
         let below_root = mount.mount_point.starts_with(root) && mount.mount_point != root;
         if index == root_index || !below_root || !mount.shows_the_same_file_system_as(root_mount) {
@@ -176,6 +177,11 @@ pub(super) fn same_file_system_mounts_below(mounts: &[Mount], root: &Path) -> Sa
     }
     found.duplicate_views.extend(places_inside_a_mount_that_show_another_shown_mount(&shown));
     found
+}
+
+fn scanned_part_of(root_mount: &Mount, root: &Path) -> Mount {
+    let inside_the_mount = root.strip_prefix(&root_mount.mount_point).unwrap_or(Path::new(""));
+    Mount { fs_root: root_mount.fs_root.join(inside_the_mount), mount_point: root.to_path_buf(), ..root_mount.clone() }
 }
 
 fn places_inside_a_mount_that_show_another_shown_mount(shown: &[&Mount]) -> Vec<PathBuf> {
@@ -307,6 +313,17 @@ mod tests {
     fn a_scan_of_a_folder_inside_a_mount_uses_the_mount_holding_it() {
         let found = same_file_system_mounts_below(&mounts(), Path::new("/home/alex"));
         assert_eq!(found, SameFileSystemMounts::default());
+    }
+
+    #[test]
+    fn a_folder_scan_enters_a_bind_mount_of_content_outside_the_folder_and_skips_one_of_content_inside_it() {
+        let binds = format!(
+            "{BTRFS_LAPTOP}47 22 0:21 /@/srv/data /srv/again rw,relatime shared:37 - btrfs /dev/nvme0n1p2 rw,subvol=/@
+"
+        );
+        let found = same_file_system_mounts_below(&parse(binds.as_bytes()), Path::new("/srv"));
+        assert_eq!(found.entered, [PathBuf::from("/srv/shared")], "/var/lib/shared is not inside /srv");
+        assert_eq!(found.duplicate_views, [PathBuf::from("/srv/again")], "/srv/data is scanned where it is");
     }
 
     fn volume_points(mounts: &[Mount], is_folder: impl Fn(&Path) -> bool) -> Vec<&Path> {

@@ -11,6 +11,7 @@ rustc-hash.workspace = true
 parking_lot.workspace = true
 thiserror.workspace = true
 humansize.workspace = true
+unicode-normalization.workspace = true
 trash.workspace = true
 
 [target.'cfg(unix)'.dependencies]
