@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use dscan_core::{FrameArc, Transition, TransitionKind};
+use dscan_core::{ChartFrame, ChartTransition, TransitionKind};
 
 const REVEAL: Duration = Duration::from_millis(750);
 const ZOOM: Duration = Duration::from_millis(480);
@@ -24,26 +24,10 @@ fn timing(kind: TransitionKind) -> (Duration, Easing) {
     }
 }
 
-pub struct MovingChart {
-    pub arcs: Vec<FrameArc>,
-    pub total: u64,
-    pub style_progress: f64,
-}
-
-impl MovingChart {
-    fn at(transition: &Transition, eased_progress: f64) -> Self {
-        MovingChart {
-            arcs: transition.frame(eased_progress),
-            total: transition.total(eased_progress),
-            style_progress: eased_progress,
-        }
-    }
-}
-
 pub struct ChartAnimation {
-    transition: Transition,
+    transition: ChartTransition,
     started: Option<Instant>,
-    current: MovingChart,
+    current: ChartFrame,
 }
 
 pub enum Advance {
@@ -52,8 +36,8 @@ pub enum Advance {
 }
 
 impl ChartAnimation {
-    pub fn new(transition: Transition) -> Self {
-        let current = MovingChart::at(&transition, 0.0);
+    pub fn new(transition: ChartTransition) -> Self {
+        let current = transition.frame(0.0);
         ChartAnimation { transition, started: None, current }
     }
 
@@ -64,22 +48,21 @@ impl ChartAnimation {
         if linear >= 1.0 {
             return Advance::Finished;
         }
-        self.current = MovingChart::at(&self.transition, ease(linear));
+        self.current = self.transition.frame(ease(linear));
         Advance::Running
     }
 
-    pub fn current_frame(&self) -> &MovingChart {
+    pub fn frame(&self) -> &ChartFrame {
         &self.current
+    }
+
+    pub fn kind(&self) -> TransitionKind {
+        self.transition.kind()
     }
 
     #[cfg(test)]
     pub fn jump_to(&mut self, eased_progress: f64) {
-        self.current = MovingChart::at(&self.transition, eased_progress);
-    }
-
-    #[cfg(test)]
-    pub fn kind(&self) -> TransitionKind {
-        self.transition.kind()
+        self.current = self.transition.frame(eased_progress);
     }
 }
 
@@ -101,12 +84,11 @@ mod tests {
 
     #[test]
     fn the_clock_starts_on_the_first_frame_and_finishes_after_the_duration() {
-        let layout = dscan_core::Layout::default();
-        let mut animation = ChartAnimation::new(Transition::reveal(&layout));
+        let mut animation = ChartAnimation::new(dscan_core::Chart::default().reveal());
         let first_frame = Instant::now();
         assert!(matches!(animation.advance(first_frame), Advance::Running));
         assert!(matches!(animation.advance(first_frame + REVEAL / 2), Advance::Running));
-        assert!(animation.current_frame().style_progress > 0.5);
+        assert!(matches!(animation.frame(), ChartFrame::Arcs { style_progress, .. } if *style_progress > 0.5));
         assert!(matches!(animation.advance(first_frame + REVEAL), Advance::Finished));
     }
 }

@@ -1,8 +1,9 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use dscan_core::{CancelToken, Progress, ScanOptions, format_size, scan};
 
 const LAYOUT_RUNS: usize = 25;
+const TYPICAL_CHART_SIZE: (f32, f32) = (740.0, 640.0);
 
 const USAGE: &str = "usage: cargo run -p dscan-core --release --example scan -- <path> [--disk] [--threads N]";
 
@@ -42,20 +43,11 @@ fn main() {
     );
     let exclusions = dscan_core::Exclusions::default();
     let layout = || dscan_core::sunburst(&tree, root, dscan_core::LayoutParams::default(), None, &exclusions);
-    let l = layout();
-    let mut layout_times = Vec::with_capacity(LAYOUT_RUNS);
-    for _ in 0..LAYOUT_RUNS {
-        let t = Instant::now();
-        std::hint::black_box(layout());
-        layout_times.push(t.elapsed());
-    }
-    layout_times.sort();
-    println!(
-        "layout: {} arcs, fastest {:.2?}, median {:.2?} of {LAYOUT_RUNS} runs",
-        l.len(),
-        layout_times[0],
-        layout_times[LAYOUT_RUNS / 2]
-    );
+    let (arcs, fastest, median) = fastest_and_median(layout);
+    println!("layout: {} arcs, fastest {fastest:.2?}, median {median:.2?} of {LAYOUT_RUNS} runs", arcs.len());
+    let treemap = || dscan_core::treemap(&tree, root, TYPICAL_CHART_SIZE, None, &exclusions);
+    let (map, fastest, median) = fastest_and_median(treemap);
+    println!("treemap: {} tiles, fastest {fastest:.2?}, median {median:.2?} of {LAYOUT_RUNS} runs", map.tiles.len());
     for q in ["readme", "readme", "a", "zzqx"] {
         let t = Instant::now();
         let r = dscan_core::search(&tree, q, &CancelToken::default());
@@ -70,4 +62,16 @@ fn main() {
             break;
         }
     }
+}
+
+fn fastest_and_median<T>(run: impl Fn() -> T) -> (T, Duration, Duration) {
+    let timed = || {
+        let t = Instant::now();
+        let result = std::hint::black_box(run());
+        (result, t.elapsed())
+    };
+    let (result, first) = timed();
+    let mut times: Vec<Duration> = std::iter::once(first).chain((1..LAYOUT_RUNS).map(|_| timed().1)).collect();
+    times.sort();
+    (result, times[0], times[LAYOUT_RUNS / 2])
 }

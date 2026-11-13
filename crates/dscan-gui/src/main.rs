@@ -2,6 +2,7 @@
 
 mod animation;
 mod app;
+mod chart_canvas;
 mod collector;
 mod depth;
 mod fmt;
@@ -13,6 +14,7 @@ mod inspect_tests;
 mod list_scroll;
 mod sunburst;
 mod theme;
+mod treemap_chart;
 mod view;
 
 use std::path::PathBuf;

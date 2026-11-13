@@ -1,4 +1,5 @@
 pub mod actions;
+pub mod chart;
 pub mod chart_geometry;
 pub mod desktop;
 pub mod exclusions;
@@ -11,11 +12,14 @@ pub mod scan;
 pub mod search;
 pub mod transition;
 pub mod tree;
+pub mod treemap;
+pub mod treemap_transition;
 pub mod volumes;
 
 pub use actions::{
     Collection, ItemRemoval, Refusal, Removal, RemovalPlan, RemovalProgress, RemovalReport, RemovalStatus,
 };
+pub use chart::{Chart, ChartFrame, ChartInput, ChartKind, ChartTransition};
 pub use chart_geometry::{ChartGeometry, ChartHit, ChartPoint};
 pub use desktop::{COMMAND_KEY, DesktopError, PREVIEW_ACTION, RESCAN_SHORTCUT, REVEAL_ACTION};
 pub use exclusions::Exclusions;
@@ -24,8 +28,10 @@ pub use kind::Kind;
 pub use layout::{Arc, Layout, LayoutParams, MAX_DEPTH, Segment, sunburst};
 pub use scan::{CancelToken, Progress, ProgressSnapshot, ScanError, ScanOptions, scan};
 pub use search::{SearchResult, search};
-pub use transition::{ArcStyle, FrameArc, Transition, TransitionKind};
+pub use transition::{FrameArc, SegmentStyle, Transition, TransitionKind};
 pub use tree::{Accounting, NodeId, ScanStats, Tree};
+pub use treemap::{Tile, TileRect, Treemap, TreemapHit, treemap};
+pub use treemap_transition::{FrameTile, TileLook, TreemapTransition, tiles_at_rest};
 pub use volumes::{FULL_DISK_ACCESS_SETTINGS, TRASH_NAME, Volume, has_full_disk_access, list_volumes};
 
 pub fn canonical_path(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {

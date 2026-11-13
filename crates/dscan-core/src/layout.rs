@@ -1,6 +1,6 @@
 use crate::exclusions::Exclusions;
 use crate::kind::Kind;
-use crate::search::SearchResult;
+use crate::search::{SearchResult, is_relevant_under};
 use crate::tree::{NodeId, Tree};
 
 pub const MAX_DEPTH: usize = 7;
@@ -13,6 +13,53 @@ const TURN_FRACTION_EPSILON: f64 = 1e-12;
 pub enum Segment {
     Node(NodeId),
     Small { parent: NodeId, count: u32 },
+}
+
+impl Segment {
+    pub fn node(&self) -> Option<NodeId> {
+        match *self {
+            Segment::Node(n) => Some(n),
+            Segment::Small { .. } => None,
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct SmallItems {
+    size: u64,
+    count: u32,
+    relevant: bool,
+    last: Option<NodeId>,
+}
+
+impl SmallItems {
+    pub(crate) fn add(&mut self, child: NodeId, size: u64, relevant: bool) {
+        self.size += size;
+        self.count += 1;
+        self.relevant |= relevant;
+        self.last = Some(child);
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    pub(crate) fn piece(&self, tree: &Tree, parent: NodeId) -> Option<Piece> {
+        let last = self.last?;
+        let (segment, kind) = if self.count == 1 {
+            (Segment::Node(last), tree.node(last).kind())
+        } else {
+            (Segment::Small { parent, count: self.count }, Kind::SmallItems)
+        };
+        Some(Piece { segment, size: self.size, kind, relevant: self.relevant })
+    }
+}
+
+pub(crate) struct Piece {
+    pub(crate) segment: Segment,
+    pub(crate) size: u64,
+    pub(crate) kind: Kind,
+    pub(crate) relevant: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -28,10 +75,7 @@ pub struct Arc {
 
 impl Arc {
     pub fn node(&self) -> Option<NodeId> {
-        match self.segment {
-            Segment::Node(n) => Some(n),
-            Segment::Small { .. } => None,
-        }
+        self.segment.node()
     }
     pub fn span(&self) -> f64 {
         self.end - self.start
@@ -121,7 +165,7 @@ struct Placer<'a> {
 
 impl Placer<'_> {
     fn is_relevant(&self, id: NodeId) -> bool {
-        self.search.is_none_or(|s| s.is_relevant(id))
+        is_relevant_under(self.search, id)
     }
 
     fn push_returning_branch(&mut self, depth: usize, mut arc: Arc) -> u32 {
@@ -144,18 +188,14 @@ impl Placer<'_> {
         }
         let scale = span / size as f64;
         let mut cursor = start;
-        let (mut small_size, mut small_count, mut small_relevant) = (0u64, 0u32, false);
-        let mut last_small = None;
+        let mut small = SmallItems::default();
         for (child, cs) in self.excluded.children_with_sizes(tree, node) {
             if cs == 0 {
                 continue;
             }
             let s = cs as f64 * scale;
             if s < self.params.min_span {
-                small_size += cs;
-                small_count += 1;
-                small_relevant |= self.is_relevant(child);
-                last_small = Some(child);
+                small.add(child, cs, self.is_relevant(child));
                 continue;
             }
             let arc = Arc {
@@ -173,14 +213,11 @@ impl Placer<'_> {
             }
             cursor += s;
         }
-        let end = (cursor + small_size as f64 * scale).min(start + span);
-        if small_count > 0 && end > cursor {
-            let (segment, kind) = match last_small {
-                Some(n) if small_count == 1 => (Segment::Node(n), tree.node(n).kind()),
-                _ => (Segment::Small { parent: node, count: small_count }, Kind::SmallItems),
-            };
-            let arc = Arc { segment, start: cursor, end, size: small_size, kind, branch, relevant: small_relevant };
-            self.push_returning_branch(depth, arc);
+        if let Some(Piece { segment, size, kind, relevant }) = small.piece(tree, node) {
+            let end = (cursor + size as f64 * scale).min(start + span);
+            if end > cursor {
+                self.push_returning_branch(depth, Arc { segment, start: cursor, end, size, kind, branch, relevant });
+            }
         }
     }
 }

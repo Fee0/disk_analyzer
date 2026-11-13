@@ -11,8 +11,9 @@
 </p>
 
 <p align="center">
-  <img src="assets/screenshot-sunburst.png" width="49%" alt="Disk Analyzer showing a sunburst chart of drive C: next to a list of the largest folders">
-  <img src="assets/screenshot-disks.png" width="49%" alt="The start page listing each disk with its free space and a Scan button">
+  <img src="assets/screenshot-disks.png" width="32%" alt="The start page listing each disk with its free space and a Scan button">
+  <img src="assets/screenshot-sunburst.png" width="32%" alt="Disk Analyzer showing a sunburst chart of drive C: next to a list of the largest folders">
+  <img src="assets/screenshot-treemap.png" width="34.3%" alt="Disk Analyzer showing a treemap of drive C:, with every file as a rectangle sized by its space, nested in framed folders, next to a list of the largest items">
 </p>
 
 ## Features
@@ -23,6 +24,9 @@
   images, audio, archives, disk images, documents, code, apps, libraries and
   caches. Hover a segment for its size and share. Items too small to show are
   grouped together.
+- **Treemap.** Switch to a treemap to see every file as a rectangle sized by the
+  space it takes, nested inside framed, labeled folders, so the biggest files
+  stand out at a glance.
 - **True sizes.** Counts the space files use on disk, not their nominal length.
   Hard links and cloned or reflinked copies count once.
 - **Hidden space.** Space the scan can't see gets its own segment: snapshots,
@@ -68,10 +72,11 @@ To scan a folder at launch, pass it as an argument: `disk-analyzer ~/Downloads`
 |---|---|---|---|
 | Select | Arrow keys | Arrow keys | Click |
 | Open the selected folder | Enter or Ctrl+↓ | Enter or ⌘↓ | Double-click |
-| Go up a level | Ctrl+↑ | ⌘↑ | Click the center |
+| Go up a level | Ctrl+↑ | ⌘↑ | Click the center, or the bar above the treemap |
 | Back | Backspace or Ctrl+[ | Backspace or ⌘[ | Back button |
 | Forward | Ctrl+] | ⌘] | Forward button |
 | Search | Ctrl+F | ⌘F | |
+| Switch between sunburst and treemap | Ctrl+T | ⌘T | Chart buttons in the toolbar |
 | Open the selected item | Space | Space (Quick Look) | |
 | Collect for deletion | C | C | Drag onto the collector |
 | Scan again | F5 or Ctrl+R | ⌘R | **Rescan** |

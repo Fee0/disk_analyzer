@@ -1,14 +1,14 @@
 use std::sync::LazyLock;
 
 use dscan_core::{
-    Accounting, COMMAND_KEY, ItemRemoval, NodeId, PREVIEW_ACTION, RESCAN_SHORTCUT, REVEAL_ACTION, Remedy, Removal,
-    Segment, SpaceExplanation, TRASH_NAME, Volume, format_size,
+    Accounting, COMMAND_KEY, Chart, ChartKind, ItemRemoval, NodeId, PREVIEW_ACTION, RESCAN_SHORTCUT, REVEAL_ACTION,
+    Remedy, Removal, Segment, SpaceExplanation, TRASH_NAME, Volume, format_size,
 };
 use iced::border;
 use iced::widget::text::Wrapping;
 use iced::widget::{
-    Column, Space, Svg, button, canvas, center, column, container, mouse_area, pin, progress_bar, responsive, row,
-    scrollable, stack, text, text_input, tooltip,
+    Column, Space, Svg, button, center, column, container, mouse_area, pin, progress_bar, responsive, row, scrollable,
+    sensor, stack, text, text_input, tooltip,
 };
 use iced::{Alignment, Color, Element, Fill, Length, Theme};
 
@@ -16,6 +16,7 @@ use crate::animation::ChartAnimation;
 use crate::app::{
     App, Browser, HOLD_TO_DELETE, ListRow, Message, Notice, NoticeKind, RemovalUnderway, SEARCH_ID, ScanJob, Screen,
 };
+use crate::chart_canvas::chart_with_cursor_overlay;
 use crate::depth::{self, Elevation};
 use crate::fmt::{
     NAME_IN_A_MESSAGE_MAX_CHARS, count_phrase, elapsed_phrase, fit_width, fit_width_keeping_both_ends,
@@ -25,6 +26,7 @@ use crate::icon;
 use crate::list_scroll::{LIST_ID, SELECTED_ROW_ID};
 use crate::sunburst::Sunburst;
 use crate::theme;
+use crate::treemap_chart::TreemapChart;
 
 pub const DEFAULT_WINDOW_SIZE: iced::Size = iced::Size::new(1280.0, 820.0);
 pub const MIN_WINDOW_SIZE: iced::Size = iced::Size::new(860.0, 560.0);
@@ -515,9 +517,17 @@ static SEARCH_PLACEHOLDER_WITH_SHORTCUT: LazyLock<String> = LazyLock::new(|| wit
 static BACK_TOOLTIP: LazyLock<String> = LazyLock::new(|| with_command_shortcut("Back", "["));
 static FORWARD_TOOLTIP: LazyLock<String> = LazyLock::new(|| with_command_shortcut("Forward", "]"));
 static RESCAN_TOOLTIP: LazyLock<String> = LazyLock::new(|| format!("Scan again  {RESCAN_SHORTCUT}"));
+const SUNBURST_NAME: &str = "Sunburst";
+const TREEMAP_NAME: &str = "Treemap";
+static SWITCH_TO_SUNBURST_TOOLTIP: LazyLock<String> = LazyLock::new(|| with_command_shortcut(SUNBURST_NAME, "T"));
+static SWITCH_TO_TREEMAP_TOOLTIP: LazyLock<String> = LazyLock::new(|| with_command_shortcut(TREEMAP_NAME, "T"));
 
 const NAV_ICON_SIZE: f32 = 16.0;
 const DISABLED_ICON_STRENGTH: f32 = 0.4;
+
+fn toolbar_icon_button<'a>(icon: Svg<'a, Theme>) -> button::Button<'a, Message> {
+    button(center(icon)).width(INNER_BUTTON_SIDE).height(INNER_BUTTON_SIDE).padding(0)
+}
 
 fn nav_icon_button<'a>(
     icon: fn(f32, Color) -> Svg<'a, Theme>,
@@ -526,13 +536,35 @@ fn nav_icon_button<'a>(
 ) -> Element<'a, Message> {
     let tint =
         if msg.is_some() { theme::TEXT } else { theme::mix(theme::PANEL_HI, theme::TEXT_DIM, DISABLED_ICON_STRENGTH) };
-    let button = button(center(icon(NAV_ICON_SIZE, tint)))
-        .width(INNER_BUTTON_SIDE)
-        .height(INNER_BUTTON_SIDE)
-        .padding(0)
-        .style(quiet_button_style(theme::TEXT))
-        .on_press_maybe(msg);
+    let button =
+        toolbar_icon_button(icon(NAV_ICON_SIZE, tint)).style(quiet_button_style(theme::TEXT)).on_press_maybe(msg);
     with_tooltip(button, tooltip_label)
+}
+
+const SHOWN_CHART_TINT: Color = Color::from_rgba(1.0, 1.0, 1.0, 0.10);
+
+fn chart_kind_button(kind: ChartKind, shown: ChartKind) -> Element<'static, Message> {
+    let is_shown = kind == shown;
+    let tint = if is_shown { theme::TEXT } else { theme::TEXT_DIM };
+    let (icon, name, switch_tooltip): (_, _, &'static str) = match kind {
+        ChartKind::Sunburst => (icon::sunburst_chart(NAV_ICON_SIZE, tint), SUNBURST_NAME, &SWITCH_TO_SUNBURST_TOOLTIP),
+        ChartKind::Treemap => (icon::treemap_chart(NAV_ICON_SIZE, tint), TREEMAP_NAME, &SWITCH_TO_TREEMAP_TOOLTIP),
+    };
+    let tooltip_label = if is_shown { name } else { switch_tooltip };
+    let button = toolbar_icon_button(icon)
+        .style(move |theme, status| {
+            let quiet = quiet_button_style(tint)(theme, status);
+            if is_shown { button::Style { background: Some(SHOWN_CHART_TINT.into()), ..quiet } } else { quiet }
+        })
+        .on_press_maybe((!is_shown).then_some(Message::ShowChart(kind)));
+    with_tooltip(button, tooltip_label)
+}
+
+fn chart_switch(b: &Browser) -> Element<'_, Message> {
+    let shown = b.chart.kind();
+    raised_group(
+        row![chart_kind_button(ChartKind::Sunburst, shown), chart_kind_button(ChartKind::Treemap, shown)].spacing(2),
+    )
 }
 
 fn toolbar(b: &Browser) -> Element<'_, Message> {
@@ -553,8 +585,10 @@ fn toolbar(b: &Browser) -> Element<'_, Message> {
         .width(Fill)
         .style(depth::well_input(FRAME_RADIUS));
 
-    let chart_side =
-        row![nav, path_bar(b)].spacing(8).align_y(Alignment::Center).width(Length::FillPortion(CHART_SIDE_PORTION));
+    let chart_side = row![nav, chart_switch(b), path_bar(b)]
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .width(Length::FillPortion(CHART_SIDE_PORTION));
     let list_side = container(row![rescan_button(), search].spacing(8).align_y(Alignment::Center))
         .id(TOOLBAR_LIST_SIDE_ID)
         .width(Length::FillPortion(LIST_SIDE_PORTION));
@@ -657,18 +691,28 @@ fn breadcrumbs_that_fit(b: &Browser, available_width: f32) -> Element<'_, Messag
 }
 
 fn chart_panel(b: &Browser) -> Element<'_, Message> {
-    let chart = canvas(Sunburst {
-        tree: &b.tree,
-        layout: &b.layout,
-        chart_cache: &b.chart_cache,
-        highlight_cache: &b.highlight_cache,
-        hovered: b.hovered,
-        selected: b.selected,
-        moving: b.animation.as_ref().map(ChartAnimation::current_frame),
-    })
-    .width(Fill)
-    .height(Fill);
+    let chart: Element<'_, Message> = match &b.chart {
+        Chart::Sunburst(layout) => chart_with_cursor_overlay(Sunburst {
+            tree: &b.tree,
+            layout,
+            chart_cache: &b.chart_cache,
+            highlight_cache: &b.highlight_cache,
+            hovered: b.hovered,
+            selected: b.selected,
+            moving: b.animation.as_ref().map(ChartAnimation::frame),
+        }),
+        Chart::Treemap(map) => chart_with_cursor_overlay(TreemapChart {
+            tree: &b.tree,
+            map,
+            chart_cache: &b.chart_cache,
+            highlight_cache: &b.highlight_cache,
+            hovered: b.hovered,
+            selected: b.selected,
+            moving: b.animation.as_ref().map(ChartAnimation::frame),
+        }),
+    };
 
+    let chart = sensor(chart).on_resize(Message::ChartMeasured);
     let chart_above_the_collector =
         column![chart, Space::new().height(COLLECTOR_FIXED_HEIGHT)].spacing(CHART_COLLECTOR_GAP);
     let collector_floating_over_the_chart =

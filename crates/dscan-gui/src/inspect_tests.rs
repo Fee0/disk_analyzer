@@ -11,6 +11,7 @@ use crate::app::test_util::{
 use crate::app::{App, Browser, Message, Notice, NoticeKind, Screen};
 use crate::iced_inspect as ui_inspect;
 use crate::{theme, view};
+use dscan_core::ChartKind;
 
 const VIEW: (f32, f32) = (view::DEFAULT_WINDOW_SIZE.width, view::DEFAULT_WINDOW_SIZE.height);
 const OUT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/iced-inspect");
@@ -88,19 +89,19 @@ fn chart_reveals_zooms_and_lets_collected_items_shrink_away() -> Result<(), Erro
     let _ = app.update(Message::Back);
     shoot_chart_animation(&mut app, "anim-zoom-out", TransitionKind::ZoomOut)?;
 
-    let size_before = on_screen(&app).layout.total;
+    let size_before = on_screen(&app).chart.total();
     let pictures = descend(&on_screen(&app).tree, &["Pictures"]);
     let _ = app.update(Message::Press(dscan_core::Segment::Node(pictures)));
     let _ = app.update(Message::CollectSelected);
     let b = on_screen(&app);
     assert_eq!(b.collector.items(), &[pictures]);
-    assert_eq!(b.layout.total, size_before - b.tree.size(pictures), "the chart leaves out what is collected");
-    assert!(b.layout.find(dscan_core::Segment::Node(pictures)).is_none(), "the collected folder has no arc");
+    assert_eq!(b.chart.total(), size_before - b.tree.size(pictures), "the chart leaves out what is collected");
+    assert!(!b.chart.shows(dscan_core::Segment::Node(pictures)), "the collected folder has no arc");
     assert!(b.list.rows.iter().all(|r| r.id != pictures), "nor a row in the list");
     shoot_chart_animation(&mut app, "anim-collect", TransitionKind::Morph)?;
 
     let _ = app.update(Message::Uncollect(pictures));
-    assert_eq!(on_screen(&app).layout.total, size_before, "uncollecting puts it back");
+    assert_eq!(on_screen(&app).chart.total(), size_before, "uncollecting puts it back");
     shoot_chart_animation(&mut app, "anim-uncollect", TransitionKind::Morph)?;
     Ok(())
 }
@@ -257,7 +258,7 @@ fn deep_path_bar_shows_root_ellipsis_and_last_folders_and_the_ellipsis_steps_int
             assert!(ui.find(hidden).is_err(), "{hidden} is folded into the ellipsis");
         }
         ui.click("…")?;
-        ui.into_messages().collect()
+        clicks_only(ui.into_messages())
     };
     let clients = descend(&on_screen(&app).tree, &chain[..2]);
     assert!(
@@ -829,6 +830,7 @@ fn clicks_only(msgs: impl Iterator<Item = Message>) -> Vec<Message> {
                 | Message::NoticeEnter
                 | Message::NoticeExit
                 | Message::Hover(_)
+                | Message::ChartMeasured(_)
         )
     })
     .collect()
@@ -1249,4 +1251,116 @@ fn the_selected_row_and_the_list_report_where_they_are_so_the_list_can_scroll_to
     let (list, row) = (with_id("scrollable", LIST_ID), with_id("container", SELECTED_ROW_ID));
     assert!(row.y > list.y + list.height, "the last of 80 rows lies below the view until the list scrolls: {row:?}");
     assert!(row.height > 0.0 && row.height < list.height);
+}
+
+fn let_the_chart_measure_itself(app: &mut App) {
+    let about_to_draw = iced::Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now()));
+    let msgs: Vec<Message> = {
+        let mut ui = sim(app);
+        let _ = ui.simulate([about_to_draw]);
+        ui.into_messages().collect()
+    };
+    for m in msgs {
+        let _ = app.update(m);
+    }
+}
+
+fn treemap_app(dir: &Path) -> App {
+    let mut app = browser_app(dir);
+    let _ = app.update(Message::ShowChart(ChartKind::Treemap));
+    let_the_chart_measure_itself(&mut app);
+    app
+}
+
+const SUNBURST_BUTTON: usize = 3;
+const TREEMAP_BUTTON: usize = 4;
+
+#[test]
+fn the_chart_switch_toggles_between_sunburst_and_treemap_for_every_result() -> Result<(), Error> {
+    use iced::keyboard::Key;
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = browser_app(dir.path());
+    let movies = descend(&on_screen(&app).tree, &["Movies"]);
+    let clip = descend(&on_screen(&app).tree, &["Movies", "2016"]);
+    let _ = app.update(Message::Navigate(movies));
+    let _ = app.update(Message::Press(dscan_core::Segment::Node(clip)));
+
+    let msgs: Vec<Message> = {
+        let mut ui = sim(&app);
+        let treemap_button = toolbar_icon_buttons_left_to_right(&mut ui)[TREEMAP_BUTTON];
+        ui_inspect::click_at(&mut ui, treemap_button.center());
+        ui.into_messages().collect()
+    };
+    assert!(msgs.iter().any(|m| matches!(m, Message::ShowChart(ChartKind::Treemap))), "{msgs:?}");
+    for m in msgs {
+        let _ = app.update(m);
+    }
+    let_the_chart_measure_itself(&mut app);
+    let b = on_screen(&app);
+    assert_eq!(b.chart.kind(), ChartKind::Treemap);
+    assert_eq!((b.focus, b.selected), (movies, Some(clip)), "switching keeps the folder and the selection");
+    assert!(b.chart.shows(dscan_core::Segment::Node(clip)), "the selected folder has a tile");
+    shoot_chart_animation(&mut app, "treemap-reveal", dscan_core::TransitionKind::Reveal)?;
+    {
+        let mut ui = sim(&app);
+        shoot(&mut ui, "toolbar-treemap-shown")?;
+        let sunburst_button = toolbar_icon_buttons_left_to_right(&mut ui)[SUNBURST_BUTTON];
+        ui_inspect::click_at(&mut ui, sunburst_button.center());
+        let msgs: Vec<Message> = ui.into_messages().collect();
+        assert!(msgs.iter().any(|m| matches!(m, Message::ShowChart(ChartKind::Sunburst))), "{msgs:?}");
+    }
+
+    key(&mut app, Key::Character("t".into()), true);
+    assert_eq!(on_screen(&app).chart.kind(), ChartKind::Sunburst, "Cmd-T switches back");
+    key(&mut app, Key::Character("t".into()), false);
+    assert_eq!(on_screen(&app).chart.kind(), ChartKind::Sunburst, "a plain T does nothing");
+
+    let _ = app.update(Message::GoHome);
+    let _ = app.update(Message::ShowChart(ChartKind::Treemap));
+    let _ = app.update(Message::ResumeParked(app.parked_newest_first[0].id));
+    assert_eq!(on_screen(&app).chart.kind(), ChartKind::Treemap, "a result picked up again shows the chosen chart");
+    Ok(())
+}
+
+#[test]
+fn inspect_treemap() -> Result<(), Error> {
+    use dscan_core::{Segment, TransitionKind};
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = treemap_app(dir.path());
+    finish_chart_animation(&mut app);
+    {
+        let mut ui = sim(&app);
+        println!("{}", ui_inspect::report(&mut ui, VIEW));
+        shoot(&mut ui, "treemap")?;
+        ui_inspect::hover(&mut ui, A_CHART_SEGMENT);
+        shoot(&mut ui, "treemap-tooltip")?;
+        let msgs: Vec<Message> = ui.into_messages().collect();
+        assert!(msgs.iter().any(|m| matches!(m, Message::Hover(Some(_)))), "hovering a tile hovers it: {msgs:?}");
+    }
+
+    let movies = descend(&on_screen(&app).tree, &["Movies"]);
+    let _ = app.update(Message::Hover(Some(Segment::Node(movies))));
+    let _ = app.update(Message::Press(Segment::Node(descend(&on_screen(&app).tree, &["Downloads"]))));
+    shoot(&mut sim(&app), "treemap-hover-and-selection")?;
+    let _ = app.update(Message::Deselect);
+
+    let _ = app.update(Message::Navigate(movies));
+    shoot_chart_animation(&mut app, "treemap-zoom-in", TransitionKind::ZoomIn)?;
+    shoot(&mut sim(&app), "treemap-movies")?;
+    let _ = app.update(Message::Back);
+    shoot_chart_animation(&mut app, "treemap-zoom-out", TransitionKind::ZoomOut)?;
+
+    let pictures = descend(&on_screen(&app).tree, &["Pictures"]);
+    let total_before = on_screen(&app).chart.total();
+    let _ = app.update(Message::Press(Segment::Node(pictures)));
+    let _ = app.update(Message::CollectSelected);
+    let b = on_screen(&app);
+    assert_eq!(b.chart.total(), total_before - b.tree.size(pictures), "the treemap leaves out what is collected");
+    assert!(!b.chart.shows(Segment::Node(pictures)), "the collected folder has no tile");
+    shoot_chart_animation(&mut app, "treemap-collect", TransitionKind::Morph)?;
+
+    let _ = app.update(Message::SearchChanged("img".into()));
+    deliver_search_result_without_its_thread(&mut app, "img");
+    shoot(&mut sim(&app), "treemap-search")?;
+    Ok(())
 }

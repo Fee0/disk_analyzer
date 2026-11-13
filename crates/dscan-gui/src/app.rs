@@ -5,13 +5,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use dscan_core::{
-    Accounting, CancelToken, DesktopError, Layout, LayoutParams, NodeId, PREVIEW_ACTION, Progress, ProgressSnapshot,
-    REVEAL_ACTION, Refusal, Removal, RemovalPlan, RemovalProgress, RemovalReport, RemovalStatus, ScanError,
-    ScanOptions, SearchResult, Segment, TRASH_NAME, Transition, Tree, Volume, desktop, format_size,
+    Accounting, CancelToken, Chart, ChartInput, ChartKind, DesktopError, NodeId, PREVIEW_ACTION, Progress,
+    ProgressSnapshot, REVEAL_ACTION, Refusal, Removal, RemovalPlan, RemovalProgress, RemovalReport, RemovalStatus,
+    ScanError, ScanOptions, SearchResult, Segment, TRASH_NAME, TransitionKind, Tree, Volume, desktop, format_size,
 };
 use iced::keyboard::{self, Key, key::Named};
 use iced::widget::canvas::Cache;
-use iced::{Point, Subscription, Task, event, mouse};
+use iced::{Point, Size, Subscription, Task, event, mouse};
 
 use crate::animation::{Advance, ChartAnimation};
 use crate::collector::Collector;
@@ -24,6 +24,7 @@ const LIST_ROW_NAME_MAX_CHARS: usize = 44;
 pub const MAX_LIST_ROWS: usize = 600;
 const DRAG_THRESHOLD: f32 = 4.0;
 pub const HOLD_TO_DELETE: Duration = Duration::from_secs(3);
+const AN_UNMEASURED_CHART_HAS_NO_ROOM: Size = Size::ZERO;
 const NOTICE_LIFETIME: Duration = Duration::from_secs(4);
 const HOLD_PROGRESS_REFRESH: Duration = Duration::from_millis(33);
 const SCAN_PROGRESS_REFRESH: Duration = Duration::from_millis(100);
@@ -80,6 +81,8 @@ pub struct App {
     pub error: Option<String>,
     pub parked_newest_first: Vec<Browser>,
     pub scans: Vec<ScanJob>,
+    chart_kind: ChartKind,
+    chart_size: Option<Size>,
     stepped_back_from_newest_parked: bool,
 }
 
@@ -169,7 +172,8 @@ pub struct Browser {
     pub focus: NodeId,
     history: Vec<NodeId>,
     forward: Vec<NodeId>,
-    pub layout: Layout,
+    pub chart: Chart,
+    chart_size: Option<Size>,
     pub chart_cache: Cache,
     pub highlight_cache: Cache,
     pub hovered: Option<Segment>,
@@ -246,6 +250,9 @@ pub enum Message {
     Preview,
     Reveal,
     DesktopActionFailed(String),
+    ShowChart(ChartKind),
+    ToggleChart,
+    ChartMeasured(Size),
     ForBrowser(BrowserId, Box<Message>),
 }
 
@@ -258,6 +265,8 @@ impl App {
             error: None,
             parked_newest_first: Vec::new(),
             scans: Vec::new(),
+            chart_kind: ChartKind::default(),
+            chart_size: None,
             stepped_back_from_newest_parked: false,
         };
         let load = Self::load_volumes();
@@ -421,9 +430,22 @@ impl App {
                     return self.start_scan(opts);
                 }
             }
+            Message::ToggleChart if matches!(self.screen, Screen::Browse(_)) => {
+                return self.show_chart(self.chart_kind.other());
+            }
+            Message::ShowChart(kind) => return self.show_chart(kind),
+            Message::ChartMeasured(size) => {
+                self.chart_size = Some(size);
+                return self.update_browser(Message::ChartMeasured(size));
+            }
             other => return self.update_browser(other),
         }
         Task::none()
+    }
+
+    fn show_chart(&mut self, kind: ChartKind) -> Task<Message> {
+        self.chart_kind = kind;
+        self.update_browser(Message::ShowChart(kind))
     }
 
     fn parked_position(&self, id: BrowserId) -> Option<usize> {
@@ -472,7 +494,7 @@ impl App {
             return Task::none();
         }
         let mut resumed = Box::new(self.parked_newest_first.remove(i));
-        let catch_up = resumed.resume();
+        let catch_up = resumed.resume(self.chart_kind, self.chart_size);
         self.screen = Screen::Browse(resumed);
         self.stepped_back_from_newest_parked = false;
         catch_up
@@ -481,7 +503,7 @@ impl App {
     fn open_or_park_scan_result(&mut self, tree: Tree, opts: ScanOptions) -> Task<Message> {
         self.drop_parked_results_superseded_by(&tree);
         let finished = format!("Finished scanning {}. Open it from the start page.", opts.display_name());
-        let browser = Browser::new(tree, opts);
+        let browser = Browser::new(tree, opts, self.chart_kind, self.chart_size);
         let notice = match &mut self.screen {
             Screen::Start if self.scans.is_empty() => {
                 self.screen = Screen::Browse(Box::new(browser.with_opening_reveal()));
@@ -515,7 +537,7 @@ impl App {
 }
 
 fn is_cmd_shortcut_a_text_field_has_no_use_for(key: &Key, modifiers: keyboard::Modifiers) -> bool {
-    modifiers.command() && matches!(key.as_ref(), Key::Character("f" | "r" | "[" | "]"))
+    modifiers.command() && matches!(key.as_ref(), Key::Character("f" | "r" | "t" | "[" | "]"))
 }
 
 fn as_on_a_latin_keyboard_without_caps_lock_or_shift(key: Key, pressed: keyboard::key::Physical) -> Key {
@@ -556,6 +578,7 @@ fn navigation_shortcut(key: Key<&str>, cmd: bool) -> Option<Message> {
         Key::Character("]") if cmd => Message::Forward,
         Key::Named(Named::F5) | Key::Named(Named::BrowserRefresh) => Message::Rescan,
         Key::Character("r") if cmd => Message::Rescan,
+        Key::Character("t") if cmd => Message::ToggleChart,
         _ => return None,
     })
 }
@@ -577,7 +600,7 @@ impl Drop for Browser {
 }
 
 impl Browser {
-    pub fn new(tree: Tree, opts: ScanOptions) -> Self {
+    pub fn new(tree: Tree, opts: ScanOptions, chart: ChartKind, chart_size: Option<Size>) -> Self {
         let root = tree.root();
         let mut b = Browser {
             id: next_id(),
@@ -586,7 +609,8 @@ impl Browser {
             focus: root,
             history: Vec::new(),
             forward: Vec::new(),
-            layout: Layout::default(),
+            chart: Chart::default(),
+            chart_size,
             chart_cache: Cache::new(),
             highlight_cache: Cache::new(),
             hovered: None,
@@ -607,13 +631,13 @@ impl Browser {
             notice_expires_at: None,
             notice_hovered: false,
         };
-        b.relayout();
+        b.install_chart(b.computed_chart(chart));
         b.sync_list();
         b
     }
 
     pub fn with_opening_reveal(mut self) -> Self {
-        self.animation = Some(ChartAnimation::new(Transition::reveal(&self.layout)));
+        self.animation = Some(ChartAnimation::new(self.chart.reveal()));
         self
     }
 
@@ -633,29 +657,50 @@ impl Browser {
         self.forward.iter().any(|&id| self.is_still_reachable_history_entry(id))
     }
 
-    fn computed_layout(&self) -> Layout {
-        dscan_core::sunburst(
-            &self.tree,
-            self.focus,
-            LayoutParams::default(),
-            self.search.as_deref(),
-            self.collector.exclusions(),
+    fn computed_chart(&self, kind: ChartKind) -> Chart {
+        let room = self.chart_size.unwrap_or(AN_UNMEASURED_CHART_HAS_NO_ROOM);
+        Chart::new(
+            kind,
+            ChartInput {
+                tree: &self.tree,
+                focus: self.focus,
+                size: (room.width, room.height),
+                search: self.search.as_deref(),
+                excluded: self.collector.exclusions(),
+            },
         )
     }
 
     fn relayout(&mut self) {
-        self.install_layout(self.computed_layout());
+        self.list.built_for = None;
+        self.install_chart(self.computed_chart(self.chart.kind()));
     }
 
     fn relayout_animated(&mut self) {
-        let layout = self.computed_layout();
-        self.animation = Some(ChartAnimation::new(Transition::between(&self.layout, &layout)));
-        self.install_layout(layout);
+        let next = self.computed_chart(self.chart.kind());
+        self.animation = Some(ChartAnimation::new(self.chart.transition_to(&next)));
+        self.list.built_for = None;
+        self.install_chart(next);
     }
 
-    fn install_layout(&mut self, layout: Layout) {
-        self.layout = layout;
-        self.list.built_for = None;
+    fn show_chart(&mut self, kind: ChartKind, size: Option<Size>) {
+        let measured_for_the_first_time = self.chart_size.is_none() && size.is_some();
+        let resized = size != self.chart_size;
+        self.chart_size = size;
+        if kind != self.chart.kind() {
+            self.hovered = None;
+            self.install_chart(self.computed_chart(kind));
+            self.animation = Some(ChartAnimation::new(self.chart.reveal()));
+        } else if resized && kind.depends_on_size() {
+            let revealing = self.animation.as_ref().is_some_and(|a| a.kind() == TransitionKind::Reveal);
+            self.install_chart(self.computed_chart(kind));
+            let reveal_at_the_measured_size = revealing || measured_for_the_first_time;
+            self.animation = reveal_at_the_measured_size.then(|| ChartAnimation::new(self.chart.reveal()));
+        }
+    }
+
+    fn install_chart(&mut self, chart: Chart) {
+        self.chart = chart;
         self.chart_cache.clear();
         self.highlight_cache.clear();
     }
@@ -732,7 +777,7 @@ impl Browser {
 
     fn select_and_reveal(&mut self, id: NodeId) {
         self.selected = Some(id);
-        let visible = self.tree.is_strict_ancestor_of(self.focus, id) && self.layout.find(Segment::Node(id)).is_some();
+        let visible = self.tree.is_strict_ancestor_of(self.focus, id) && self.chart.shows(Segment::Node(id));
         if !visible && let Some(p) = self.tree.parent(id) {
             self.set_focus(p, true);
         }
@@ -1042,7 +1087,8 @@ impl Browser {
         }
     }
 
-    fn resume(&mut self) -> Task<Message> {
+    fn resume(&mut self, chart: ChartKind, chart_size: Option<Size>) -> Task<Message> {
+        self.show_chart(chart, chart_size);
         self.updating(|b| {
             if b.notice.is_some() {
                 b.notice_expires_at = Some(Instant::now() + NOTICE_LIFETIME);
@@ -1094,6 +1140,8 @@ impl Browser {
             Message::Activate(Segment::Node(id)) => self.activate(id),
             Message::Activate(Segment::Small { parent, .. }) => self.set_focus(parent, true),
             Message::GoUp => self.go_up(),
+            Message::ShowChart(kind) => self.show_chart(kind, self.chart_size),
+            Message::ChartMeasured(size) => self.show_chart(self.chart.kind(), Some(size)),
             Message::Navigate(id) => self.set_focus(id, true),
             Message::Back => self.back(),
             Message::Forward => self.forward(),
@@ -1235,7 +1283,7 @@ pub(crate) mod test_util {
     }
 
     pub fn scanned(opts: ScanOptions) -> Browser {
-        Browser::new(scan_result(&opts).unwrap(), opts)
+        Browser::new(scan_result(&opts).unwrap(), opts, ChartKind::default(), None)
     }
 
     pub fn descend(tree: &Tree, names: &[&str]) -> NodeId {

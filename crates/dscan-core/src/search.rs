@@ -27,6 +27,10 @@ impl SearchResult {
     }
 }
 
+pub(crate) fn is_relevant_under(search: Option<&SearchResult>, id: NodeId) -> bool {
+    search.is_none_or(|s| s.is_relevant(id))
+}
+
 #[inline]
 fn contains_ascii_ignore_case(hay: &[u8], lowercase_needle: &[u8]) -> bool {
     if lowercase_needle.len() > hay.len() {

@@ -4,20 +4,20 @@ use crate::kind::Kind;
 use crate::layout::{Arc, Layout, MAX_DEPTH, Segment};
 use crate::tree::NodeId;
 
-const RING_REVEAL_DELAY: f64 = 0.07;
+const LAYER_REVEAL_DELAY: f64 = 0.07;
 const REVEAL_START_SCALE: f64 = 0.7;
 const NEGLIGIBLE: f64 = 1e-9;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ArcStyle {
+pub struct SegmentStyle {
     pub kind: Kind,
     pub branch: u32,
     pub relevant: bool,
 }
 
-impl ArcStyle {
+impl SegmentStyle {
     fn of(arc: &Arc) -> Self {
-        ArcStyle { kind: arc.kind, branch: arc.branch, relevant: arc.relevant }
+        SegmentStyle { kind: arc.kind, branch: arc.branch, relevant: arc.relevant }
     }
 }
 
@@ -27,8 +27,8 @@ pub struct FrameArc {
     pub outer_ring: f64,
     pub start: f64,
     pub end: f64,
-    pub style_before: ArcStyle,
-    pub style_after: ArcStyle,
+    pub style_before: SegmentStyle,
+    pub style_after: SegmentStyle,
 }
 
 impl FrameArc {
@@ -37,7 +37,7 @@ impl FrameArc {
     }
 
     fn resting(ring: usize, arc: &Arc) -> Self {
-        let style = ArcStyle::of(arc);
+        let style = SegmentStyle::of(arc);
         FrameArc {
             inner_ring: ring as f64,
             outer_ring: ring as f64 + 1.0,
@@ -103,7 +103,7 @@ impl Transition {
     }
 
     pub fn total(&self, progress: f64) -> u64 {
-        lerp(self.total_before as f64, self.total_after as f64, progress.clamp(0.0, 1.0)).round() as u64
+        total_at(self.total_before, self.total_after, progress)
     }
 
     pub fn kind(&self) -> TransitionKind {
@@ -129,13 +129,34 @@ fn lerp(a: f64, b: f64, t: f64) -> f64 {
     a + (b - a) * t
 }
 
+pub(crate) fn total_at(before: u64, after: u64, progress: f64) -> u64 {
+    lerp(before as f64, after as f64, progress.clamp(0.0, 1.0)).round() as u64
+}
+
+pub(crate) fn reveal_scale(t: f64) -> f64 {
+    lerp(REVEAL_START_SCALE, 1.0, t)
+}
+
+pub(crate) struct StaggeredReveal {
+    layer_duration: f64,
+}
+
+impl StaggeredReveal {
+    pub(crate) fn up_to(deepest_layer: usize) -> Self {
+        StaggeredReveal { layer_duration: (1.0 - LAYER_REVEAL_DELAY * deepest_layer as f64).max(NEGLIGIBLE) }
+    }
+
+    pub(crate) fn progress(&self, t: f64, layer: usize) -> f64 {
+        ((t - layer as f64 * LAYER_REVEAL_DELAY) / self.layer_duration).clamp(0.0, 1.0)
+    }
+}
+
 fn reveal_frame(layout: &Layout, t: f64) -> Vec<FrameArc> {
-    let last_ring_delay = RING_REVEAL_DELAY * layout.rings.len().saturating_sub(1) as f64;
-    let ring_duration = (1.0 - last_ring_delay).max(NEGLIGIBLE);
-    let scale = lerp(REVEAL_START_SCALE, 1.0, t);
+    let stagger = StaggeredReveal::up_to(layout.rings.len().saturating_sub(1));
+    let scale = reveal_scale(t);
     let mut out = Vec::new();
     for (ring, arcs) in layout.rings.iter().enumerate() {
-        let swept = ((t - ring as f64 * RING_REVEAL_DELAY) / ring_duration).clamp(0.0, 1.0);
+        let swept = stagger.progress(t, ring);
         out.extend(arcs.iter().map(|a| FrameArc {
             inner_ring: ring as f64 * scale,
             outer_ring: (ring as f64 + 1.0) * scale,
@@ -161,8 +182,8 @@ fn key(segment: Segment) -> Key {
     }
 }
 
-fn styles_by_key(layout: &Layout) -> HashMap<Key, ArcStyle> {
-    layout.rings.iter().flatten().map(|a| (key(a.segment), ArcStyle::of(a))).collect()
+fn styles_by_key(layout: &Layout) -> HashMap<Key, SegmentStyle> {
+    layout.rings.iter().flatten().map(|a| (key(a.segment), SegmentStyle::of(a))).collect()
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -176,8 +197,8 @@ struct PlacedArc {
     ring: f64,
     start: f64,
     end: f64,
-    style_before: ArcStyle,
-    style_after: ArcStyle,
+    style_before: SegmentStyle,
+    style_after: SegmentStyle,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -204,7 +225,7 @@ impl Zoom {
         };
         let (styles_from, styles_to) = (styles_by_key(from), styles_by_key(to));
         let placed = |ring: f64, start: f64, end: f64, arc: &Arc| {
-            let own = ArcStyle::of(arc);
+            let own = SegmentStyle::of(arc);
             let k = key(arc.segment);
             PlacedArc {
                 ring,
@@ -285,8 +306,8 @@ enum Travel {
 #[derive(Clone, Copy, Debug)]
 struct MorphArc {
     travel: Travel,
-    style_before: ArcStyle,
-    style_after: ArcStyle,
+    style_before: SegmentStyle,
+    style_after: SegmentStyle,
 }
 
 fn bounds(a: &Arc) -> Span {
@@ -357,7 +378,7 @@ fn point_where_a_lone_arc_leaves_or_arrives(
 
 fn lone_arc(own: &Side, other: &Side, i: usize, parent_ring: Option<(&Side, &Side)>, lone: Lone) -> MorphArc {
     let arc = &own.arcs[i];
-    let style = ArcStyle::of(arc);
+    let style = SegmentStyle::of(arc);
     let parent = own.parents[i].zip(parent_ring);
     let parent_counterpart = parent.and_then(|(p, (own_parents, other_parents))| {
         own_parents.counterpart_index(p, other_parents).map(|k| &other_parents.arcs[k])
@@ -391,8 +412,8 @@ fn morph(from: &Layout, to: &Layout) -> Vec<Vec<MorphArc>> {
                     new.slots[j] = slots.len();
                     MorphArc {
                         travel: Travel::Between { from: bounds(&old.arcs[i]), to: bounds(&new.arcs[j]) },
-                        style_before: ArcStyle::of(&old.arcs[i]),
-                        style_after: ArcStyle::of(&new.arcs[j]),
+                        style_before: SegmentStyle::of(&old.arcs[i]),
+                        style_after: SegmentStyle::of(&new.arcs[j]),
                     }
                 }
                 None => lone_arc(&old, &new, i, parent_ring.as_ref().map(|(o, n)| (o, n)), Lone::Leaving),
