@@ -147,7 +147,6 @@ iced-ui-inspect skill; keep it as shipped.
 - Tests stay inside a temp dir: never the real Trash, and never launching
   other apps (assert that preview or reveal *messages* are sent; don't run them).
 - Performance-sensitive paths are the scan walk, `tree::build`, search and
-  chart layout (sunburst and treemap). Read `docs/scan-performance.md` first,
-  and measure with `examples/scan.rs` before and after: the whole-disk scan is
-  bound by APFS metadata I/O, and many obvious tweaks were measured there
-  without effect.
+  chart layout (sunburst and treemap). Measure with `examples/scan.rs` before
+  and after: the whole-disk scan is bound by APFS metadata I/O, and many
+  obvious tweaks were measured there without effect.
