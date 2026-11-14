@@ -32,6 +32,7 @@ pub(super) fn entry_with_unreadable_attributes(name: &[u8], device: DeviceId) ->
         hard_link_id: None,
         shared_data_stream_id: None,
         shared_blocks: SharedBlocks::NONE_KNOWN,
+        modified: None,
     }
 }
 

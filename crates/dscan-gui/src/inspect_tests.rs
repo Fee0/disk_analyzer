@@ -1446,3 +1446,111 @@ fn inspect_icicle() -> Result<(), Error> {
     shoot(&mut sim(&app), "icicle-search")?;
     Ok(())
 }
+
+const COLOR_BY_AGE_BUTTON: usize = 6;
+const DAY: std::time::Duration = std::time::Duration::from_secs(86_400);
+
+fn modified_days_ago(path: &Path, days: u32) {
+    let file = std::fs::File::options().write(true).open(path).unwrap();
+    file.set_modified(std::time::SystemTime::now() - DAY * days).unwrap();
+}
+
+fn dated_fixture(root: &Path) {
+    fixture(root);
+    let days_ago = [
+        ("Movies/2015/IMG_7114.MOV", 3300),
+        ("Movies/2015/IMG_0818.MOV", 3300),
+        ("Movies/2015/IMG_9410.MOV", 3290),
+        ("Movies/2016/clip.mp4", 2900),
+        ("Pictures/a.jpg", 1100),
+        ("Pictures/b.png", 1000),
+        ("Pictures/raw/c.dng", 400),
+        ("Music/song.mp3", 600),
+        ("Code/proj/src/main.rs", 2),
+        ("Code/proj/target/debug/app", 9),
+        ("Downloads/installer.dmg", 100),
+        ("Downloads/archive.zip", 250),
+        ("Documents/report.pdf", 1400),
+        ("notes.txt", 0),
+    ];
+    for (relative, days) in days_ago {
+        modified_days_ago(&root.join(relative), days);
+    }
+}
+
+fn count_ages_without_their_thread(app: &mut App) {
+    let b = on_screen_mut(app);
+    b.ages = Some(dscan_core::age_breakdown(&b.tree, b.focus, b.collector.exclusions()));
+}
+
+#[test]
+fn inspect_age_colors() -> Result<(), Error> {
+    use dscan_core::{AgeBucket, ColorBy, TransitionKind};
+    let dir = tempfile::tempdir().unwrap();
+    dated_fixture(dir.path());
+    let mut app = app_showing(scanned_folder(dir.path()));
+    let_the_chart_measure_itself(&mut app);
+
+    let pressed = {
+        let mut ui = sim(&app);
+        let color_by_age = toolbar_icon_buttons_left_to_right(&mut ui)[COLOR_BY_AGE_BUTTON];
+        ui_inspect::hover(&mut ui, color_by_age.center());
+        shoot(&mut ui, "age-toolbar-tooltip")?;
+        ui_inspect::click_at(&mut ui, color_by_age.center());
+        clicks_only(ui.into_messages())
+    };
+    assert!(
+        matches!(pressed[..], [Message::ColorBy(ColorBy::Age)]),
+        "the clock switches the colors to ages: {pressed:?}"
+    );
+    let _ = app.update(Message::ColorBy(ColorBy::Age));
+    count_ages_without_their_thread(&mut app);
+    shoot_chart_animation(&mut app, "age-recolor", TransitionKind::Morph)?;
+    let_the_chart_measure_itself(&mut app);
+    {
+        let mut ui = sim(&app);
+        println!("{}", ui_inspect::report(&mut ui, VIEW));
+        shoot(&mut ui, "age-sunburst")?;
+        ui_inspect::hover(&mut ui, A_CHART_SEGMENT);
+        shoot(&mut ui, "age-sunburst-tooltip")?;
+    }
+
+    let b = on_screen(&app);
+    let ages = b.ages.expect("the ages are counted");
+    assert_eq!(ages.total(), b.chart.total(), "the strip accounts for every byte in the chart");
+    assert!(ages.bytes(AgeBucket::FiveYearsOrMore) > 0 && ages.bytes(AgeBucket::UnderAMonth) > 0);
+
+    let chosen = {
+        let mut ui = sim(&app);
+        ui.click("2\u{2013}5 years")?;
+        clicks_only(ui.into_messages())
+    };
+    assert!(
+        matches!(chosen[..], [Message::ShowAgesFrom(Some(AgeBucket::UnderFiveYears))]),
+        "a bucket dims everything newer than it: {chosen:?}"
+    );
+    let _ = app.update(Message::ShowAgesFrom(Some(AgeBucket::UnderFiveYears)));
+    shoot_chart_animation(&mut app, "age-dim-newer", TransitionKind::Morph)?;
+    shoot(&mut sim(&app), "age-older-than-2-years")?;
+    let movies = descend(&on_screen(&app).tree, &["Movies"]);
+    let notes = descend(&on_screen(&app).tree, &["notes.txt"]);
+    let dscan_core::Chart::Sunburst(layout) = &on_screen(&app).chart else { panic!("a sunburst") };
+    let lit = |id| layout.find(dscan_core::Segment::Node(id)).map(|(_, arc)| arc.relevant);
+    assert_eq!(lit(movies), Some(true), "years-old movies stay lit");
+    assert_eq!(lit(notes), Some(false), "today's notes are dimmed");
+
+    let _ = app.update(Message::ShowChart(ChartKind::Icicle));
+    finish_chart_animation(&mut app);
+    shoot(&mut sim(&app), "age-icicle")?;
+    let _ = app.update(Message::ShowChart(ChartKind::Treemap));
+    let_the_chart_measure_itself(&mut app);
+    finish_chart_animation(&mut app);
+    shoot(&mut sim(&app), "age-treemap")?;
+
+    let _ = app.update(Message::ColorBy(ColorBy::Kind));
+    let b = on_screen(&app);
+    assert_eq!(b.aged_at_least, None, "coloring by type again shows every age");
+    let mut ui = sim(&app);
+    assert!(ui.find("2\u{2013}5 years").is_err(), "the age strip leaves with the age colors");
+    Ok(())
+}

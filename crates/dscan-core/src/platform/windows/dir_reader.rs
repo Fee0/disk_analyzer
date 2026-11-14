@@ -63,6 +63,7 @@ fn entry<'a>(record: &Record<'_>, name: &'a str, volume: DeviceId) -> DirEntry<'
         hard_link_id: record.hard_link_id(),
         shared_data_stream_id: None,
         shared_blocks: SharedBlocks::NONE_KNOWN,
+        modified: record.modified(),
     }
 }
 

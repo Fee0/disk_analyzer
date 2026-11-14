@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use crate::age::AgeBucket;
 use crate::kind::Kind;
 use crate::layout::{Arc, Layout, MAX_DEPTH, Segment};
 use crate::tree::NodeId;
@@ -11,13 +12,14 @@ const NEGLIGIBLE: f64 = 1e-9;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SegmentStyle {
     pub kind: Kind,
+    pub shown_age: Option<AgeBucket>,
     pub branch: u32,
     pub relevant: bool,
 }
 
 impl SegmentStyle {
     pub fn of(arc: &Arc) -> Self {
-        SegmentStyle { kind: arc.kind, branch: arc.branch, relevant: arc.relevant }
+        SegmentStyle { kind: arc.kind, shown_age: arc.shown_age, branch: arc.branch, relevant: arc.relevant }
     }
 }
 
@@ -466,6 +468,7 @@ mod tests {
     use super::*;
     use crate::exclusions::Exclusions;
     use crate::layout::{LayoutParams, partition};
+    use crate::paint::Paint;
     use crate::tree::Tree;
     use crate::tree::test_util::{T::*, descend, tree};
 
@@ -481,7 +484,7 @@ mod tests {
     }
 
     fn layout(t: &Tree, focus: NodeId, excluded: &[NodeId]) -> Layout {
-        partition(t, focus, SHOW_EVERY_ARC, None, &Exclusions::new(t, excluded))
+        partition(t, focus, SHOW_EVERY_ARC, Paint::default(), &Exclusions::new(t, excluded))
     }
 
     fn assert_same_picture(actual: &[FrameArc], expected: &[FrameArc], what: &str) {

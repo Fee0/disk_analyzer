@@ -9,6 +9,7 @@ use rustc_hash::FxHashSet;
 
 mod shared_blocks;
 
+use crate::age::Day;
 use crate::hidden;
 use crate::kind::Kind;
 use crate::platform::{Current, DeviceId, DirEntry, EntryType, Platform, ScanBoundaries, ScanExtent};
@@ -285,6 +286,7 @@ pub fn scan(opts: &ScanOptions, progress: &Progress, cancel: &CancelToken) -> Re
         duration: started.elapsed().saturating_sub(cancel.paused_for()),
         hidden,
         purgeable,
+        scanned_on: Day::today(),
     };
     let synthetic: Vec<Synthetic> = [
         Synthetic { name: hidden::PURGEABLE_SPACE_NAME, kind: Kind::Purgeable, size: purgeable },
@@ -324,7 +326,7 @@ fn scan_dir(ctx: &Ctx<'_>, path: Vec<u8>, name: Box<[u8]>, dev: DeviceId, depth:
     let res = Current::read_dir(path, |e| match e.entry_type {
         None => {
             ctx.record_error();
-            node.push_file(e.name, Kind::Other, flags::UNREADABLE, 0);
+            node.push_file(e.name, Kind::Other, flags::UNREADABLE, 0, None);
         }
         Some(EntryType::Directory) => subdirs.push((e.name.into(), e.device)),
         Some(EntryType::File | EntryType::Symlink) => {
@@ -336,7 +338,7 @@ fn scan_dir(ctx: &Ctx<'_>, path: Vec<u8>, name: Box<[u8]>, dev: DeviceId, depth:
                 Kind::of_file(e.name)
             };
             file_bytes += alloc;
-            node.push_file(e.name, kind, fl, alloc);
+            node.push_file(e.name, kind, fl, alloc, e.modified);
         }
     });
     match res {
@@ -384,10 +386,31 @@ fn subdirs_to_descend(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tree::test_util::{descend, scan_folder};
+    use crate::tree::test_util::{descend, modified_on, scan_folder};
 
     fn find(t: &Tree, path: &str) -> crate::NodeId {
         descend(t, &path.split('/').collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn the_scan_reads_each_file_s_modification_day_and_dates_a_folder_by_its_newest_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        std::fs::create_dir_all(r.join("a")).unwrap();
+        for name in ["a/old.txt", "a/new.txt", "top.txt"] {
+            std::fs::write(r.join(name), b"x").unwrap();
+        }
+        modified_on(&r.join("a/old.txt"), 11_323);
+        modified_on(&r.join("a/new.txt"), 19_000);
+        modified_on(&r.join("top.txt"), 15_000);
+        let t = scan_folder(r);
+        let day = |path: &str| t.newest_change(find(&t, path)).map(Day::days_since_1970);
+        assert_eq!(day("a/old.txt"), Some(11_323));
+        assert_eq!(day("a/new.txt"), Some(19_000));
+        assert_eq!(day("a"), Some(19_000), "a folder is as new as its newest file");
+        assert_eq!(t.newest_change(t.root()).map(Day::days_since_1970), Some(19_000));
+        let days_since_the_scan = t.stats.scanned_on.days_until(Day::today());
+        assert!(days_since_the_scan <= 1, "ages count from the day of the scan, even one that ran past midnight");
     }
 
     #[test]

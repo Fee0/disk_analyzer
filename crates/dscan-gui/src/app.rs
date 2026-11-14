@@ -5,9 +5,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use dscan_core::{
-    Accounting, CancelToken, Chart, ChartInput, ChartKind, DesktopError, NodeId, PREVIEW_ACTION, Progress,
-    ProgressSnapshot, REVEAL_ACTION, Refusal, Removal, RemovalPlan, RemovalProgress, RemovalReport, RemovalStatus,
-    ScanError, ScanOptions, SearchResult, Segment, TRASH_NAME, TransitionKind, Tree, Volume, desktop, format_size,
+    Accounting, AgeBreakdown, AgeBucket, CancelToken, Chart, ChartInput, ChartKind, ColorBy, DesktopError, NodeId,
+    PREVIEW_ACTION, Paint, Progress, ProgressSnapshot, REVEAL_ACTION, Refusal, Removal, RemovalPlan, RemovalProgress,
+    RemovalReport, RemovalStatus, ScanError, ScanOptions, SearchResult, Segment, TRASH_NAME, TransitionKind, Tree,
+    Volume, desktop, format_size,
 };
 use iced::keyboard::{self, Key, key::Named};
 use iced::widget::canvas::Cache;
@@ -82,6 +83,7 @@ pub struct App {
     pub parked_newest_first: Vec<Browser>,
     pub scans: Vec<ScanJob>,
     chart_kind: ChartKind,
+    color_by: ColorBy,
     chart_size: Option<Size>,
     stepped_back_from_newest_parked: bool,
 }
@@ -183,6 +185,11 @@ pub struct Browser {
     search_status: SearchStatus,
     search_cancel: CancelToken,
     pub search: Option<Arc<SearchResult>>,
+    pub color_by: ColorBy,
+    pub aged_at_least: Option<AgeBucket>,
+    pub ages: Option<AgeBreakdown>,
+    ages_due: bool,
+    ages_gen: u64,
     pub list: ListView,
     pub collector: Collector,
     pub animation: Option<ChartAnimation>,
@@ -252,6 +259,9 @@ pub enum Message {
     DesktopActionFailed(String),
     ShowChart(ChartKind),
     NextChart,
+    ColorBy(ColorBy),
+    ShowAgesFrom(Option<AgeBucket>),
+    AgesCounted { generation: u64, ages: Option<AgeBreakdown> },
     ChartMeasured(Size),
     ForBrowser(BrowserId, Box<Message>),
 }
@@ -266,6 +276,7 @@ impl App {
             parked_newest_first: Vec::new(),
             scans: Vec::new(),
             chart_kind: ChartKind::default(),
+            color_by: ColorBy::default(),
             chart_size: None,
             stepped_back_from_newest_parked: false,
         };
@@ -434,6 +445,10 @@ impl App {
                 return self.show_chart(self.chart_kind.next());
             }
             Message::ShowChart(kind) => return self.show_chart(kind),
+            Message::ColorBy(color_by) => {
+                self.color_by = color_by;
+                return self.update_browser(Message::ColorBy(color_by));
+            }
             Message::ChartMeasured(size) => {
                 self.chart_size = Some(size);
                 return self.update_browser(Message::ChartMeasured(size));
@@ -494,7 +509,7 @@ impl App {
             return Task::none();
         }
         let mut resumed = Box::new(self.parked_newest_first.remove(i));
-        let catch_up = resumed.resume(self.chart_kind, self.chart_size);
+        let catch_up = resumed.resume(self.chart_kind, self.color_by, self.chart_size);
         self.screen = Screen::Browse(resumed);
         self.stepped_back_from_newest_parked = false;
         catch_up
@@ -503,7 +518,7 @@ impl App {
     fn open_or_park_scan_result(&mut self, tree: Tree, opts: ScanOptions) -> Task<Message> {
         self.drop_parked_results_superseded_by(&tree);
         let finished = format!("Finished scanning {}. Open it from the start page.", opts.display_name());
-        let browser = Browser::new(tree, opts, self.chart_kind, self.chart_size);
+        let browser = Browser::new(tree, opts, self.chart_kind, self.color_by, self.chart_size);
         let notice = match &mut self.screen {
             Screen::Start if self.scans.is_empty() => {
                 self.screen = Screen::Browse(Box::new(browser.with_opening_reveal()));
@@ -600,7 +615,7 @@ impl Drop for Browser {
 }
 
 impl Browser {
-    pub fn new(tree: Tree, opts: ScanOptions, chart: ChartKind, chart_size: Option<Size>) -> Self {
+    pub fn new(tree: Tree, opts: ScanOptions, chart: ChartKind, color_by: ColorBy, chart_size: Option<Size>) -> Self {
         let root = tree.root();
         let mut b = Browser {
             id: next_id(),
@@ -620,6 +635,11 @@ impl Browser {
             search_status: SearchStatus::Shown,
             search_cancel: CancelToken::default(),
             search: None,
+            color_by,
+            aged_at_least: None,
+            ages: None,
+            ages_due: true,
+            ages_gen: 0,
             list: ListView::default(),
             collector: Collector::default(),
             animation: None,
@@ -665,7 +685,11 @@ impl Browser {
                 tree: &self.tree,
                 focus: self.focus,
                 size: (room.width, room.height),
-                search: self.search.as_deref(),
+                paint: Paint {
+                    color_by: self.color_by,
+                    search: self.search.as_deref(),
+                    aged_at_least: self.aged_at_least,
+                },
                 excluded: self.collector.exclusions(),
             },
         )
@@ -681,6 +705,37 @@ impl Browser {
         self.animation = Some(ChartAnimation::new(self.chart.transition_to(&next)));
         self.list.built_for = None;
         self.install_chart(next);
+    }
+
+    fn set_color_by(&mut self, color_by: ColorBy, animated: bool) {
+        if color_by == self.color_by {
+            return;
+        }
+        self.color_by = color_by;
+        if color_by == ColorBy::Kind {
+            self.aged_at_least = None;
+        }
+        if animated { self.relayout_animated() } else { self.relayout() }
+    }
+
+    fn show_ages_from(&mut self, oldest: Option<AgeBucket>) {
+        if oldest != self.aged_at_least {
+            self.aged_at_least = oldest;
+            self.relayout_animated();
+        }
+    }
+
+    fn count_ages_when_due(&mut self) -> Task<Message> {
+        if !self.ages_due || self.color_by != ColorBy::Age {
+            return Task::none();
+        }
+        self.ages_due = false;
+        self.ages_gen += 1;
+        let generation = self.ages_gen;
+        let (tree, focus, excluded) = (Arc::clone(&self.tree), self.focus, self.collector.exclusions().clone());
+        Task::perform(off_thread(move || dscan_core::age_breakdown(&tree, focus, &excluded)), move |ages| {
+            Message::AgesCounted { generation, ages: ages.ok() }
+        })
     }
 
     fn show_chart(&mut self, kind: ChartKind, size: Option<Size>) {
@@ -773,6 +828,7 @@ impl Browser {
             self.selected = None;
         }
         self.hovered = None;
+        self.ages_due = true;
         self.relayout_animated();
     }
 
@@ -941,6 +997,7 @@ impl Browser {
             self.selected = None;
         }
         self.hovered = None;
+        self.ages_due = true;
         self.relayout_animated();
     }
 
@@ -1028,6 +1085,7 @@ impl Browser {
         self.search_cancel.cancel();
         let Some(tree) = Arc::get_mut(&mut self.tree) else { return Task::none() };
         report.apply_to(tree);
+        self.ages_due = true;
         self.removal = None;
         self.collector.prune(&self.tree);
         let items = items_phrase(report.removed());
@@ -1088,8 +1146,9 @@ impl Browser {
         }
     }
 
-    fn resume(&mut self, chart: ChartKind, chart_size: Option<Size>) -> Task<Message> {
+    fn resume(&mut self, chart: ChartKind, color_by: ColorBy, chart_size: Option<Size>) -> Task<Message> {
         self.show_chart(chart, chart_size);
+        self.set_color_by(color_by, false);
         self.updating(|b| {
             if b.notice.is_some() {
                 b.notice_expires_at = Some(Instant::now() + NOTICE_LIFETIME);
@@ -1106,6 +1165,7 @@ impl Browser {
         let deadline_before = self.notice_expires_at;
         let task = change(self);
         let task = Task::batch([task, self.apply_finished_removal()]);
+        let task = Task::batch([task, self.count_ages_when_due()]);
         if (self.hovered, self.selected) != before {
             self.highlight_cache.clear();
         }
@@ -1142,6 +1202,9 @@ impl Browser {
             Message::Activate(Segment::Small { parent, .. }) => self.set_focus(parent, true),
             Message::GoUp => self.go_up(),
             Message::ShowChart(kind) => self.show_chart(kind, self.chart_size),
+            Message::ColorBy(color_by) => self.set_color_by(color_by, true),
+            Message::ShowAgesFrom(oldest) => self.show_ages_from(oldest),
+            Message::AgesCounted { generation, ages } if generation == self.ages_gen => self.ages = ages,
             Message::ChartMeasured(size) => self.show_chart(self.chart.kind(), Some(size)),
             Message::Navigate(id) => self.set_focus(id, true),
             Message::Back => self.back(),
@@ -1284,7 +1347,7 @@ pub(crate) mod test_util {
     }
 
     pub fn scanned(opts: ScanOptions) -> Browser {
-        Browser::new(scan_result(&opts).unwrap(), opts, ChartKind::default(), None)
+        Browser::new(scan_result(&opts).unwrap(), opts, ChartKind::default(), ColorBy::default(), None)
     }
 
     pub fn descend(tree: &Tree, names: &[&str]) -> NodeId {

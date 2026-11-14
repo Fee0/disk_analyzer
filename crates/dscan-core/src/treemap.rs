@@ -1,8 +1,9 @@
+use crate::age::AgeBucket;
 use crate::chart_geometry::ChartPoint;
 use crate::exclusions::Exclusions;
 use crate::kind::Kind;
 use crate::layout::{Piece, Segment, SmallItems};
-use crate::search::{SearchResult, is_relevant_under};
+use crate::paint::Paint;
 use crate::tree::{NodeId, Tree};
 
 const FOCUS_BAR_HEIGHT: f32 = 30.0;
@@ -111,6 +112,7 @@ pub struct Tile {
     pub depth: usize,
     pub size: u64,
     pub kind: Kind,
+    pub shown_age: Option<AgeBucket>,
     pub branch: u32,
     pub relevant: bool,
     pub(crate) parent: Option<usize>,
@@ -173,12 +175,12 @@ pub fn treemap(
     tree: &Tree,
     focus: NodeId,
     (width, height): (f32, f32),
-    search: Option<&SearchResult>,
+    paint: Paint<'_>,
     excluded: &Exclusions,
 ) -> Treemap {
     let FocusBarAbove { focus_bar, area } = FocusBarAbove::fitting(width, height);
     let mut map = Treemap { focus, total: excluded.size(tree, focus), focus_bar, area, tiles: Vec::new() };
-    let mut tiler = Tiler { tree, search, excluded, tiles: Vec::new() };
+    let mut tiler = Tiler { tree, paint, excluded, tiles: Vec::new() };
     tiler.place_children(focus, map.area, 0, None, None);
     map.tiles = tiler.tiles;
     map
@@ -186,18 +188,18 @@ pub fn treemap(
 
 struct Tiler<'a> {
     tree: &'a Tree,
-    search: Option<&'a SearchResult>,
+    paint: Paint<'a>,
     excluded: &'a Exclusions,
     tiles: Vec<Tile>,
 }
 
 impl Tiler<'_> {
     fn is_relevant(&self, id: NodeId) -> bool {
-        is_relevant_under(self.search, id)
+        self.paint.lights(self.tree, id)
     }
 
     fn piece(&self, id: NodeId, size: u64) -> Piece {
-        Piece { segment: Segment::Node(id), size, kind: self.tree.node(id).kind(), relevant: self.is_relevant(id) }
+        Piece::of_node(self.tree, id, size, &self.paint)
     }
 
     fn pieces(&self, folder: NodeId, content_area: f64, is_the_focus: bool) -> Vec<Piece> {
@@ -215,12 +217,12 @@ impl Tiler<'_> {
             if small.is_empty() && size as f64 * area_per_byte >= SMALLEST_TILE_AREA {
                 pieces.push(self.piece(child, size));
             } else {
-                small.add(child, size, self.is_relevant(child));
+                small.add(self.tree, child, size, self.is_relevant(child));
             }
         }
         let too_small_to_show_anything_inside = pieces.is_empty() && !is_the_focus;
         if !too_small_to_show_anything_inside {
-            pieces.extend(small.piece(self.tree, folder));
+            pieces.extend(small.piece(self.tree, folder, self.paint.color_by));
         }
         pieces
     }
@@ -244,6 +246,7 @@ impl Tiler<'_> {
                 depth,
                 size: piece.size,
                 kind: piece.kind,
+                shown_age: piece.shown_age,
                 branch,
                 relevant: piece.relevant,
                 parent,
@@ -359,7 +362,7 @@ pub(crate) mod tests {
     const PIXEL: f32 = 1e-2;
 
     pub(crate) fn map_of(t: &Tree, focus: NodeId, excluded: &[NodeId]) -> Treemap {
-        treemap(t, focus, SIZE, None, &Exclusions::new(t, excluded))
+        treemap(t, focus, SIZE, Paint::default(), &Exclusions::new(t, excluded))
     }
 
     fn sample() -> Tree {
@@ -520,7 +523,7 @@ pub(crate) mod tests {
         kids.push(F("needle", 10));
         let t = tree(kids);
         let s = crate::search::search(&t, "needle", &Default::default()).unwrap();
-        let map = treemap(&t, t.root(), SIZE, Some(&s), &Exclusions::default());
+        let map = treemap(&t, t.root(), SIZE, Paint { search: Some(&s), ..Paint::default() }, &Exclusions::default());
         assert!(!map.tiles[0].relevant);
         let bucket = map.tiles.iter().find(|t| matches!(t.segment, Segment::Small { .. })).unwrap();
         assert!(bucket.relevant, "the bucket holding the match stays lit");
@@ -529,7 +532,7 @@ pub(crate) mod tests {
     #[test]
     fn nothing_is_tiled_without_room_or_without_bytes() {
         let t = sample();
-        assert!(treemap(&t, t.root(), (0.0, 0.0), None, &Exclusions::default()).tiles.is_empty());
+        assert!(treemap(&t, t.root(), (0.0, 0.0), Paint::default(), &Exclusions::default()).tiles.is_empty());
         let empty = tree(vec![D("empty", vec![])]);
         assert!(map_of(&empty, empty.root(), &[]).tiles.is_empty());
     }

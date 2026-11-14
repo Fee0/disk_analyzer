@@ -4,6 +4,7 @@ use std::mem::ManuallyDrop;
 use std::ops::Range;
 
 use super::extents::{self, Batch, FIEMAP_BUFFER_WORDS, FileSystemBlocks};
+use crate::age::Day;
 use crate::platform::unix::{
     Fd, allocated_bytes, entry_with_unreadable_attributes, hard_link_id, open_dir_without_following_symlink, stat_at,
 };
@@ -66,6 +67,7 @@ fn entry_from_stat<'a>(name: &'a [u8], status: &libc::stat) -> DirEntry<'a> {
         hard_link_id: hard_link_id(is_regular_file, status.st_nlink, status.st_ino),
         shared_data_stream_id: None,
         shared_blocks: SharedBlocks::NONE_KNOWN,
+        modified: Some(Day::from_unix_seconds(status.st_mtime)),
     }
 }
 

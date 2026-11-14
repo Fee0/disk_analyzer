@@ -3,6 +3,7 @@ use std::cmp::Reverse;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::age::{AgeBucket, Day};
 use crate::kind::Kind;
 use crate::platform::{Current, Platform};
 
@@ -107,7 +108,7 @@ impl Node {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct ScanStats {
     pub files: u64,
     pub dirs: u64,
@@ -115,10 +116,28 @@ pub struct ScanStats {
     pub duration: Duration,
     pub hidden: u64,
     pub purgeable: u64,
+    pub scanned_on: Day,
+}
+
+#[cfg(test)]
+impl Default for ScanStats {
+    fn default() -> Self {
+        const A_FIXED_SCAN_DAY: u16 = 20_000;
+        ScanStats {
+            files: 0,
+            dirs: 0,
+            errors: 0,
+            duration: Duration::ZERO,
+            hidden: 0,
+            purgeable: 0,
+            scanned_on: Day::from_days_since_1970(A_FIXED_SCAN_DAY),
+        }
+    }
 }
 
 pub struct Tree {
     nodes: Vec<Node>,
+    newest: Vec<Option<Day>>,
     names: Vec<u8>,
     children_largest_first: Vec<u32>,
     root_path: PathBuf,
@@ -158,6 +177,17 @@ impl Tree {
     #[inline]
     pub fn size(&self, id: NodeId) -> u64 {
         self.nodes[id.idx()].size()
+    }
+    #[inline]
+    pub fn newest_change(&self, id: NodeId) -> Option<Day> {
+        self.newest[id.idx()]
+    }
+    pub fn days_since_newest_change(&self, id: NodeId) -> Option<u32> {
+        self.newest_change(id).map(|day| day.days_until(self.stats.scanned_on))
+    }
+    #[inline]
+    pub fn age(&self, id: NodeId) -> AgeBucket {
+        AgeBucket::of(self.newest_change(id), self.stats.scanned_on)
     }
     #[inline]
     pub fn name_bytes(&self, id: NodeId) -> &[u8] {
@@ -230,6 +260,7 @@ impl Tree {
         self.mark_subtree_removed(id);
         let shrunken_ancestors: Vec<NodeId> = self.ancestors(id).skip(1).collect();
         self.subtract_sizes_of_removed_from(&shrunken_ancestors, id);
+        self.date_by_their_newest_live_child(&shrunken_ancestors);
         for &a in &shrunken_ancestors {
             if let Some(p) = self.parent(a) {
                 self.move_shrunken_child_to_its_new_rank(p, a);
@@ -253,6 +284,13 @@ impl Tree {
             let n = &mut self.nodes[a.idx()];
             n.alloc = n.alloc.saturating_sub(alloc);
             n.files_in_subtree = n.files_in_subtree.saturating_sub(files);
+        }
+    }
+
+    fn date_by_their_newest_live_child(&mut self, innermost_first: &[NodeId]) {
+        for &folder in innermost_first {
+            let newest = self.children(folder).filter_map(|c| self.newest_change(c)).max();
+            self.newest[folder.idx()] = newest;
         }
     }
 
@@ -292,7 +330,9 @@ pub(crate) struct DirNode {
     pub name: Box<[u8]>,
     pub names: Vec<u8>,
     pub files: Vec<FileRec>,
+    pub file_days: Vec<Option<Day>>,
     pub dirs: Vec<DirNode>,
+    pub newest: Option<Day>,
     pub alloc: u64,
     pub items: u32,
     pub dirs_in_subtree: u64,
@@ -310,11 +350,12 @@ impl DirNode {
         DirNode { name, flags: flags::DIR, ..Default::default() }
     }
 
-    pub fn push_file(&mut self, name: &[u8], kind: Kind, flags: u8, alloc: u64) {
+    pub fn push_file(&mut self, name: &[u8], kind: Kind, flags: u8, alloc: u64, modified: Option<Day>) {
         let name = clamp_name(name);
         let off = self.names.len() as u32;
         self.names.extend_from_slice(name);
         self.files.push(FileRec { name_off_in_dir_names: off, name_len: name.len() as u16, kind, flags, alloc });
+        self.file_days.push(modified);
     }
 
     pub fn finish(&mut self, forced_kind: Option<Kind>) {
@@ -334,6 +375,8 @@ impl DirNode {
             name_bytes_in_subtree += d.name_bytes_in_subtree;
             alloc_by_kind[d.kind as usize] += d.alloc;
         }
+        let dated_children = self.file_days.iter().copied().chain(self.dirs.iter().map(|d| d.newest));
+        self.newest = dated_children.flatten().max();
         self.alloc = alloc;
         self.items = items;
         self.dirs_in_subtree = dirs_in_subtree;
@@ -371,6 +414,7 @@ pub(crate) fn build(
     let exact_name_bytes =
         root.name_bytes_in_subtree as usize + root_name.len() + synthetic.iter().map(|s| s.name.len()).sum::<usize>();
     let mut nodes: Vec<Node> = Vec::with_capacity(exact_node_count);
+    let mut newest: Vec<Option<Day>> = Vec::with_capacity(exact_node_count);
     let mut names: Vec<u8> = Vec::with_capacity(exact_name_bytes);
 
     let push_name = |names: &mut Vec<u8>, s: &[u8]| -> (u32, u16) {
@@ -382,6 +426,7 @@ pub(crate) fn build(
 
     let name = push_name(&mut names, root_name.as_bytes());
     nodes.push(Node::new(0, name, root.kind, root.flags, root.items, root.alloc));
+    newest.push(root.newest);
 
     let mut queue: std::collections::VecDeque<(u32, DirNode, Vec<Synthetic>)> = Default::default();
     queue.push_back((0, root, synthetic));
@@ -389,7 +434,7 @@ pub(crate) fn build(
     let mut by_alloc: Vec<LargestFirstThenScanOrder> = Vec::new();
 
     while let Some((id, dir, synth)) = queue.pop_front() {
-        let DirNode { names: dir_names, files, mut dirs, .. } = dir;
+        let DirNode { names: dir_names, files, file_days, mut dirs, .. } = dir;
         let (nd, nf) = (dirs.len(), files.len());
         let total = nd + nf + synth.len();
 
@@ -410,6 +455,7 @@ pub(crate) fn build(
                 let d = std::mem::take(&mut dirs[i]);
                 let name = push_name(&mut names, &d.name);
                 nodes.push(Node::new(id, name, d.kind, d.flags, d.items, d.alloc));
+                newest.push(d.newest);
                 queue.push_back((child_id, d, Vec::new()));
             } else if i < nd + nf {
                 let f = &files[i - nd];
@@ -417,16 +463,18 @@ pub(crate) fn build(
                 let s = &dir_names[start..start + f.name_len as usize];
                 let name = push_name(&mut names, s);
                 nodes.push(Node::new(id, name, f.kind, f.flags, 1, f.alloc));
+                newest.push(file_days[i - nd]);
             } else {
                 let s = &synth[i - nd - nf];
                 let name = push_name(&mut names, s.name.as_bytes());
                 nodes.push(Node::new(id, name, s.kind, 0, 0, s.size));
+                newest.push(None);
             }
         }
     }
 
     let laid_out_largest_first: Vec<u32> = (0..nodes.len() as u32).collect();
-    Tree { nodes, names, children_largest_first: laid_out_largest_first, root_path, whole_disk, stats }
+    Tree { nodes, newest, names, children_largest_first: laid_out_largest_first, root_path, whole_disk, stats }
 }
 
 #[cfg(test)]
@@ -435,6 +483,7 @@ pub(crate) mod test_util {
 
     pub enum T {
         F(&'static str, u64),
+        Aged(&'static str, u64, Day),
         D(&'static str, Vec<T>),
     }
 
@@ -442,7 +491,8 @@ pub(crate) mod test_util {
         let mut d = DirNode::new(name.as_bytes().into());
         for k in kids {
             match k {
-                T::F(n, s) => d.push_file(n.as_bytes(), Kind::of_file(n.as_bytes()), 0, s),
+                T::F(n, s) => d.push_file(n.as_bytes(), Kind::of_file(n.as_bytes()), 0, s, None),
+                T::Aged(n, s, modified) => d.push_file(n.as_bytes(), Kind::of_file(n.as_bytes()), 0, s, Some(modified)),
                 T::D(n, c) => d.dirs.push(to_dir(n, c)),
             }
         }
@@ -454,12 +504,24 @@ pub(crate) mod test_util {
         tree_at("/r", kids)
     }
 
+    pub fn tree_scanned_on(scanned_on: Day, kids: Vec<T>) -> Tree {
+        let stats = ScanStats { scanned_on, ..ScanStats::default() };
+        build(to_dir("root", kids), PathBuf::from("/r"), "root", false, vec![], stats)
+    }
+
     pub fn descend(tree: &Tree, names: &[&str]) -> NodeId {
         names.iter().fold(tree.root(), |at, name| tree.children(at).find(|&c| tree.name(c) == *name).expect(name))
     }
 
     pub fn tree_at(root: &str, kids: Vec<T>) -> Tree {
         build(to_dir("root", kids), PathBuf::from(root), "root", false, vec![], ScanStats::default())
+    }
+
+    pub fn modified_on(path: &Path, days_since_1970: u16) {
+        const AN_HOUR_INTO_THE_DAY: u64 = 3_600;
+        let seconds = u64::from(days_since_1970) * crate::age::SECONDS_PER_DAY as u64 + AN_HOUR_INTO_THE_DAY;
+        let file = std::fs::File::options().write(true).open(path).unwrap();
+        file.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds)).unwrap();
     }
 
     pub fn scan_folder(root: &Path) -> Tree {
@@ -539,6 +601,38 @@ mod tests {
         let kids: Vec<_> = t.children(t.root()).map(|c| t.name(c).into_owned()).collect();
         assert_eq!(kids, vec!["b", "a", "small.txt"], "a shrank below b");
         assert_eq!(t.children(a).count(), 1);
+    }
+
+    #[test]
+    fn a_folder_is_as_new_as_the_newest_file_anywhere_inside_it_and_removal_dates_it_again() {
+        let day = Day::from_days_since_1970;
+        let mut t = super::test_util::tree_scanned_on(
+            day(20_000),
+            vec![
+                D("a", vec![Aged("x", 10, day(19_000)), D("deep", vec![Aged("z", 5, day(19_990))])]),
+                D("empty", vec![]),
+                F("undated", 1),
+            ],
+        );
+        let (a, deep, z) = (descend(&t, &["a"]), descend(&t, &["a", "deep"]), descend(&t, &["a", "deep", "z"]));
+        assert_eq!(t.newest_change(a), Some(day(19_990)), "the date comes up from the deepest file");
+        assert_eq!(t.newest_change(t.root()), Some(day(19_990)));
+        assert_eq!(t.newest_change(descend(&t, &["empty"])), None, "a folder with no files has no date");
+        assert_eq!(t.days_since_newest_change(a), Some(10));
+        assert_eq!(t.age(a), AgeBucket::UnderAMonth);
+        assert_eq!(t.age(descend(&t, &["undated"])), AgeBucket::Unknown);
+
+        assert!(t.remove(z));
+        assert_eq!(t.newest_change(deep), None, "nothing dated is left in deep");
+        assert_eq!(t.newest_change(a), Some(day(19_000)), "a is now as new as its remaining file");
+        assert_eq!(t.age(a), AgeBucket::UnderFiveYears, "1000 days old");
+    }
+
+    #[test]
+    fn a_node_stays_32_bytes_because_its_date_is_kept_beside_it() {
+        assert_eq!(std::mem::size_of::<Node>(), 32);
+        assert_eq!(std::mem::size_of::<FileRec>(), 16);
+        assert_eq!(std::mem::size_of::<Option<Day>>(), 2);
     }
 
     #[test]

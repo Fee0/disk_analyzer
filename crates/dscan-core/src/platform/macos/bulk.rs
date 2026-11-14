@@ -1,5 +1,6 @@
 use std::io;
 
+use crate::age::Day;
 use crate::platform::unix::{
     Fd, allocated_bytes, c_path, entry_with_unreadable_attributes, hard_link_id, open_dir_without_following_symlink,
     stat_at,
@@ -26,6 +27,7 @@ struct RawEntry<'a> {
     ino: u64,
     links: u32,
     alloc: u64,
+    modified_seconds: Option<i64>,
     data_stream: Option<u64>,
     may_share_blocks: bool,
     sizes_reported: bool,
@@ -54,6 +56,7 @@ impl<'a> RawEntry<'a> {
             hard_link_id: hard_link_id(is_regular_file, self.links, self.ino),
             shared_data_stream_id: self.data_stream.filter(|_| is_regular_file && self.may_share_blocks),
             shared_blocks: SharedBlocks::NONE_KNOWN,
+            modified: self.modified_seconds.map(Day::from_unix_seconds),
         }
     }
 
@@ -108,6 +111,7 @@ fn attribute_list(request: AttributeRequest) -> (libc::attrlist, u64) {
         | libc::ATTR_CMN_NAME
         | libc::ATTR_CMN_DEVID
         | libc::ATTR_CMN_OBJTYPE
+        | libc::ATTR_CMN_MODTIME
         | libc::ATTR_CMN_FILEID;
     attrs.fileattr = libc::ATTR_FILE_LINKCOUNT | libc::ATTR_FILE_ALLOCSIZE;
     let options = match request {
@@ -207,6 +211,11 @@ impl<'a> Cursor<'a> {
     fn u64(&mut self) -> u64 {
         u64::from_ne_bytes(self.take())
     }
+    fn timespec_seconds(&mut self) -> i64 {
+        let seconds = i64::from_ne_bytes(self.take());
+        let _nanoseconds: [u8; 8] = self.take();
+        seconds
+    }
     fn name(&mut self) -> &'a [u8] {
         let reference_at = self.at;
         let offset = self.i32() as isize;
@@ -230,6 +239,7 @@ fn parse_entry(record: &[u8]) -> RawEntry<'_> {
         ino: 0,
         links: 1,
         alloc: 0,
+        modified_seconds: None,
         data_stream: None,
         may_share_blocks: false,
         sizes_reported: false,
@@ -245,6 +255,9 @@ fn parse_entry(record: &[u8]) -> RawEntry<'_> {
     }
     if returned.common & libc::ATTR_CMN_OBJTYPE != 0 {
         e.objtype = cursor.u32();
+    }
+    if returned.common & libc::ATTR_CMN_MODTIME != 0 {
+        e.modified_seconds = Some(cursor.timespec_seconds());
     }
     if returned.common & libc::ATTR_CMN_FILEID != 0 {
         e.ino = cursor.u64();
@@ -286,6 +299,17 @@ mod tests {
         assert!(seen[0].2 >= 10_000);
         assert_eq!(seen[1].0, b"sub");
         assert_eq!(seen[1].1, Some(EntryType::Directory));
+    }
+
+    #[test]
+    fn reads_the_modification_day_in_the_same_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dated.txt");
+        std::fs::write(&path, b"x").unwrap();
+        crate::tree::test_util::modified_on(&path, 11_323);
+        let mut modified = None;
+        read_dir(dir.path().as_os_str().as_bytes(), |e| modified = e.modified).unwrap();
+        assert_eq!(modified.map(Day::days_since_1970), Some(11_323));
     }
 
     #[derive(Clone, Copy)]

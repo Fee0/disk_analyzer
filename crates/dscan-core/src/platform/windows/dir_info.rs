@@ -1,6 +1,8 @@
+use crate::age::Day;
 use crate::platform::EntryType;
 
 pub(super) const NEXT_ENTRY_OFFSET: usize = 0;
+pub(super) const LAST_WRITE_TIME: usize = 24;
 pub(super) const ALLOCATION_SIZE: usize = 48;
 pub(super) const FILE_ATTRIBUTES: usize = 56;
 pub(super) const FILE_NAME_LENGTH: usize = 60;
@@ -13,6 +15,9 @@ const FILE_ID_128_BYTES: usize = 16;
 const LAST_RECORD: u32 = 0;
 const NO_FILE_ID: u128 = 0;
 const FOLD_MULTIPLIER: u64 = 0x9E37_79B9_7F4A_7C15;
+const FILE_TIME_TICKS_PER_SECOND: u64 = 10_000_000;
+const SECONDS_FROM_1601_TO_1970: i64 = 11_644_473_600;
+const NO_FILE_TIME: u64 = 0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Layout {
@@ -31,6 +36,7 @@ pub(super) struct Record<'a> {
     pub attributes: u32,
     pub reparse_tag: u32,
     pub allocation_size: u64,
+    pub last_write_time: u64,
     pub file_id: Option<u128>,
 }
 
@@ -55,6 +61,13 @@ impl Record<'_> {
         } else {
             EntryType::File
         }
+    }
+
+    pub fn modified(&self) -> Option<Day> {
+        (self.last_write_time != NO_FILE_TIME).then(|| {
+            let seconds_since_1601 = (self.last_write_time / FILE_TIME_TICKS_PER_SECOND) as i64;
+            Day::from_unix_seconds(seconds_since_1601 - SECONDS_FROM_1601_TO_1970)
+        })
     }
 
     pub fn hard_link_id(&self) -> Option<u64> {
@@ -96,6 +109,7 @@ pub(super) fn records(buffer: &[u8], layout: Layout) -> impl Iterator<Item = Rec
             attributes: u32_at(record, FILE_ATTRIBUTES),
             reparse_tag: u32_at(record, layout.reparse_tag),
             allocation_size: u64_at(record, ALLOCATION_SIZE),
+            last_write_time: u64_at(record, LAST_WRITE_TIME),
             file_id: layout.unique_file_id.map(|at| u128_at(record, at)),
         })
     })
@@ -110,17 +124,20 @@ mod tests {
     const IO_REPARSE_TAG_SYMLINK: u32 = 0xA000_000C;
     const IO_REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
     const IO_REPARSE_TAG_CLOUD_6: u32 = 0x9000_601A;
+    const DAYS_FROM_1970_TO_2001: u16 = 11_323;
+    const A_FILE_TIME_ON_1_JANUARY_2001: u64 = 126_227_808_000_000_000 + 3_600 * FILE_TIME_TICKS_PER_SECOND;
 
     struct Fake<'a> {
         name: &'a str,
         attributes: u32,
         reparse_tag: u32,
         allocation_size: u64,
+        last_write_time: u64,
         file_id: u128,
     }
 
     fn fake(name: &str, attributes: u32, reparse_tag: u32) -> Fake<'_> {
-        Fake { name, attributes, reparse_tag, allocation_size: 0, file_id: 0 }
+        Fake { name, attributes, reparse_tag, allocation_size: 0, last_write_time: NO_FILE_TIME, file_id: 0 }
     }
 
     fn buffer_with(layout: Layout, records: &[Fake<'_>]) -> Vec<u8> {
@@ -132,6 +149,7 @@ mod tests {
             let next = if is_last { LAST_RECORD } else { record.len() as u32 };
             record[NEXT_ENTRY_OFFSET..][..4].copy_from_slice(&next.to_le_bytes());
             record[ALLOCATION_SIZE..][..8].copy_from_slice(&fake.allocation_size.to_le_bytes());
+            record[LAST_WRITE_TIME..][..8].copy_from_slice(&fake.last_write_time.to_le_bytes());
             record[FILE_ATTRIBUTES..][..4].copy_from_slice(&fake.attributes.to_le_bytes());
             record[FILE_NAME_LENGTH..][..4].copy_from_slice(&(name.len() as u32).to_le_bytes());
             record[layout.reparse_tag..][..4].copy_from_slice(&fake.reparse_tag.to_le_bytes());
@@ -156,6 +174,7 @@ mod tests {
                     attributes: FILE_ATTRIBUTE_NORMAL,
                     reparse_tag: 0,
                     allocation_size: 12_288,
+                    last_write_time: A_FILE_TIME_ON_1_JANUARY_2001,
                     file_id: refs_style_id,
                 },
             ],
@@ -166,13 +185,32 @@ mod tests {
         let file = parsed[1];
         assert_eq!(String::from_utf16(&file.name_units().collect::<Vec<_>>()).unwrap(), "Ünïcode.bin");
         assert_eq!(file.allocation_size, 12_288);
+        assert_eq!(file.modified().map(Day::days_since_1970), Some(DAYS_FROM_1970_TO_2001));
         assert_eq!(file.file_id, Some(refs_style_id));
         assert_eq!(file.entry_type(), EntryType::File);
         assert!(!file.is_self_or_parent());
     }
 
     fn record(attributes: u32, file_id: u128) -> Record<'static> {
-        Record { name_utf16le: &[], attributes, reparse_tag: 0, allocation_size: 0, file_id: Some(file_id) }
+        Record {
+            name_utf16le: &[],
+            attributes,
+            reparse_tag: 0,
+            allocation_size: 0,
+            last_write_time: NO_FILE_TIME,
+            file_id: Some(file_id),
+        }
+    }
+
+    #[test]
+    fn a_file_time_counts_from_1601_and_a_zero_time_is_unknown() {
+        let dated = |last_write_time| Record { last_write_time, ..record(FILE_ATTRIBUTE_NORMAL, 1) };
+        assert_eq!(dated(NO_FILE_TIME).modified(), None, "file systems that keep no time report zero");
+        let the_first_day_of_1970 = SECONDS_FROM_1601_TO_1970 as u64 * FILE_TIME_TICKS_PER_SECOND;
+        assert_eq!(dated(the_first_day_of_1970).modified().map(Day::days_since_1970), Some(0));
+        assert_eq!(dated(1).modified().map(Day::days_since_1970), Some(0), "before 1970 counts as its first day");
+        let two_thousand_one = dated(A_FILE_TIME_ON_1_JANUARY_2001).modified();
+        assert_eq!(two_thousand_one.map(Day::days_since_1970), Some(DAYS_FROM_1970_TO_2001));
     }
 
     #[test]

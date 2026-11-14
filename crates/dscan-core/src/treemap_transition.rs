@@ -18,7 +18,12 @@ pub struct TileLook {
 impl TileLook {
     pub fn of(tile: &Tile) -> Self {
         TileLook {
-            style: SegmentStyle { kind: tile.kind, branch: tile.branch, relevant: tile.relevant },
+            style: SegmentStyle {
+                kind: tile.kind,
+                shown_age: tile.shown_age,
+                branch: tile.branch,
+                relevant: tile.relevant,
+            },
             depth: tile.depth,
             holds_tiles: tile.holds_tiles(),
         }

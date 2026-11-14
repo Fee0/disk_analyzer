@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use crate::age::Day;
 use crate::hidden::{SpaceExplanation, SpaceInfo};
 use crate::protection::ProtectedLocations;
 use crate::volumes::Volume;
@@ -63,6 +64,7 @@ pub(crate) struct DirEntry<'a> {
     pub hard_link_id: Option<u64>,
     pub shared_data_stream_id: Option<u64>,
     pub shared_blocks: SharedBlocks<'a>,
+    pub modified: Option<Day>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

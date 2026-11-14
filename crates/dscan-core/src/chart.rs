@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::exclusions::Exclusions;
 use crate::layout::{Layout, LayoutParams, Segment, partition};
-use crate::search::SearchResult;
+use crate::paint::Paint;
 use crate::transition::{FrameArc, Transition, TransitionKind};
 use crate::tree::{NodeId, Tree};
 use crate::treemap::{Treemap, treemap};
@@ -36,7 +36,7 @@ pub struct ChartInput<'a> {
     pub tree: &'a Tree,
     pub focus: NodeId,
     pub size: (f32, f32),
-    pub search: Option<&'a SearchResult>,
+    pub paint: Paint<'a>,
     pub excluded: &'a Exclusions,
 }
 
@@ -55,12 +55,12 @@ impl Default for Chart {
 
 impl Chart {
     pub fn new(kind: ChartKind, input: ChartInput<'_>) -> Self {
-        let ChartInput { tree, focus, size, search, excluded } = input;
-        let partitioned = || partition(tree, focus, LayoutParams::default(), search, excluded);
+        let ChartInput { tree, focus, size, paint, excluded } = input;
+        let partitioned = || partition(tree, focus, LayoutParams::default(), paint, excluded);
         match kind {
             ChartKind::Sunburst => Chart::Sunburst(partitioned()),
             ChartKind::Icicle => Chart::Icicle(partitioned()),
-            ChartKind::Treemap => Chart::Treemap(Arc::new(treemap(tree, focus, size, search, excluded))),
+            ChartKind::Treemap => Chart::Treemap(Arc::new(treemap(tree, focus, size, paint, excluded))),
         }
     }
 
@@ -145,13 +145,14 @@ impl ChartTransition {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::paint::ColorBy;
     use crate::tree::test_util::{T::*, tree};
 
     fn chart(t: &Tree, kind: ChartKind) -> Chart {
         let excluded = Exclusions::default();
         Chart::new(
             kind,
-            ChartInput { tree: t, focus: t.root(), size: (800.0, 600.0), search: None, excluded: &excluded },
+            ChartInput { tree: t, focus: t.root(), size: (800.0, 600.0), paint: Paint::default(), excluded: &excluded },
         )
     }
 
@@ -218,6 +219,27 @@ mod tests {
     fn only_the_treemap_is_laid_out_for_the_chart_s_size() {
         let depends: Vec<bool> = ChartKind::ALL.iter().map(|k| k.depends_on_size()).collect();
         assert_eq!(depends, [false, false, true], "the sunburst and the icicle scale to any size when drawn");
+    }
+
+    #[test]
+    fn coloring_by_age_instead_of_type_morphs_every_kind_of_chart_in_place() {
+        let t = sample();
+        let excluded = Exclusions::default();
+        let colored = |kind: ChartKind, color_by: ColorBy| {
+            let paint = Paint { color_by, ..Paint::default() };
+            Chart::new(kind, ChartInput { tree: &t, focus: t.root(), size: (800.0, 600.0), paint, excluded: &excluded })
+        };
+        for kind in ChartKind::ALL {
+            let recolor = colored(kind, ColorBy::Kind).transition_to(&colored(kind, ColorBy::Age));
+            assert_eq!(recolor.kind(), TransitionKind::Morph, "{kind:?} keeps its shapes");
+        }
+        let recolor =
+            colored(ChartKind::Sunburst, ColorBy::Kind).transition_to(&colored(ChartKind::Sunburst, ColorBy::Age));
+        let ChartFrame::Arcs { arcs, .. } = recolor.frame(0.5) else { panic!("a sunburst frame") };
+        assert!(
+            arcs.iter().all(|a| a.style_before.shown_age.is_none() && a.style_after.shown_age.is_some()),
+            "every arc fades from its type color to its age color"
+        );
     }
 
     #[test]

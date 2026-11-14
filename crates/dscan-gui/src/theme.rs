@@ -1,4 +1,4 @@
-use dscan_core::Kind;
+use dscan_core::{AgeBucket, Kind};
 use iced::Color;
 
 pub const BG: Color = Color::from_rgb8(0x1f, 0x21, 0x25);
@@ -12,6 +12,16 @@ pub const DANGER: Color = Color::from_rgb8(0xe5, 0x5b, 0x5b);
 pub const NEUTRAL_BUTTON: Color = Color::from_rgb8(0x4a, 0x4f, 0x5a);
 pub const SUCCESS: Color = Color::from_rgb8(0x4c, 0xc3, 0x8a);
 pub const WARNING: Color = Color::from_rgb8(0xf0, 0xb4, 0x29);
+
+const AGE_COLORS: [Color; AgeBucket::COUNT] = [
+    Color::from_rgb8(0xff, 0xd1, 0x66),
+    Color::from_rgb8(0xfc, 0xaa, 0x48),
+    Color::from_rgb8(0xf2, 0x80, 0x4c),
+    Color::from_rgb8(0x3e, 0x94, 0xb0),
+    Color::from_rgb8(0x3b, 0x74, 0xbf),
+    Color::from_rgb8(0x4f, 0x54, 0xa6),
+    Color::from_rgb8(0x6b, 0x6f, 0x78),
+];
 
 const LIGHTNESS_LOSS_PER_RING: f32 = 0.035;
 const MIN_SEGMENT_LIGHTNESS: f32 = 0.25;
@@ -92,6 +102,14 @@ pub fn segment_color(kind: Kind, ring: f32, branch: u32) -> Color {
         lightness: darkened_for_ring(base.lightness, ring),
     }
     .to_color()
+}
+
+pub fn age_color(age: AgeBucket) -> Color {
+    AGE_COLORS[age.index()]
+}
+
+pub fn age_or_kind_color(shown_age: Option<AgeBucket>, kind: Kind) -> Color {
+    shown_age.map_or_else(|| kind_color(kind), age_color)
 }
 
 pub fn mix(a: Color, b: Color, t: f32) -> Color {

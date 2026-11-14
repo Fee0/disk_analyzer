@@ -1,4 +1,5 @@
 pub mod actions;
+pub mod age;
 pub mod chart;
 pub mod chart_geometry;
 pub mod desktop;
@@ -7,6 +8,7 @@ pub mod hidden;
 pub mod icicle;
 pub mod kind;
 pub mod layout;
+pub mod paint;
 mod platform;
 mod protection;
 pub mod scan;
@@ -20,6 +22,7 @@ pub mod volumes;
 pub use actions::{
     Collection, ItemRemoval, Refusal, Removal, RemovalPlan, RemovalProgress, RemovalReport, RemovalStatus,
 };
+pub use age::{AgeBreakdown, AgeBucket, AgeSpan, AgeUnit, Day, age_breakdown, describe_age};
 pub use chart::{Chart, ChartFrame, ChartInput, ChartKind, ChartTransition};
 pub use chart_geometry::{ChartGeometry, ChartHit, ChartPoint};
 pub use desktop::{COMMAND_KEY, DesktopError, PREVIEW_ACTION, RESCAN_SHORTCUT, REVEAL_ACTION};
@@ -28,6 +31,7 @@ pub use hidden::{Cause, Remedy, SpaceExplanation};
 pub use icicle::{IcicleGeometry, IcicleHit};
 pub use kind::Kind;
 pub use layout::{Arc, Layout, LayoutParams, MAX_DEPTH, Segment, partition};
+pub use paint::{ColorBy, Paint};
 pub use scan::{CancelToken, Progress, ProgressSnapshot, ScanError, ScanOptions, scan};
 pub use search::{SearchResult, search};
 pub use transition::{FrameArc, SegmentStyle, Transition, TransitionKind};

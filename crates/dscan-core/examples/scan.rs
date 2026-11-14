@@ -42,12 +42,19 @@ fn main() {
         scan_time
     );
     let exclusions = dscan_core::Exclusions::default();
-    let layout = || dscan_core::partition(&tree, root, dscan_core::LayoutParams::default(), None, &exclusions);
+    let layout =
+        || dscan_core::partition(&tree, root, dscan_core::LayoutParams::default(), Default::default(), &exclusions);
     let (arcs, fastest, median) = fastest_and_median(layout);
     println!("layout: {} arcs, fastest {fastest:.2?}, median {median:.2?} of {LAYOUT_RUNS} runs", arcs.len());
-    let treemap = || dscan_core::treemap(&tree, root, TYPICAL_CHART_SIZE, None, &exclusions);
+    let treemap = || dscan_core::treemap(&tree, root, TYPICAL_CHART_SIZE, Default::default(), &exclusions);
     let (map, fastest, median) = fastest_and_median(treemap);
     println!("treemap: {} tiles, fastest {fastest:.2?}, median {median:.2?} of {LAYOUT_RUNS} runs", map.tiles.len());
+    let ages = || dscan_core::age_breakdown(&tree, root, &exclusions);
+    let (breakdown, fastest, median) = fastest_and_median(ages);
+    println!("ages: fastest {fastest:.2?}, median {median:.2?} of {LAYOUT_RUNS} runs");
+    for bucket in dscan_core::AgeBucket::ALL {
+        println!("  {:>10}  {bucket:?}", format_size(breakdown.bytes(bucket)));
+    }
     for q in ["readme", "readme", "a", "zzqx"] {
         let t = Instant::now();
         let r = dscan_core::search(&tree, q, &CancelToken::default());

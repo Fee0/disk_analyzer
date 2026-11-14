@@ -1,6 +1,7 @@
+use crate::age::{AgeBucket, Day};
 use crate::exclusions::Exclusions;
 use crate::kind::Kind;
-use crate::search::{SearchResult, is_relevant_under};
+use crate::paint::{ColorBy, Paint};
 use crate::tree::{NodeId, Tree};
 
 pub const MAX_DEPTH: usize = 7;
@@ -29,14 +30,16 @@ pub(crate) struct SmallItems {
     size: u64,
     count: u32,
     relevant: bool,
+    newest: Option<Day>,
     last: Option<NodeId>,
 }
 
 impl SmallItems {
-    pub(crate) fn add(&mut self, child: NodeId, size: u64, relevant: bool) {
+    pub(crate) fn add(&mut self, tree: &Tree, child: NodeId, size: u64, relevant: bool) {
         self.size += size;
         self.count += 1;
         self.relevant |= relevant;
+        self.newest = self.newest.max(tree.newest_change(child));
         self.last = Some(child);
     }
 
@@ -44,14 +47,15 @@ impl SmallItems {
         self.count == 0
     }
 
-    pub(crate) fn piece(&self, tree: &Tree, parent: NodeId) -> Option<Piece> {
+    pub(crate) fn piece(&self, tree: &Tree, parent: NodeId, color_by: ColorBy) -> Option<Piece> {
         let last = self.last?;
-        let (segment, kind) = if self.count == 1 {
-            (Segment::Node(last), tree.node(last).kind())
+        let (segment, kind, shown_age) = if self.count == 1 {
+            (Segment::Node(last), tree.node(last).kind(), color_by.shown_age(tree, last))
         } else {
-            (Segment::Small { parent, count: self.count }, Kind::SmallItems)
+            let group = Segment::Small { parent, count: self.count };
+            (group, Kind::SmallItems, color_by.shown_age_of_newest(tree, self.newest))
         };
-        Some(Piece { segment, size: self.size, kind, relevant: self.relevant })
+        Some(Piece { segment, size: self.size, kind, shown_age, relevant: self.relevant })
     }
 }
 
@@ -59,7 +63,21 @@ pub(crate) struct Piece {
     pub(crate) segment: Segment,
     pub(crate) size: u64,
     pub(crate) kind: Kind,
+    pub(crate) shown_age: Option<AgeBucket>,
     pub(crate) relevant: bool,
+}
+
+impl Piece {
+    pub(crate) fn of_node(tree: &Tree, id: NodeId, size: u64, paint: &Paint<'_>) -> Piece {
+        let node = tree.node(id);
+        Piece {
+            segment: Segment::Node(id),
+            size,
+            kind: node.kind(),
+            shown_age: paint.color_by.shown_age(tree, id),
+            relevant: paint.lights(tree, id),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -69,6 +87,7 @@ pub struct Arc {
     pub end: f64,
     pub size: u64,
     pub kind: Kind,
+    pub shown_age: Option<AgeBucket>,
     pub branch: u32,
     pub relevant: bool,
 }
@@ -136,17 +155,11 @@ impl Layout {
     }
 }
 
-pub fn partition(
-    tree: &Tree,
-    focus: NodeId,
-    params: LayoutParams,
-    search: Option<&SearchResult>,
-    excluded: &Exclusions,
-) -> Layout {
+pub fn partition(tree: &Tree, focus: NodeId, params: LayoutParams, paint: Paint<'_>, excluded: &Exclusions) -> Layout {
     let total = excluded.size(tree, focus);
     let mut layout = Layout { focus, total, rings: vec![Vec::new(); params.max_depth] };
     if total > 0 {
-        let mut placer = Placer { tree, params, search, excluded, rings: &mut layout.rings };
+        let mut placer = Placer { tree, params, paint, excluded, rings: &mut layout.rings };
         placer.place(focus, 0.0, 1.0, 0, 0);
     }
     while layout.rings.last().is_some_and(Vec::is_empty) {
@@ -158,14 +171,19 @@ pub fn partition(
 struct Placer<'a> {
     tree: &'a Tree,
     params: LayoutParams,
-    search: Option<&'a SearchResult>,
+    paint: Paint<'a>,
     excluded: &'a Exclusions,
     rings: &'a mut [Vec<Arc>],
 }
 
 impl Placer<'_> {
     fn is_relevant(&self, id: NodeId) -> bool {
-        is_relevant_under(self.search, id)
+        self.paint.lights(self.tree, id)
+    }
+
+    fn arc(&self, piece: Piece, start: f64, end: f64, branch: u32) -> Arc {
+        let Piece { segment, size, kind, shown_age, relevant } = piece;
+        Arc { segment, start, end, size, kind, shown_age, branch, relevant }
     }
 
     fn push_returning_branch(&mut self, depth: usize, mut arc: Arc) -> u32 {
@@ -195,28 +213,21 @@ impl Placer<'_> {
             }
             let s = cs as f64 * scale;
             if s < self.params.min_span {
-                small.add(child, cs, self.is_relevant(child));
+                small.add(tree, child, cs, self.is_relevant(child));
                 continue;
             }
-            let arc = Arc {
-                segment: Segment::Node(child),
-                start: cursor,
-                end: cursor + s,
-                size: cs,
-                kind: tree.node(child).kind(),
-                branch,
-                relevant: self.is_relevant(child),
-            };
+            let arc = self.arc(Piece::of_node(tree, child, cs, &self.paint), cursor, cursor + s, branch);
             let b = self.push_returning_branch(depth, arc);
             if tree.node(child).is_dir() {
                 self.place(child, cursor, s, depth + 1, b);
             }
             cursor += s;
         }
-        if let Some(Piece { segment, size, kind, relevant }) = small.piece(tree, node) {
-            let end = (cursor + size as f64 * scale).min(start + span);
+        if let Some(piece) = small.piece(tree, node, self.paint.color_by) {
+            let end = (cursor + piece.size as f64 * scale).min(start + span);
             if end > cursor {
-                self.push_returning_branch(depth, Arc { segment, start: cursor, end, size, kind, branch, relevant });
+                let arc = self.arc(piece, cursor, end, branch);
+                self.push_returning_branch(depth, arc);
             }
         }
     }
@@ -235,7 +246,13 @@ mod tests {
             F("tiny1", 1),
             F("tiny2", 1),
         ]);
-        let l = partition(&t, t.root(), LayoutParams { max_depth: 4, min_span: 0.01 }, None, &Exclusions::default());
+        let l = partition(
+            &t,
+            t.root(),
+            LayoutParams { max_depth: 4, min_span: 0.01 },
+            Paint::default(),
+            &Exclusions::default(),
+        );
         assert_eq!(l.total, 1001);
         assert_eq!(l.rings.len(), 2);
         assert_eq!(l.rings[0].len(), 3, "ring 0 holds the focus's children: a, b and one bucket of small items");
@@ -272,7 +289,7 @@ mod tests {
         let t = tree(vec![D("a", vec![F("x.mov", 600), F("y.mov", 200)]), D("b", vec![F("w.png", 400)])]);
         let x = descend(&t, &["a", "x.mov"]);
         let params = LayoutParams { max_depth: 4, min_span: 0.01 };
-        let l = partition(&t, t.root(), params, None, &Exclusions::new(&t, &[x]));
+        let l = partition(&t, t.root(), params, Paint::default(), &Exclusions::new(&t, &[x]));
 
         assert_eq!(l.total, t.size(t.root()) - t.size(x));
         assert!(l.find(Segment::Node(x)).is_none(), "an excluded file has no arc");
@@ -285,7 +302,7 @@ mod tests {
     fn small_items_keep_total() {
         let kids: Vec<_> = (0..1000).map(|_| F("f", 1)).collect();
         let t = tree(kids);
-        let l = partition(&t, t.root(), LayoutParams::default(), None, &Exclusions::default());
+        let l = partition(&t, t.root(), LayoutParams::default(), Paint::default(), &Exclusions::default());
         assert_eq!(l.rings[0].len(), 1);
         assert_eq!(l.rings[0][0].size, 1000);
         assert!((l.rings[0][0].span() - 1.0).abs() < 1e-9);
@@ -304,10 +321,35 @@ mod search_tests {
         kids.push(F("needle", 1));
         let t = tree(kids);
         let s = crate::search::search(&t, "needle", &Default::default()).unwrap();
-        let l = partition(&t, t.root(), LayoutParams::default(), Some(&s), &Exclusions::default());
+        let l = partition(
+            &t,
+            t.root(),
+            LayoutParams::default(),
+            Paint { search: Some(&s), ..Paint::default() },
+            &Exclusions::default(),
+        );
         let big = &l.rings[0][0];
         assert!(!big.relevant);
         let small = l.rings[0].iter().find(|a| matches!(a.segment, Segment::Small { .. })).unwrap();
         assert!(small.relevant, "bucket containing the match stays lit");
+    }
+
+    #[test]
+    fn arcs_carry_their_age_and_a_bucket_of_small_items_is_as_new_as_its_newest_member() {
+        use crate::tree::test_util::tree_scanned_on;
+        let day = Day::from_days_since_1970;
+        let mut kids = vec![Aged("old.mov", 10_000, day(15_000))];
+        kids.extend((0..50).map(|_| Aged("old-noise", 1, day(15_000))));
+        kids.push(Aged("fresh", 1, day(19_995)));
+        let t = tree_scanned_on(day(20_000), kids);
+        let by_age =
+            Paint { color_by: ColorBy::Age, aged_at_least: Some(AgeBucket::UnderFiveYears), ..Paint::default() };
+        let l = partition(&t, t.root(), LayoutParams::default(), by_age, &Exclusions::default());
+        let old = &l.rings[0][0];
+        assert_eq!(old.shown_age, Some(AgeBucket::FiveYearsOrMore));
+        assert!(old.relevant, "old enough to stay lit");
+        let small = l.rings[0].iter().find(|a| matches!(a.segment, Segment::Small { .. })).unwrap();
+        assert_eq!(small.shown_age, Some(AgeBucket::UnderAMonth), "one fresh file makes the bucket fresh");
+        assert!(small.relevant, "the bucket still holds old files, so it stays lit");
     }
 }

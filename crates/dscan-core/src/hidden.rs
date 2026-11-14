@@ -76,7 +76,7 @@ mod tests {
     fn only_the_synthetic_hidden_and_purgeable_entries_are_explained() {
         use crate::tree::{DirNode, ScanStats, Synthetic, build};
         let mut root = DirNode::new(b"root"[..].into());
-        root.push_file(b"real.mov", Kind::Video, 0, 10);
+        root.push_file(b"real.mov", Kind::Video, 0, 10, None);
         root.finish(None);
         let synthetic = vec![
             Synthetic { name: HIDDEN_SPACE_NAME, kind: Kind::Hidden, size: 5 },

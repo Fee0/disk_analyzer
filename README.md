@@ -30,6 +30,11 @@
 - **Treemap.** Switch to a treemap to see every file as a rectangle sized by the
   space it takes, nested inside framed, labeled folders, so the biggest files
   stand out at a glance.
+- **Color by age.** The clock button recolors every chart by when files were
+  last modified, from warm (recent) to cold (years old). A folder takes the date
+  of the newest file inside it. A strip above the chart sums up the bytes per
+  age. Click an age to dim everything newer, for example to find what hasn't
+  changed in two years.
 - **True sizes.** Counts the space files use on disk, not their nominal length.
   Hard links and cloned or reflinked copies count once.
 - **Hidden space.** Space the scan can't see gets its own segment: snapshots,

@@ -71,7 +71,7 @@ mod tests {
     }
 
     fn layout_of(t: &Tree) -> Layout {
-        partition(t, t.root(), LayoutParams::default(), None, &Exclusions::default())
+        partition(t, t.root(), LayoutParams::default(), crate::paint::Paint::default(), &Exclusions::default())
     }
 
     #[test]

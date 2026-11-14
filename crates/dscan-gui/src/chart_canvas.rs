@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use dscan_core::{ChartPoint, FrameArc, NodeId, Segment, SegmentStyle, Tree, format_size};
+use dscan_core::{ChartPoint, FrameArc, NodeId, Segment, SegmentStyle, Tree, describe_age, format_size};
 use iced::widget::canvas::{self, Event, Frame, Geometry, Path, Stroke, Text, gradient};
 use iced::widget::{canvas as canvas_widget, stack};
 use iced::{Color, Element, Fill, Pixels, Point, Rectangle, Renderer, Size, Theme, Vector, mouse};
@@ -23,7 +23,9 @@ const TOOLTIP_NAME_SIZE: f32 = 13.0;
 const TOOLTIP_DETAIL_SIZE: f32 = 12.0;
 const TOOLTIP_PADDING_X: f32 = 10.0;
 const TOOLTIP_MIN_WIDTH: f32 = 80.0;
-const TOOLTIP_HEIGHT: f32 = 44.0;
+const TOOLTIP_FIRST_LINE_Y: f32 = 7.0;
+const TOOLTIP_LINE_HEIGHT: f32 = 17.0;
+const TOOLTIP_BOTTOM_PADDING: f32 = 3.0;
 const TOOLTIP_CURSOR_OFFSET: f32 = 14.0;
 const TOOLTIP_FLIPPED_GAP: f32 = 8.0;
 const IRRELEVANT_SEGMENT_STRENGTH: f32 = 0.22;
@@ -138,7 +140,7 @@ pub fn interaction(pointed: Option<Pointed>, can_go_up: bool) -> mouse::Interact
 }
 
 pub fn style_color(style: SegmentStyle, layer: f32) -> Color {
-    let color = theme::segment_color(style.kind, layer, style.branch);
+    let color = style.shown_age.map_or_else(|| theme::segment_color(style.kind, layer, style.branch), theme::age_color);
     if style.relevant { color } else { theme::mix(theme::BG, color, IRRELEVANT_SEGMENT_STRENGTH) }
 }
 
@@ -206,15 +208,24 @@ pub fn segment_name(tree: &Tree, segment: Segment) -> String {
     }
 }
 
+pub fn modified_phrase(tree: &Tree, id: NodeId) -> Option<String> {
+    let ago = describe_age(tree.days_since_newest_change(id)?);
+    Some(if tree.node(id).is_dir() { format!("Newest change {ago}") } else { format!("Modified {ago}") })
+}
+
 pub fn draw_tooltip(frame: &mut Frame, bounds: Rectangle, cursor: Point, subject: TooltipSubject<'_>) {
     let name = segment_name(subject.tree, subject.segment);
     let pct = if subject.total > 0 { subject.size as f64 * 100.0 / subject.total as f64 } else { 0.0 };
-    let line1 = truncate(&name, TOOLTIP_NAME_MAX_CHARS);
-    let line2 = format!("{} · {:.1}%", format_size(subject.size), pct);
-    let text_width =
-        generous_text_width(&line1, TOOLTIP_NAME_SIZE).max(generous_text_width(&line2, TOOLTIP_DETAIL_SIZE));
+    let mut lines = vec![
+        (truncate(&name, TOOLTIP_NAME_MAX_CHARS), theme::TEXT, TOOLTIP_NAME_SIZE),
+        (format!("{} · {:.1}%", format_size(subject.size), pct), theme::TEXT_DIM, TOOLTIP_DETAIL_SIZE),
+    ];
+    if let Some(modified) = subject.segment.node().and_then(|id| modified_phrase(subject.tree, id)) {
+        lines.push((modified, theme::TEXT_DIM, TOOLTIP_DETAIL_SIZE));
+    }
+    let text_width = lines.iter().map(|(line, _, size)| generous_text_width(line, *size)).fold(0.0, f32::max);
     let w = (text_width + 2.0 * TOOLTIP_PADDING_X).max(TOOLTIP_MIN_WIDTH);
-    let h = TOOLTIP_HEIGHT;
+    let h = TOOLTIP_FIRST_LINE_Y + lines.len() as f32 * TOOLTIP_LINE_HEIGHT + TOOLTIP_BOTTOM_PADDING;
     let mut pos = cursor + Vector::new(TOOLTIP_CURSOR_OFFSET, TOOLTIP_CURSOR_OFFSET);
     if pos.x + w > bounds.width {
         pos.x = cursor.x - w - TOOLTIP_FLIPPED_GAP;
@@ -224,8 +235,8 @@ pub fn draw_tooltip(frame: &mut Frame, bounds: Rectangle, cursor: Point, subject
     }
     let size = Size::new(w, h);
     draw_raised_card(frame, pos, size, TOOLTIP_RADIUS, TOOLTIP_SHADOW_DROP, theme::PANEL_HI);
-    let lines = [(line1, 7.0, theme::TEXT, TOOLTIP_NAME_SIZE), (line2, 24.0, theme::TEXT_DIM, TOOLTIP_DETAIL_SIZE)];
-    for (content, dy, color, size) in lines {
+    for (i, (content, color, size)) in lines.into_iter().enumerate() {
+        let dy = TOOLTIP_FIRST_LINE_Y + i as f32 * TOOLTIP_LINE_HEIGHT;
         frame.fill_text(Text {
             content,
             position: pos + Vector::new(TOOLTIP_PADDING_X, dy),

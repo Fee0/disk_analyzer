@@ -57,6 +57,9 @@ static TREEMAP_CHART: LazyLock<Handle> = LazyLock::new(|| {
     black_line_icon_svg(r#"<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 4v16M12 12h9M16.5 12v8"/>"#)
 });
 
+static CLOCK: LazyLock<Handle> =
+    LazyLock::new(|| black_line_icon_svg(r#"<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/>"#));
+
 fn tinted<'a>(black_icon: &Handle, size: f32, color: Color) -> Svg<'a, Theme> {
     Svg::new(black_icon.clone()).width(size).height(size).style(move |_, _| svg::Style { color: Some(color) })
 }
@@ -119,6 +122,10 @@ pub fn icicle_chart<'a>(size: f32, color: Color) -> Svg<'a, Theme> {
 
 pub fn treemap_chart<'a>(size: f32, color: Color) -> Svg<'a, Theme> {
     tinted(&TREEMAP_CHART, size, color)
+}
+
+pub fn clock<'a>(size: f32, color: Color) -> Svg<'a, Theme> {
+    tinted(&CLOCK, size, color)
 }
 
 pub fn scan_root<'a>(whole_disk: bool, size: f32, color: Color) -> Svg<'a, Theme> {

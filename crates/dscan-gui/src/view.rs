@@ -1,8 +1,9 @@
 use std::sync::LazyLock;
 
 use dscan_core::{
-    Accounting, COMMAND_KEY, Chart, ChartKind, ItemRemoval, NodeId, PREVIEW_ACTION, RESCAN_SHORTCUT, REVEAL_ACTION,
-    Remedy, Removal, Segment, SpaceExplanation, TRASH_NAME, Volume, format_size,
+    Accounting, AgeBreakdown, AgeBucket, AgeSpan, AgeUnit, COMMAND_KEY, Chart, ChartKind, ColorBy, ItemRemoval, NodeId,
+    PREVIEW_ACTION, RESCAN_SHORTCUT, REVEAL_ACTION, Remedy, Removal, Segment, SpaceExplanation, TRASH_NAME, Volume,
+    format_size,
 };
 use iced::border;
 use iced::widget::text::Wrapping;
@@ -16,7 +17,7 @@ use crate::animation::ChartAnimation;
 use crate::app::{
     App, Browser, HOLD_TO_DELETE, ListRow, Message, Notice, NoticeKind, RemovalUnderway, SEARCH_ID, ScanJob, Screen,
 };
-use crate::chart_canvas::chart_with_cursor_overlay;
+use crate::chart_canvas::{chart_with_cursor_overlay, modified_phrase};
 use crate::depth::{self, Elevation};
 use crate::fmt::{
     NAME_IN_A_MESSAGE_MAX_CHARS, count_phrase, elapsed_phrase, fit_width, fit_width_keeping_both_ends,
@@ -546,6 +547,13 @@ fn nav_icon_button<'a>(
 
 const SHOWN_CHART_TINT: Color = Color::from_rgba(1.0, 1.0, 1.0, 0.10);
 
+fn shown_or_quiet_style(is_shown: bool, tint: Color) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |theme, status| {
+        let quiet = quiet_button_style(tint)(theme, status);
+        if is_shown { button::Style { background: Some(SHOWN_CHART_TINT.into()), ..quiet } } else { quiet }
+    }
+}
+
 fn chart_kind_button(kind: ChartKind, shown: ChartKind) -> Element<'static, Message> {
     let is_shown = kind == shown;
     let tint = if is_shown { theme::TEXT } else { theme::TEXT_DIM };
@@ -557,10 +565,7 @@ fn chart_kind_button(kind: ChartKind, shown: ChartKind) -> Element<'static, Mess
     let the_shortcut_switches_to_it = kind == shown.next();
     let tooltip_label = if the_shortcut_switches_to_it { switch_tooltip } else { name };
     let button = toolbar_icon_button(icon)
-        .style(move |theme, status| {
-            let quiet = quiet_button_style(tint)(theme, status);
-            if is_shown { button::Style { background: Some(SHOWN_CHART_TINT.into()), ..quiet } } else { quiet }
-        })
+        .style(shown_or_quiet_style(is_shown, tint))
         .on_press_maybe((!is_shown).then_some(Message::ShowChart(kind)));
     with_tooltip(button, tooltip_label)
 }
@@ -568,6 +573,20 @@ fn chart_kind_button(kind: ChartKind, shown: ChartKind) -> Element<'static, Mess
 fn chart_switch(b: &Browser) -> Element<'_, Message> {
     let shown = b.chart.kind();
     raised_group(Row::with_children(ChartKind::ALL.map(|kind| chart_kind_button(kind, shown))).spacing(2))
+}
+
+const COLOR_BY_AGE_TOOLTIP: &str = "Color by last modified";
+const COLOR_BY_KIND_TOOLTIP: &str = "Color by file type";
+
+fn color_switch(b: &Browser) -> Element<'_, Message> {
+    let by_age = b.color_by == ColorBy::Age;
+    let tint = if by_age { theme::TEXT } else { theme::TEXT_DIM };
+    let (other, tooltip_label) =
+        if by_age { (ColorBy::Kind, COLOR_BY_KIND_TOOLTIP) } else { (ColorBy::Age, COLOR_BY_AGE_TOOLTIP) };
+    let button = toolbar_icon_button(icon::clock(NAV_ICON_SIZE, tint))
+        .style(shown_or_quiet_style(by_age, tint))
+        .on_press(Message::ColorBy(other));
+    raised_group(with_tooltip(button, tooltip_label))
 }
 
 fn toolbar(b: &Browser) -> Element<'_, Message> {
@@ -588,7 +607,7 @@ fn toolbar(b: &Browser) -> Element<'_, Message> {
         .width(Fill)
         .style(depth::well_input(FRAME_RADIUS));
 
-    let chart_side = row![nav, chart_switch(b), path_bar(b)]
+    let chart_side = row![nav, chart_switch(b), color_switch(b), path_bar(b)]
         .spacing(8)
         .align_y(Alignment::Center)
         .width(Length::FillPortion(CHART_SIDE_PORTION));
@@ -724,7 +743,11 @@ fn chart_panel(b: &Browser) -> Element<'_, Message> {
         }),
     };
 
-    let chart = sensor(chart).on_resize(Message::ChartMeasured);
+    let chart: Element<'_, Message> = sensor(chart).on_resize(Message::ChartMeasured).into();
+    let chart = match b.color_by {
+        ColorBy::Kind => chart,
+        ColorBy::Age => column![age_strip(b), chart].spacing(AGE_STRIP_GAP).into(),
+    };
     let chart_above_the_collector =
         column![chart, Space::new().height(COLLECTOR_FIXED_HEIGHT)].spacing(CHART_COLLECTOR_GAP);
     let collector_floating_over_the_chart =
@@ -735,6 +758,168 @@ fn chart_panel(b: &Browser) -> Element<'_, Message> {
             .push(container(notice_banner(message)).width(Fill).padding(NOTICE_MARGIN).align_x(Alignment::Center));
     }
     layers.width(Length::FillPortion(CHART_SIDE_PORTION)).height(Fill).into()
+}
+
+const AGE_STRIP_GAP: f32 = 8.0;
+const AGE_STRIP_HEIGHT: f32 = 52.0;
+const AGE_STRIP_PADDING: f32 = 4.0;
+const AGE_STRIP_BAR_HEIGHT: f32 = 5.0;
+const AGE_STRIP_BAR_RADIUS: f32 = 2.0;
+const AGE_STRIP_TEXT_SIZE: f32 = 11.5;
+const AGE_STRIP_DOT: f32 = 8.0;
+const AGE_STRIP_SPACING: f32 = 5.0;
+const AGE_CHIP_PADDING_X: f32 = 7.0;
+const AGE_CHIP_PADDING_Y: f32 = 2.0;
+const AGE_BAR_PORTIONS: f64 = 1000.0;
+const DIMMED_AGE_STRENGTH: f32 = 0.3;
+const AGE_SUMMARY_GAP: f32 = 12.0;
+
+const UNKNOWN_AGE_LABEL: &str = "Unknown";
+const SHOW_EVERY_AGE_TOOLTIP: &str = "Show every age again";
+
+fn unit_names(unit: AgeUnit) -> (&'static str, &'static str) {
+    match unit {
+        AgeUnit::Month => ("month", "months"),
+        AgeUnit::Year => ("year", "years"),
+    }
+}
+
+fn span_phrase(span: AgeSpan) -> String {
+    let (one, many) = unit_names(span.unit);
+    count_phrase(span.count.into(), one, many)
+}
+
+fn at_least_phrase(span: AgeSpan) -> String {
+    format!("{}+ {}", span.count, unit_names(span.unit).1)
+}
+
+fn age_range_label(bucket: AgeBucket) -> String {
+    match (bucket.from(), bucket.until()) {
+        (None, Some(end)) => format!("< {}", span_phrase(end)),
+        (Some(start), Some(end)) if start.unit == end.unit => format!("{}–{}", start.count, span_phrase(end)),
+        (Some(start), Some(end)) => format!("{}–{} months", start.months(), end.months()),
+        (Some(start), None) => at_least_phrase(start),
+        (None, None) => UNKNOWN_AGE_LABEL.to_string(),
+    }
+}
+
+struct AgeTexts {
+    label: String,
+    dim_newer_tooltip: Option<String>,
+}
+
+static AGE_TEXTS: LazyLock<[AgeTexts; AgeBucket::COUNT]> = LazyLock::new(|| {
+    AgeBucket::ALL.map(|bucket| AgeTexts {
+        label: age_range_label(bucket),
+        dim_newer_tooltip: bucket.from().map(|start| format!("Dim what changed in the last {}", span_phrase(start))),
+    })
+});
+
+fn age_texts(bucket: AgeBucket) -> &'static AgeTexts {
+    &AGE_TEXTS[bucket.index()]
+}
+
+fn shown_in_full(b: &Browser, bucket: AgeBucket) -> bool {
+    bucket.stays_lit(b.aged_at_least)
+}
+
+fn age_strip_color(b: &Browser, bucket: AgeBucket) -> Color {
+    let color = theme::age_color(bucket);
+    if shown_in_full(b, bucket) { color } else { theme::mix(theme::WELL, color, DIMMED_AGE_STRENGTH) }
+}
+
+fn ages_present(ages: &AgeBreakdown) -> impl Iterator<Item = (AgeBucket, u64)> + '_ {
+    AgeBucket::ALL.into_iter().map(|bucket| (bucket, ages.bytes(bucket))).filter(|&(_, bytes)| bytes > 0)
+}
+
+fn age_bar<'a>(b: &'a Browser, ages: &AgeBreakdown) -> Element<'a, Message> {
+    let total = ages.total().max(1) as f64;
+    let parts = ages_present(ages).map(|(bucket, bytes)| {
+        let portion = ((bytes as f64 / total) * AGE_BAR_PORTIONS).round().max(1.0) as u16;
+        let color = age_strip_color(b, bucket);
+        container(Space::new())
+            .width(Length::FillPortion(portion))
+            .height(AGE_STRIP_BAR_HEIGHT)
+            .style(move |_| rounded_box(color, AGE_STRIP_BAR_RADIUS))
+            .into()
+    });
+    Row::with_children(parts).spacing(1).into()
+}
+
+fn age_chip_width(bucket: AgeBucket, size: &str) -> f32 {
+    let label = generous_text_width(&age_texts(bucket).label, AGE_STRIP_TEXT_SIZE) + AGE_STRIP_DOT + AGE_STRIP_SPACING;
+    label.max(generous_text_width(size, AGE_STRIP_TEXT_SIZE)) + 2.0 * AGE_CHIP_PADDING_X
+}
+
+fn age_chip(b: &Browser, bucket: AgeBucket, size: String) -> Element<'_, Message> {
+    let in_full = shown_in_full(b, bucket);
+    let is_the_threshold = b.aged_at_least == Some(bucket);
+    let label_color = if in_full { theme::TEXT } else { theme::TEXT_DIM };
+    let content = column![
+        row![
+            dot(age_strip_color(b, bucket), AGE_STRIP_DOT),
+            text(age_texts(bucket).label.as_str())
+                .size(AGE_STRIP_TEXT_SIZE)
+                .color(label_color)
+                .wrapping(Wrapping::None),
+        ]
+        .spacing(AGE_STRIP_SPACING)
+        .align_y(Alignment::Center),
+        text(size).size(AGE_STRIP_TEXT_SIZE).color(theme::TEXT_DIM).wrapping(Wrapping::None),
+    ];
+    let message = bucket.from().map(|_| Message::ShowAgesFrom((!is_the_threshold).then_some(bucket)));
+    let chip = button(content)
+        .padding([AGE_CHIP_PADDING_Y, AGE_CHIP_PADDING_X])
+        .style(shown_or_quiet_style(is_the_threshold, label_color))
+        .on_press_maybe(message);
+    let tooltip_label =
+        if is_the_threshold { Some(SHOW_EVERY_AGE_TOOLTIP) } else { age_texts(bucket).dim_newer_tooltip.as_deref() };
+    match tooltip_label {
+        Some(label) => with_tooltip(chip, label),
+        None => chip.into(),
+    }
+}
+
+fn age_summary(b: &Browser, ages: &AgeBreakdown) -> Option<String> {
+    let oldest = b.aged_at_least?;
+    let unchanged_for = at_least_phrase(oldest.from()?);
+    Some(format!("{} unchanged for {unchanged_for}", format_size(ages.bytes_at_least(oldest))))
+}
+
+fn age_chips(b: &Browser, ages: AgeBreakdown, width: f32) -> Element<'_, Message> {
+    let sized: Vec<(AgeBucket, String)> =
+        ages_present(&ages).map(|(bucket, bytes)| (bucket, format_size(bytes))).collect();
+    let chips_width: f32 = sized.iter().map(|(bucket, size)| age_chip_width(*bucket, size)).sum::<f32>()
+        + AGE_STRIP_SPACING * sized.len().saturating_sub(1) as f32;
+    let mut chips = Row::with_children(sized.into_iter().map(|(bucket, size)| age_chip(b, bucket, size)))
+        .spacing(AGE_STRIP_SPACING)
+        .align_y(Alignment::Center);
+    if let Some(summary) = age_summary(b, &ages)
+        && chips_width + AGE_SUMMARY_GAP + generous_text_width(&summary, AGE_STRIP_TEXT_SIZE) <= width
+    {
+        chips = chips
+            .push(Space::new().width(Fill))
+            .push(text(summary).size(AGE_STRIP_TEXT_SIZE).color(theme::TEXT).wrapping(Wrapping::None));
+    }
+    chips.into()
+}
+
+fn age_strip(b: &Browser) -> Element<'_, Message> {
+    let content: Element<'_, Message> = match b.ages {
+        Some(ages) => column![
+            container(age_bar(b, &ages)).padding([0.0, AGE_CHIP_PADDING_X]),
+            responsive(move |size| age_chips(b, ages, size.width)),
+        ]
+        .spacing(AGE_STRIP_SPACING)
+        .into(),
+        None => Space::new().into(),
+    };
+    container(content)
+        .padding(AGE_STRIP_PADDING)
+        .width(Fill)
+        .height(AGE_STRIP_HEIGHT)
+        .style(|_| depth::well(theme::WELL, FRAME_RADIUS))
+        .into()
 }
 
 const NOTICE_MARGIN: f32 = 8.0;
@@ -1384,11 +1569,15 @@ const LIST_HEADER_TITLE: TitleStyle =
 const DETAILS_TITLE: TitleStyle =
     TitleStyle { text_size: DETAILS_TITLE_TEXT_SIZE, dot: LIST_ROW_DOT, spacing: LIST_ROW_SPACING };
 
+fn node_color(b: &Browser, id: NodeId) -> Color {
+    theme::age_or_kind_color(b.color_by.shown_age(&b.tree, id), b.tree.node(id).kind())
+}
+
 fn name_and_size_title(b: &Browser, id: NodeId, width: f32, style: TitleStyle) -> Element<'_, Message> {
     let size = format_size(b.size(id));
     let name_width = width - style.dot - 2.0 * style.spacing - generous_text_width(&size, style.text_size);
     row![
-        dot(theme::kind_color(b.tree.node(id).kind()), style.dot),
+        dot(node_color(b, id), style.dot),
         clipped(
             text(fit_width(&b.tree.name(id), name_width, style.text_size))
                 .size(style.text_size)
@@ -1405,7 +1594,11 @@ fn selection_actions(b: &Browser, id: NodeId, width: f32) -> Element<'_, Message
     let preview =
         tooltip_at(outlined_text_button(PREVIEW_ACTION, Message::Preview), PREVIEW_SHORTCUT, tooltip::Position::Top);
     let actions = row![preview, outlined_text_button(REVEAL_ACTION, Message::Reveal)].spacing(DETAILS_SPACING);
-    column![name_and_size_title(b, id, width, DETAILS_TITLE), actions].spacing(DETAILS_SPACING).into()
+    let mut details = column![name_and_size_title(b, id, width, DETAILS_TITLE)].spacing(DETAILS_SPACING);
+    if let Some(modified) = modified_phrase(&b.tree, id) {
+        details = details.push(details_text(modified).color(theme::TEXT_DIM));
+    }
+    details.push(actions).into()
 }
 
 fn remedy_button<'a>(remedy: Remedy) -> Option<Element<'a, Message>> {
@@ -1447,7 +1640,7 @@ fn unscanned_space_explanation(
 fn list_row<'a>(b: &'a Browser, r: &'a ListRow, columns: &ListColumns) -> Element<'a, Message> {
     let id = r.id;
     let n = b.tree.node(id);
-    let kind_color = theme::kind_color(n.kind());
+    let kind_color = node_color(b, id);
     let name_color =
         if n.is_synthetic() || n.accounting() == Accounting::Unreadable { theme::TEXT_DIM } else { theme::TEXT };
 

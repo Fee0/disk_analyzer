@@ -21,7 +21,7 @@ code path may assume one OS:
 Two crates:
 
 - `dscan-core`: everything except presentation. Scanning, the result tree,
-  sizes, hidden and purgeable space, sunburst, icicle and treemap layout,
+  sizes, file ages, hidden and purgeable space, sunburst, icicle and treemap layout,
   hit-testing and transitions, search, collecting, the Trash, preview and
   reveal.
 - `dscan-gui`: the iced app. It maps core state to widgets and input, and

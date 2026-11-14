@@ -98,7 +98,8 @@ mod tests {
     #[test]
     fn a_point_hits_the_hole_the_arc_drawn_under_it_or_nothing() {
         let t = tree(vec![F("big", 600), F("small", 200)]);
-        let layout = partition(&t, t.root(), LayoutParams::default(), None, &Exclusions::default());
+        let layout =
+            partition(&t, t.root(), LayoutParams::default(), crate::paint::Paint::default(), &Exclusions::default());
         let g = ChartGeometry::fitting(SIDE, SIDE);
         assert_eq!(g.hit(&layout, g.center), ChartHit::Hole);
         for name in ["big", "small"] {
