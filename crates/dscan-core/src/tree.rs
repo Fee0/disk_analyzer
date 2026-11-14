@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::age::{AgeBucket, Day};
-use crate::kind::Kind;
+use crate::kind::{Kind, KindSet};
 use crate::platform::{Current, Platform};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -138,6 +138,7 @@ impl Default for ScanStats {
 pub struct Tree {
     nodes: Vec<Node>,
     newest: Vec<Option<Day>>,
+    kinds_inside: Vec<KindSet>,
     names: Vec<u8>,
     children_largest_first: Vec<u32>,
     root_path: PathBuf,
@@ -188,6 +189,10 @@ impl Tree {
     #[inline]
     pub fn age(&self, id: NodeId) -> AgeBucket {
         AgeBucket::of(self.newest_change(id), self.stats.scanned_on)
+    }
+    #[inline]
+    pub(crate) fn kinds_inside(&self, id: NodeId) -> KindSet {
+        self.kinds_inside[id.idx()]
     }
     #[inline]
     pub fn name_bytes(&self, id: NodeId) -> &[u8] {
@@ -260,7 +265,7 @@ impl Tree {
         self.mark_subtree_removed(id);
         let shrunken_ancestors: Vec<NodeId> = self.ancestors(id).skip(1).collect();
         self.subtract_sizes_of_removed_from(&shrunken_ancestors, id);
-        self.date_by_their_newest_live_child(&shrunken_ancestors);
+        self.refresh_dates_and_kinds_from_live_children(&shrunken_ancestors);
         for &a in &shrunken_ancestors {
             if let Some(p) = self.parent(a) {
                 self.move_shrunken_child_to_its_new_rank(p, a);
@@ -287,10 +292,11 @@ impl Tree {
         }
     }
 
-    fn date_by_their_newest_live_child(&mut self, innermost_first: &[NodeId]) {
+    fn refresh_dates_and_kinds_from_live_children(&mut self, innermost_first: &[NodeId]) {
         for &folder in innermost_first {
             let newest = self.children(folder).filter_map(|c| self.newest_change(c)).max();
             self.newest[folder.idx()] = newest;
+            self.kinds_inside[folder.idx()] = self.children(folder).map(|c| self.kinds_inside(c)).collect();
         }
     }
 
@@ -333,6 +339,8 @@ pub(crate) struct DirNode {
     pub file_days: Vec<Option<Day>>,
     pub dirs: Vec<DirNode>,
     pub newest: Option<Day>,
+    pub kinds_inside: KindSet,
+    pub one_kind_throughout: bool,
     pub alloc: u64,
     pub items: u32,
     pub dirs_in_subtree: u64,
@@ -360,6 +368,7 @@ impl DirNode {
 
     pub fn finish(&mut self, forced_kind: Option<Kind>) {
         let mut alloc_by_kind = [0u64; Kind::COUNT];
+        let mut kinds_inside = KindSet::default();
         let (mut alloc, mut items) = (0u64, 0u32);
         let mut dirs_in_subtree = 1u64;
         let mut name_bytes_in_subtree = (self.name.len() + self.names.len()) as u64;
@@ -367,6 +376,7 @@ impl DirNode {
             alloc += f.alloc;
             items = items.saturating_add(1);
             alloc_by_kind[f.kind as usize] += f.alloc.max(1);
+            kinds_inside = kinds_inside.union(KindSet::of(f.kind));
         }
         for d in &self.dirs {
             alloc += d.alloc;
@@ -374,6 +384,7 @@ impl DirNode {
             dirs_in_subtree += d.dirs_in_subtree;
             name_bytes_in_subtree += d.name_bytes_in_subtree;
             alloc_by_kind[d.kind as usize] += d.alloc;
+            kinds_inside = kinds_inside.union(d.kinds_inside);
         }
         let dated_children = self.file_days.iter().copied().chain(self.dirs.iter().map(|d| d.newest));
         self.newest = dated_children.flatten().max();
@@ -382,6 +393,8 @@ impl DirNode {
         self.dirs_in_subtree = dirs_in_subtree;
         self.name_bytes_in_subtree = name_bytes_in_subtree;
         self.kind = forced_kind.unwrap_or_else(|| dominant_kind(&alloc_by_kind));
+        self.one_kind_throughout = forced_kind.is_some();
+        self.kinds_inside = forced_kind.map_or(kinds_inside, KindSet::of);
     }
 }
 
@@ -415,6 +428,7 @@ pub(crate) fn build(
         root.name_bytes_in_subtree as usize + root_name.len() + synthetic.iter().map(|s| s.name.len()).sum::<usize>();
     let mut nodes: Vec<Node> = Vec::with_capacity(exact_node_count);
     let mut newest: Vec<Option<Day>> = Vec::with_capacity(exact_node_count);
+    let mut kinds_inside: Vec<KindSet> = Vec::with_capacity(exact_node_count);
     let mut names: Vec<u8> = Vec::with_capacity(exact_name_bytes);
 
     let push_name = |names: &mut Vec<u8>, s: &[u8]| -> (u32, u16) {
@@ -427,13 +441,18 @@ pub(crate) fn build(
     let name = push_name(&mut names, root_name.as_bytes());
     nodes.push(Node::new(0, name, root.kind, root.flags, root.items, root.alloc));
     newest.push(root.newest);
+    let root_one_kind = root.one_kind_throughout.then_some(root.kinds_inside);
+    kinds_inside.push(
+        root_one_kind
+            .unwrap_or_else(|| synthetic.iter().map(|s| KindSet::of(s.kind)).chain([root.kinds_inside]).collect()),
+    );
 
-    let mut queue: std::collections::VecDeque<(u32, DirNode, Vec<Synthetic>)> = Default::default();
-    queue.push_back((0, root, synthetic));
+    let mut queue: std::collections::VecDeque<(u32, DirNode, Vec<Synthetic>, Option<KindSet>)> = Default::default();
+    queue.push_back((0, root, synthetic, root_one_kind));
 
     let mut by_alloc: Vec<LargestFirstThenScanOrder> = Vec::new();
 
-    while let Some((id, dir, synth)) = queue.pop_front() {
+    while let Some((id, dir, synth, enclosing_one_kind)) = queue.pop_front() {
         let DirNode { names: dir_names, files, file_days, mut dirs, .. } = dir;
         let (nd, nf) = (dirs.len(), files.len());
         let total = nd + nf + synth.len();
@@ -454,9 +473,11 @@ pub(crate) fn build(
             if i < nd {
                 let d = std::mem::take(&mut dirs[i]);
                 let name = push_name(&mut names, &d.name);
+                let one_kind = enclosing_one_kind.or_else(|| d.one_kind_throughout.then_some(d.kinds_inside));
                 nodes.push(Node::new(id, name, d.kind, d.flags, d.items, d.alloc));
                 newest.push(d.newest);
-                queue.push_back((child_id, d, Vec::new()));
+                kinds_inside.push(one_kind.unwrap_or(d.kinds_inside));
+                queue.push_back((child_id, d, Vec::new(), one_kind));
             } else if i < nd + nf {
                 let f = &files[i - nd];
                 let start = f.name_off_in_dir_names as usize;
@@ -464,17 +485,28 @@ pub(crate) fn build(
                 let name = push_name(&mut names, s);
                 nodes.push(Node::new(id, name, f.kind, f.flags, 1, f.alloc));
                 newest.push(file_days[i - nd]);
+                kinds_inside.push(enclosing_one_kind.unwrap_or(KindSet::of(f.kind)));
             } else {
                 let s = &synth[i - nd - nf];
                 let name = push_name(&mut names, s.name.as_bytes());
                 nodes.push(Node::new(id, name, s.kind, 0, 0, s.size));
                 newest.push(None);
+                kinds_inside.push(enclosing_one_kind.unwrap_or(KindSet::of(s.kind)));
             }
         }
     }
 
     let laid_out_largest_first: Vec<u32> = (0..nodes.len() as u32).collect();
-    Tree { nodes, newest, names, children_largest_first: laid_out_largest_first, root_path, whole_disk, stats }
+    Tree {
+        nodes,
+        newest,
+        kinds_inside,
+        names,
+        children_largest_first: laid_out_largest_first,
+        root_path,
+        whole_disk,
+        stats,
+    }
 }
 
 #[cfg(test)]
@@ -496,7 +528,7 @@ pub(crate) mod test_util {
                 T::D(n, c) => d.dirs.push(to_dir(n, c)),
             }
         }
-        d.finish(None);
+        d.finish(Kind::of_dir(name.as_bytes()));
         d
     }
 
@@ -626,6 +658,39 @@ mod tests {
         assert_eq!(t.newest_change(deep), None, "nothing dated is left in deep");
         assert_eq!(t.newest_change(a), Some(day(19_000)), "a is now as new as its remaining file");
         assert_eq!(t.age(a), AgeBucket::UnderFiveYears, "1000 days old");
+    }
+
+    #[test]
+    fn a_folder_holds_the_kinds_of_everything_inside_and_a_bundle_is_its_own_kind_throughout() {
+        let mut t = tree(vec![
+            D(
+                "Apps",
+                vec![
+                    D("Safari.app", vec![F("Safari", 100), D("Web.framework", vec![F("Web.dylib", 60)])]),
+                    F("a.txt", 1),
+                ],
+            ),
+            D("Movies", vec![F("a.mov", 10)]),
+        ]);
+        let at = |path: &[&str]| descend(&t, path);
+        let (apps, safari, web) =
+            (at(&["Apps"]), at(&["Apps", "Safari.app"]), at(&["Apps", "Safari.app", "Web.framework"]));
+        let inside_apps = t.kinds_inside(apps);
+        assert!(inside_apps.contains(Kind::App) && inside_apps.contains(Kind::Document));
+        assert!(!inside_apps.contains(Kind::Library), "what is inside a bundle counts as the bundle");
+        assert_eq!(t.kinds_inside(safari).only(), Some(Kind::App));
+        assert_eq!(t.kinds_inside(web).only(), Some(Kind::App), "the outermost bundle decides");
+        assert_eq!(t.kinds_inside(at(&["Apps", "Safari.app", "Safari"])), KindSet::of(Kind::App));
+        assert_eq!(t.kinds_inside(at(&["Movies", "a.mov"])).only(), Some(Kind::Video), "a loose file is its own kind");
+
+        let movies = at(&["Movies"]);
+        assert!(t.remove(web));
+        assert_eq!(t.kinds_inside(safari).only(), Some(Kind::App), "a bundle stays its own kind as its insides go");
+        assert!(t.remove(safari));
+        assert_eq!(t.kinds_inside(apps), KindSet::of(Kind::Document), "removal takes the app's kind away");
+        assert!(t.remove(descend(&t, &["Movies", "a.mov"])));
+        assert_eq!(t.kinds_inside(movies), KindSet::default(), "an emptied folder holds no kind");
+        assert!(!t.kinds_inside(t.root()).contains(Kind::Video));
     }
 
     #[test]

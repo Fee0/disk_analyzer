@@ -9,6 +9,11 @@ pub struct Exclusions {
     excluded_bytes_below_or_at: HashMap<NodeId, u64>,
 }
 
+pub(crate) enum Step {
+    Descend,
+    Stop,
+}
+
 impl Exclusions {
     pub fn new(tree: &Tree, excluded: &[NodeId]) -> Self {
         let excluded_items: HashSet<NodeId> = excluded.iter().copied().filter(|&item| tree.is_live(item)).collect();
@@ -46,6 +51,17 @@ impl Exclusions {
             .collect();
         kept.sort_by_key(|&(_, size)| Reverse(size));
         ChildOrder::Resorted(kept.into_iter())
+    }
+
+    pub(crate) fn walk_below(&self, tree: &Tree, from: NodeId, mut visit: impl FnMut(NodeId, u64) -> Step) {
+        let mut folders = vec![from];
+        while let Some(folder) = folders.pop() {
+            for (child, size) in self.children_with_sizes(tree, folder) {
+                if let Step::Descend = visit(child, size) {
+                    folders.push(child);
+                }
+            }
+        }
     }
 }
 

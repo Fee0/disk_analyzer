@@ -29,7 +29,7 @@ pub use desktop::{COMMAND_KEY, DesktopError, PREVIEW_ACTION, RESCAN_SHORTCUT, RE
 pub use exclusions::Exclusions;
 pub use hidden::{Cause, Remedy, SpaceExplanation};
 pub use icicle::{IcicleGeometry, IcicleHit};
-pub use kind::Kind;
+pub use kind::{Kind, KindBreakdown, kind_breakdown};
 pub use layout::{Arc, Layout, LayoutParams, MAX_DEPTH, Segment, partition};
 pub use paint::{ColorBy, Paint};
 pub use scan::{CancelToken, Progress, ProgressSnapshot, ScanError, ScanOptions, scan};

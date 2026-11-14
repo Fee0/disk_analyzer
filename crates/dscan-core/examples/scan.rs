@@ -55,6 +55,17 @@ fn main() {
     for bucket in dscan_core::AgeBucket::ALL {
         println!("  {:>10}  {bucket:?}", format_size(breakdown.bytes(bucket)));
     }
+    let kinds = || dscan_core::kind_breakdown(&tree, root, &exclusions);
+    let (breakdown, fastest, median) = fastest_and_median(kinds);
+    println!("kinds: fastest {fastest:.2?}, median {median:.2?} of {LAYOUT_RUNS} runs");
+    for (kind, bytes) in breakdown.largest_first() {
+        println!("  {:>10}  {kind:?}", format_size(bytes));
+    }
+    let only_videos = dscan_core::Paint { only_kind: Some(dscan_core::Kind::Video), ..Default::default() };
+    let filtered_layout =
+        || dscan_core::partition(&tree, root, dscan_core::LayoutParams::default(), only_videos, &exclusions);
+    let (arcs, fastest, median) = fastest_and_median(filtered_layout);
+    println!("layout of videos only: {} arcs, fastest {fastest:.2?}, median {median:.2?}", arcs.len());
     for q in ["readme", "readme", "a", "zzqx"] {
         let t = Instant::now();
         let r = dscan_core::search(&tree, q, &CancelToken::default());

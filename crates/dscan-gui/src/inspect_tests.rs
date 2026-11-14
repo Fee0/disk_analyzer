@@ -2,7 +2,7 @@ use std::path::Path;
 
 use dscan_core::ScanOptions;
 use dscan_core::hidden::HIDDEN_SPACE_NAME;
-use iced::Settings;
+use iced::{Point, Settings};
 use iced_test::{Error, Simulator};
 
 use crate::app::test_util::{
@@ -16,7 +16,7 @@ use dscan_core::ChartKind;
 const VIEW: (f32, f32) = (view::DEFAULT_WINDOW_SIZE.width, view::DEFAULT_WINDOW_SIZE.height);
 const OUT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/iced-inspect");
 const A_CHART_SEGMENT: (f32, f32) = (440.0, 320.0);
-const AN_ICICLE_BAR: (f32, f32) = (200.0, 130.0);
+const AN_ICICLE_BAR: (f32, f32) = (200.0, 180.0);
 const CLOSE_BUTTON_COLUMN_X: f32 = 960.0;
 
 pub(crate) fn write_files(root: &Path, files: &[(&str, usize)], fill: u8) {
@@ -63,6 +63,15 @@ fn finish_chart_animation(app: &mut App) {
     let _ = app.update(Message::AnimationFrame(first_frame));
     let _ = app.update(Message::AnimationFrame(first_frame + LONGER_THAN_ANY_CHART_ANIMATION));
     assert!(on_screen(app).animation.is_none(), "the animation ends once its time is up");
+    count_the_breakdowns_without_their_threads(app);
+}
+
+fn count_the_breakdowns_without_their_threads(app: &mut App) {
+    if let Screen::Browse(b) = &mut app.screen {
+        let (tree, focus, excluded) = (&b.tree, b.focus, b.collector.exclusions());
+        b.ages.value = Some(dscan_core::age_breakdown(tree, focus, excluded));
+        b.kinds.value = Some(dscan_core::kind_breakdown(tree, focus, excluded));
+    }
 }
 
 fn shoot_chart_animation(app: &mut App, name: &str, kind: dscan_core::TransitionKind) -> Result<(), Error> {
@@ -289,7 +298,7 @@ fn deep_path_bar_shows_root_ellipsis_and_last_folders_and_the_ellipsis_steps_int
     let back_button = ui_inspect::nodes(&mut ui)
         .into_iter()
         .find(|n| n.text.as_deref() == Some("acme"))
-        .map(|acme| iced::Point::new(54.0, acme.bounds.center_y()))
+        .map(|acme| Point::new(54.0, acme.bounds.center_y()))
         .unwrap();
     ui_inspect::hover(&mut ui, back_button);
     shoot(&mut ui, "path-bar-back-hover")?;
@@ -421,7 +430,6 @@ fn f5_or_cmd_r_scans_the_shown_results_again() {
 #[test]
 fn drag_to_collector() {
     use dscan_core::Segment;
-    use iced::Point;
     let dir = tempfile::tempdir().unwrap();
     let mut app = browser_app(dir.path());
     let b = on_screen(&app);
@@ -1279,6 +1287,7 @@ fn let_the_chart_measure_itself(app: &mut App) {
         let _ = ui.simulate([about_to_draw]);
         ui.into_messages().collect()
     };
+    count_the_breakdowns_without_their_threads(app);
     for m in msgs {
         let _ = app.update(m);
     }
@@ -1504,11 +1513,6 @@ fn small_item_groups(app: &App, folder: dscan_core::NodeId) -> Vec<(u32, bool)> 
         .collect()
 }
 
-fn count_ages_without_their_thread(app: &mut App) {
-    let b = on_screen_mut(app);
-    b.ages = Some(dscan_core::age_breakdown(&b.tree, b.focus, b.collector.exclusions()));
-}
-
 #[test]
 fn inspect_age_colors() -> Result<(), Error> {
     use dscan_core::{AgeBucket, ColorBy, TransitionKind};
@@ -1530,7 +1534,7 @@ fn inspect_age_colors() -> Result<(), Error> {
         "the clock switches the colors to ages: {pressed:?}"
     );
     let _ = app.update(Message::ColorBy(ColorBy::Age));
-    count_ages_without_their_thread(&mut app);
+    count_the_breakdowns_without_their_threads(&mut app);
     shoot_chart_animation(&mut app, "age-recolor", TransitionKind::Morph)?;
     let_the_chart_measure_itself(&mut app);
     {
@@ -1542,7 +1546,7 @@ fn inspect_age_colors() -> Result<(), Error> {
     }
 
     let b = on_screen(&app);
-    let ages = b.ages.expect("the ages are counted");
+    let ages = b.ages.value.expect("the ages are counted");
     assert_eq!(ages.total(), b.chart.total(), "the strip accounts for every byte in the chart");
     assert!(ages.bytes(AgeBucket::FiveYearsOrMore) > 0 && ages.bytes(AgeBucket::UnderAMonth) > 0);
 
@@ -1590,5 +1594,131 @@ fn inspect_age_colors() -> Result<(), Error> {
     assert_eq!(b.aged_at_least, None, "coloring by type again shows every age");
     let mut ui = sim(&app);
     assert!(ui.find("2\u{2013}5 years").is_err(), "the age strip leaves with the age colors");
+    Ok(())
+}
+
+fn narrowest_sim(app: &App) -> Simulator<'_, Message> {
+    let narrowest = (view::MIN_WINDOW_SIZE.width, view::MIN_WINDOW_SIZE.height);
+    Simulator::with_size(Settings::default(), narrowest, view::view(app))
+}
+
+fn pointing_at(app: &App, points: &[Point]) -> Vec<Message> {
+    let mut ui = narrowest_sim(app);
+    for &point in points {
+        ui_inspect::hover(&mut ui, point);
+    }
+    ui.into_messages().collect()
+}
+
+fn the_more_chip_label(ui: &mut Simulator<'_, Message>) -> Option<String> {
+    (1..=dscan_core::Kind::COUNT)
+        .map(|left_out| format!("+{left_out} more"))
+        .find(|label| ui.find(label.as_str()).is_ok())
+}
+
+#[test]
+fn inspect_kind_strip() -> Result<(), Error> {
+    use dscan_core::{ColorBy, Kind, TransitionKind};
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = browser_app(dir.path());
+    let_the_chart_measure_itself(&mut app);
+    let chosen = {
+        let mut ui = sim(&app);
+        println!("{}", ui_inspect::report(&mut ui, VIEW));
+        shoot(&mut ui, "kind-strip")?;
+        ui.click("Videos")?;
+        clicks_only(ui.into_messages())
+    };
+    assert!(
+        matches!(chosen[..], [Message::ShowOnlyKind(Some(Kind::Video))]),
+        "a type dims every other type: {chosen:?}"
+    );
+
+    let _ = app.update(Message::ShowOnlyKind(Some(Kind::Video)));
+    shoot_chart_animation(&mut app, "kind-dim-others", TransitionKind::Morph)?;
+    let b = on_screen(&app);
+    let (movies, pictures) = (descend(&b.tree, &["Movies"]), descend(&b.tree, &["Pictures"]));
+    let dscan_core::Chart::Sunburst(layout) = &b.chart else { panic!("a sunburst") };
+    let lit = |id| layout.find(dscan_core::Segment::Node(id)).map(|(_, arc)| arc.relevant);
+    assert_eq!(lit(movies), Some(true), "the movies stay lit");
+    assert_eq!(lit(pictures), Some(false), "the pictures are dimmed");
+    let kinds = b.kinds.value.expect("the types are counted");
+    let percent = (kinds.bytes(Kind::Video) as f64 / kinds.total() as f64 * 100.0).round();
+    {
+        let mut ui = sim(&app);
+        shoot(&mut ui, "kind-only-videos")?;
+        ui.find(format!("{percent}% videos").as_str())?;
+    }
+
+    let more = {
+        let mut ui = narrowest_sim(&app);
+        shoot(&mut ui, "kind-strip-narrow")?;
+        ui.find("Videos").expect("the chosen type keeps its chip however narrow the window");
+        the_more_chip_label(&mut ui).expect("the types that do not fit fold into one chip")
+    };
+    let opened = {
+        let mut ui = narrowest_sim(&app);
+        ui.click(more.as_str())?;
+        clicks_only(ui.into_messages())
+    };
+    assert!(matches!(opened[..], [Message::ShowFoldedChips(true)]), "the more chip opens a menu: {opened:?}");
+
+    let _ = app.update(Message::ShowFoldedChips(true));
+    let (smallest, _) = *kinds.largest_first().last().expect("some type is counted");
+    assert_ne!(smallest, Kind::Video, "the smallest type is one that folds away");
+    let smallest_label = view::kind_texts(smallest).label;
+    let _ = app.update(Message::ShowChart(dscan_core::ChartKind::Treemap));
+    finish_chart_animation(&mut app);
+    let entry = bounds_of_text(&mut narrowest_sim(&app), smallest_label);
+    let in_the_bottom_padding = entry.y + entry.height + view::FOLDED_ENTRY_PADDING_Y + view::FOLDED_MENU_PADDING / 2.0;
+    let over_the_menu = [
+        Point::new(entry.center_x(), entry.center_y()),
+        Point::new(entry.x + entry.width, entry.center_y()),
+        Point::new(entry.center_x(), in_the_bottom_padding),
+    ];
+    let hovers_the_chart = |msgs: &[Message]| msgs.iter().any(|m| matches!(m, Message::Hover(Some(_))));
+    let _ = app.update(Message::ShowFoldedChips(false));
+    assert!(hovers_the_chart(&pointing_at(&app, &over_the_menu)), "the treemap lies where the menu opens");
+    let _ = app.update(Message::ShowFoldedChips(true));
+    let hovered = pointing_at(&app, &over_the_menu);
+    assert!(!hovers_the_chart(&hovered), "the open menu hides the chart under it from the cursor: {hovered:?}");
+    let clicked_the_padding = {
+        let mut ui = narrowest_sim(&app);
+        ui_inspect::click_at(&mut ui, over_the_menu[2]);
+        clicks_only(ui.into_messages())
+    };
+    assert!(clicked_the_padding.is_empty(), "a click on the menu's padding reaches nothing: {clicked_the_padding:?}");
+    let picked = {
+        let mut ui = narrowest_sim(&app);
+        shoot(&mut ui, "kind-strip-folded-menu")?;
+        ui.click(smallest_label)?;
+        clicks_only(ui.into_messages())
+    };
+    assert!(
+        matches!(picked[..], [Message::ShowOnlyKind(Some(kind)), Message::ShowFoldedChips(false)] if kind == smallest),
+        "a folded type is picked from the menu, which then closes: {picked:?}"
+    );
+    let clicked_away = {
+        let mut ui = narrowest_sim(&app);
+        ui.click("Videos")?;
+        clicks_only(ui.into_messages())
+    };
+    assert!(
+        matches!(clicked_away[..], [Message::ShowFoldedChips(false)]),
+        "a click outside closes the menu and does nothing else: {clicked_away:?}"
+    );
+    let escaped = {
+        let mut ui = narrowest_sim(&app);
+        ui.tap_key(iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape));
+        ui.into_messages().collect::<Vec<_>>()
+    };
+    assert!(matches!(escaped[..], [Message::ShowFoldedChips(false)]), "Escape closes the menu: {escaped:?}");
+    let _ = app.update(Message::ShowFoldedChips(false));
+    assert!(the_more_chip_label(&mut sim(&app)).is_none(), "at the default width every type has room");
+
+    let _ = app.update(Message::ShowFoldedChips(true));
+    let _ = app.update(Message::ColorBy(ColorBy::Age));
+    assert_eq!(on_screen(&app).only_kind, None, "coloring by age shows every type again");
+    assert!(!on_screen(&app).folded_chips_shown, "the types menu closes with the type strip");
     Ok(())
 }

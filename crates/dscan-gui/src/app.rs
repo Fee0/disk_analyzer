@@ -5,10 +5,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use dscan_core::{
-    Accounting, AgeBreakdown, AgeBucket, CancelToken, Chart, ChartInput, ChartKind, ColorBy, DesktopError, NodeId,
-    PREVIEW_ACTION, Paint, Progress, ProgressSnapshot, REVEAL_ACTION, Refusal, Removal, RemovalPlan, RemovalProgress,
-    RemovalReport, RemovalStatus, ScanError, ScanOptions, SearchResult, Segment, TRASH_NAME, TransitionKind, Tree,
-    Volume, desktop, format_size,
+    Accounting, AgeBreakdown, AgeBucket, CancelToken, Chart, ChartInput, ChartKind, ColorBy, DesktopError, Exclusions,
+    Kind, KindBreakdown, NodeId, PREVIEW_ACTION, Paint, Progress, ProgressSnapshot, REVEAL_ACTION, Refusal, Removal,
+    RemovalPlan, RemovalProgress, RemovalReport, RemovalStatus, ScanError, ScanOptions, SearchResult, Segment,
+    TRASH_NAME, TransitionKind, Tree, Volume, desktop, format_size,
 };
 use iced::keyboard::{self, Key, key::Named};
 use iced::widget::canvas::Cache;
@@ -187,9 +187,10 @@ pub struct Browser {
     pub search: Option<Arc<SearchResult>>,
     pub color_by: ColorBy,
     pub aged_at_least: Option<AgeBucket>,
-    pub ages: Option<AgeBreakdown>,
-    ages_due: bool,
-    ages_gen: u64,
+    pub ages: Counted<AgeBreakdown>,
+    pub only_kind: Option<Kind>,
+    pub kinds: Counted<KindBreakdown>,
+    pub folded_chips_shown: bool,
     pub list: ListView,
     pub collector: Collector,
     pub animation: Option<ChartAnimation>,
@@ -262,6 +263,9 @@ pub enum Message {
     ColorBy(ColorBy),
     ShowAgesFrom(Option<AgeBucket>),
     AgesCounted { generation: u64, ages: Option<AgeBreakdown> },
+    ShowOnlyKind(Option<Kind>),
+    KindsCounted { generation: u64, kinds: Option<KindBreakdown> },
+    ShowFoldedChips(bool),
     ChartMeasured(Size),
     ForBrowser(BrowserId, Box<Message>),
 }
@@ -614,6 +618,44 @@ impl Drop for Browser {
     }
 }
 
+pub struct Counted<T> {
+    pub value: Option<T>,
+    due: bool,
+    generation: u64,
+}
+
+impl<T> Default for Counted<T> {
+    fn default() -> Self {
+        Counted { value: None, due: true, generation: 0 }
+    }
+}
+
+impl<T: Send + 'static> Counted<T> {
+    fn count_when_due(
+        &mut self,
+        tree: &Arc<Tree>,
+        focus: NodeId,
+        excluded: &Exclusions,
+        count: fn(&Tree, NodeId, &Exclusions) -> T,
+        counted: fn(u64, Option<T>) -> Message,
+    ) -> Task<Message> {
+        if !self.due {
+            return Task::none();
+        }
+        self.due = false;
+        self.generation += 1;
+        let generation = self.generation;
+        let (tree, excluded) = (Arc::clone(tree), excluded.clone());
+        Task::perform(off_thread(move || count(&tree, focus, &excluded)), move |value| counted(generation, value.ok()))
+    }
+
+    fn finish(&mut self, generation: u64, value: Option<T>) {
+        if generation == self.generation {
+            self.value = value;
+        }
+    }
+}
+
 impl Browser {
     pub fn new(tree: Tree, opts: ScanOptions, chart: ChartKind, color_by: ColorBy, chart_size: Option<Size>) -> Self {
         let root = tree.root();
@@ -637,9 +679,10 @@ impl Browser {
             search: None,
             color_by,
             aged_at_least: None,
-            ages: None,
-            ages_due: true,
-            ages_gen: 0,
+            ages: Counted::default(),
+            only_kind: None,
+            kinds: Counted::default(),
+            folded_chips_shown: false,
             list: ListView::default(),
             collector: Collector::default(),
             animation: None,
@@ -689,6 +732,7 @@ impl Browser {
                     color_by: self.color_by,
                     search: self.search.as_deref(),
                     aged_at_least: self.aged_at_least,
+                    only_kind: self.only_kind,
                 },
                 excluded: self.collector.exclusions(),
             },
@@ -712,9 +756,9 @@ impl Browser {
             return;
         }
         self.color_by = color_by;
-        if color_by == ColorBy::Kind {
-            self.aged_at_least = None;
-        }
+        self.folded_chips_shown = false;
+        self.aged_at_least = None;
+        self.only_kind = None;
         if animated { self.relayout_animated() } else { self.relayout() }
     }
 
@@ -725,22 +769,41 @@ impl Browser {
         }
     }
 
-    fn count_ages_when_due(&mut self) -> Task<Message> {
-        if !self.ages_due || self.color_by != ColorBy::Age {
-            return Task::none();
+    fn show_only_kind(&mut self, kind: Option<Kind>) {
+        if kind != self.only_kind {
+            self.only_kind = kind;
+            self.relayout_animated();
         }
-        self.ages_due = false;
-        self.ages_gen += 1;
-        let generation = self.ages_gen;
-        let (tree, focus, excluded) = (Arc::clone(&self.tree), self.focus, self.collector.exclusions().clone());
-        Task::perform(off_thread(move || dscan_core::age_breakdown(&tree, focus, &excluded)), move |ages| {
-            Message::AgesCounted { generation, ages: ages.ok() }
-        })
+    }
+
+    fn breakdowns_changed(&mut self) {
+        self.ages.due = true;
+        self.kinds.due = true;
+        self.folded_chips_shown = false;
+    }
+
+    fn count_the_shown_breakdown_when_due(&mut self) -> Task<Message> {
+        let (tree, focus, excluded) = (&self.tree, self.focus, self.collector.exclusions());
+        match self.color_by {
+            ColorBy::Age => {
+                self.ages.count_when_due(tree, focus, excluded, dscan_core::age_breakdown, |generation, ages| {
+                    Message::AgesCounted { generation, ages }
+                })
+            }
+            ColorBy::Kind => {
+                self.kinds.count_when_due(tree, focus, excluded, dscan_core::kind_breakdown, |generation, kinds| {
+                    Message::KindsCounted { generation, kinds }
+                })
+            }
+        }
     }
 
     fn show_chart(&mut self, kind: ChartKind, size: Option<Size>) {
         let measured_for_the_first_time = self.chart_size.is_none() && size.is_some();
         let resized = size != self.chart_size;
+        if resized {
+            self.folded_chips_shown = false;
+        }
         self.chart_size = size;
         if kind != self.chart.kind() {
             self.hovered = None;
@@ -828,7 +891,7 @@ impl Browser {
             self.selected = None;
         }
         self.hovered = None;
-        self.ages_due = true;
+        self.breakdowns_changed();
         self.relayout_animated();
     }
 
@@ -997,7 +1060,7 @@ impl Browser {
             self.selected = None;
         }
         self.hovered = None;
-        self.ages_due = true;
+        self.breakdowns_changed();
         self.relayout_animated();
     }
 
@@ -1085,7 +1148,7 @@ impl Browser {
         self.search_cancel.cancel();
         let Some(tree) = Arc::get_mut(&mut self.tree) else { return Task::none() };
         report.apply_to(tree);
-        self.ages_due = true;
+        self.breakdowns_changed();
         self.removal = None;
         self.collector.prune(&self.tree);
         let items = items_phrase(report.removed());
@@ -1165,7 +1228,7 @@ impl Browser {
         let deadline_before = self.notice_expires_at;
         let task = change(self);
         let task = Task::batch([task, self.apply_finished_removal()]);
-        let task = Task::batch([task, self.count_ages_when_due()]);
+        let task = Task::batch([task, self.count_the_shown_breakdown_when_due()]);
         if (self.hovered, self.selected) != before {
             self.highlight_cache.clear();
         }
@@ -1204,7 +1267,10 @@ impl Browser {
             Message::ShowChart(kind) => self.show_chart(kind, self.chart_size),
             Message::ColorBy(color_by) => self.set_color_by(color_by, true),
             Message::ShowAgesFrom(oldest) => self.show_ages_from(oldest),
-            Message::AgesCounted { generation, ages } if generation == self.ages_gen => self.ages = ages,
+            Message::AgesCounted { generation, ages } => self.ages.finish(generation, ages),
+            Message::ShowOnlyKind(kind) => self.show_only_kind(kind),
+            Message::KindsCounted { generation, kinds } => self.kinds.finish(generation, kinds),
+            Message::ShowFoldedChips(shown) => self.folded_chips_shown = shown,
             Message::ChartMeasured(size) => self.show_chart(self.chart.kind(), Some(size)),
             Message::Navigate(id) => self.set_focus(id, true),
             Message::Back => self.back(),
@@ -1695,10 +1761,10 @@ mod tests {
         let mut b = browser(dir.path());
         let typing_pause = b.update(Message::SearchChanged("mov".into()));
         let answers = outputs(typing_pause);
+        assert!(answers.iter().all(|a| matches!(a, Message::ForBrowser(to, _) if *to == b.id)), "{answers:?}");
         assert!(
-            matches!(answers.as_slice(), [Message::ForBrowser(to, fire)]
-                if *to == b.id && matches!(**fire, Message::SearchFire { .. })),
-            "{answers:?}"
+            answers.iter().any(|a| matches!(a, Message::ForBrowser(_, m) if matches!(**m, Message::SearchFire { .. }))),
+            "the pause in typing fires the search: {answers:?}"
         );
     }
 

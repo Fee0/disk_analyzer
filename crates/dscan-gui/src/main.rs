@@ -5,6 +5,7 @@ mod app;
 mod chart_canvas;
 mod collector;
 mod depth;
+mod dropdown;
 mod fmt;
 #[cfg(test)]
 mod iced_inspect;

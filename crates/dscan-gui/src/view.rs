@@ -1,9 +1,9 @@
 use std::sync::LazyLock;
 
 use dscan_core::{
-    Accounting, AgeBreakdown, AgeBucket, AgeSpan, AgeUnit, COMMAND_KEY, Chart, ChartKind, ColorBy, ItemRemoval, NodeId,
-    PREVIEW_ACTION, RESCAN_SHORTCUT, REVEAL_ACTION, Remedy, Removal, Segment, SpaceExplanation, TRASH_NAME, Volume,
-    format_size,
+    Accounting, AgeBreakdown, AgeBucket, AgeSpan, AgeUnit, COMMAND_KEY, Chart, ChartKind, ColorBy, ItemRemoval, Kind,
+    NodeId, PREVIEW_ACTION, RESCAN_SHORTCUT, REVEAL_ACTION, Remedy, Removal, Segment, SpaceExplanation, TRASH_NAME,
+    Volume, format_size,
 };
 use iced::border;
 use iced::widget::text::Wrapping;
@@ -19,9 +19,10 @@ use crate::app::{
 };
 use crate::chart_canvas::{chart_with_cursor_overlay, modified_phrase};
 use crate::depth::{self, Elevation};
+use crate::dropdown::dropdown;
 use crate::fmt::{
     NAME_IN_A_MESSAGE_MAX_CHARS, count_phrase, elapsed_phrase, fit_width, fit_width_keeping_both_ends,
-    generous_text_width, items_phrase, thousands, truncate, with_folder_mark,
+    generous_text_width, items_phrase, share_phrase, thousands, truncate, with_folder_mark,
 };
 use crate::icicle_chart::Icicle;
 use crate::icon;
@@ -119,15 +120,12 @@ fn outlined_text_button(label: &str, msg: Message) -> Element<'_, Message> {
 const TOOLTIP_MAX_WIDTH: f32 = 320.0;
 const TOOLTIP_RADIUS: f32 = 6.0;
 
+fn floating_card<'a>(card: container::Container<'a, Message>, radius: f32) -> container::Container<'a, Message> {
+    depth::casting_shadow(card.style(move |_| depth::surface(theme::PANEL_HI, radius)), radius, Elevation::Floating)
+}
+
 fn tooltip_box<'a>(label: impl text::IntoFragment<'a>) -> container::Container<'a, Message> {
-    depth::casting_shadow(
-        container(text(label).size(12))
-            .padding([4, 8])
-            .max_width(TOOLTIP_MAX_WIDTH)
-            .style(|_| depth::surface(theme::PANEL_HI, TOOLTIP_RADIUS)),
-        TOOLTIP_RADIUS,
-        Elevation::Floating,
-    )
+    floating_card(container(text(label).size(12)).padding([4, 8]).max_width(TOOLTIP_MAX_WIDTH), TOOLTIP_RADIUS)
 }
 
 const TOOLTIP_GAP: f32 = 4.0;
@@ -744,10 +742,11 @@ fn chart_panel(b: &Browser) -> Element<'_, Message> {
     };
 
     let chart: Element<'_, Message> = sensor(chart).on_resize(Message::ChartMeasured).into();
-    let chart = match b.color_by {
-        ColorBy::Kind => chart,
-        ColorBy::Age => column![age_strip(b), chart].spacing(AGE_STRIP_GAP).into(),
+    let shown = match b.color_by {
+        ColorBy::Kind => kind_strip(b),
+        ColorBy::Age => age_strip(b),
     };
+    let chart: Element<'_, Message> = column![strip(shown, b.folded_chips_shown), chart].spacing(STRIP_GAP).into();
     let chart_above_the_collector =
         column![chart, Space::new().height(COLLECTOR_FIXED_HEIGHT)].spacing(CHART_COLLECTOR_GAP);
     let collector_floating_over_the_chart =
@@ -760,22 +759,224 @@ fn chart_panel(b: &Browser) -> Element<'_, Message> {
     layers.width(Length::FillPortion(CHART_SIDE_PORTION)).height(Fill).into()
 }
 
-const AGE_STRIP_GAP: f32 = 8.0;
-const AGE_STRIP_HEIGHT: f32 = 52.0;
-const AGE_STRIP_PADDING: f32 = 4.0;
-const AGE_STRIP_BAR_HEIGHT: f32 = 5.0;
-const AGE_STRIP_BAR_RADIUS: f32 = 2.0;
-const AGE_STRIP_TEXT_SIZE: f32 = 11.5;
-const AGE_STRIP_DOT: f32 = 8.0;
-const AGE_STRIP_SPACING: f32 = 5.0;
-const AGE_CHIP_PADDING_X: f32 = 7.0;
-const AGE_CHIP_PADDING_Y: f32 = 2.0;
-const AGE_BAR_PORTIONS: f64 = 1000.0;
-const DIMMED_AGE_STRENGTH: f32 = 0.3;
-const AGE_SUMMARY_GAP: f32 = 12.0;
+const STRIP_GAP: f32 = 8.0;
+const STRIP_HEIGHT: f32 = 52.0;
+const STRIP_PADDING: f32 = 4.0;
+const STRIP_BAR_HEIGHT: f32 = 5.0;
+const STRIP_BAR_RADIUS: f32 = 2.0;
+const STRIP_TEXT_SIZE: f32 = 11.5;
+const STRIP_DOT: f32 = 8.0;
+const STRIP_SPACING: f32 = 5.0;
+const CHIP_PADDING_X: f32 = 7.0;
+const CHIP_PADDING_Y: f32 = 2.0;
+const STRIP_BAR_PORTIONS: f64 = 1000.0;
+const DIMMED_IN_THE_STRIP_STRENGTH: f32 = 0.3;
+const STRIP_SUMMARY_GAP: f32 = 12.0;
+const WIDEST_MORE_CHIP_LABEL: &str = "+99 more";
+const WIDEST_SIZE: &str = "999.9 MB";
+pub(crate) const FOLDED_MENU_PADDING: f32 = 4.0;
+pub(crate) const FOLDED_ENTRY_PADDING_Y: f32 = 4.0;
+const FOLDED_ENTRY_SIZE_GAP: f32 = 16.0;
 
 const UNKNOWN_AGE_LABEL: &str = "Unknown";
 const SHOW_EVERY_AGE_TOOLTIP: &str = "Show every age again";
+const SHOW_EVERY_KIND_TOOLTIP: &str = "Show every type again";
+
+#[derive(Clone)]
+struct StripEntry {
+    color: Color,
+    label: &'static str,
+    bytes: u64,
+    size: String,
+    in_full: bool,
+    chosen: bool,
+    press: Option<Message>,
+    tooltip: Option<&'static str>,
+}
+
+impl StripEntry {
+    fn shown_color(&self) -> Color {
+        if self.in_full { self.color } else { theme::mix(theme::WELL, self.color, DIMMED_IN_THE_STRIP_STRENGTH) }
+    }
+
+    fn label_color(&self) -> Color {
+        if self.in_full { theme::TEXT } else { theme::TEXT_DIM }
+    }
+
+    fn width(&self) -> f32 {
+        chip_width(self.label, &self.size)
+    }
+
+    fn into_button(
+        self,
+        content: impl Into<Element<'static, Message>>,
+        width: Length,
+        padding_y: f32,
+    ) -> button::Button<'static, Message> {
+        button(content)
+            .width(width)
+            .padding([padding_y, CHIP_PADDING_X])
+            .style(shown_or_quiet_style(self.chosen, self.label_color()))
+            .on_press_maybe(self.press)
+    }
+}
+
+fn chip_width(label: &str, size: &str) -> f32 {
+    let first_line = STRIP_DOT + STRIP_SPACING + generous_text_width(label, STRIP_TEXT_SIZE);
+    first_line.max(generous_text_width(size, STRIP_TEXT_SIZE)) + 2.0 * CHIP_PADDING_X
+}
+
+#[derive(Clone)]
+struct Strip {
+    entries: Vec<StripEntry>,
+    summary: Option<String>,
+}
+
+fn strip_bar(entries: &[StripEntry]) -> Element<'static, Message> {
+    let total = entries.iter().map(|e| e.bytes).sum::<u64>().max(1) as f64;
+    let parts = entries.iter().filter(|e| e.bytes > 0).map(|e| {
+        let portion = ((e.bytes as f64 / total) * STRIP_BAR_PORTIONS).round().max(1.0) as u16;
+        let color = e.shown_color();
+        container(Space::new())
+            .width(Length::FillPortion(portion))
+            .height(STRIP_BAR_HEIGHT)
+            .style(move |_| rounded_box(color, STRIP_BAR_RADIUS))
+            .into()
+    });
+    Row::with_children(parts).spacing(1).into()
+}
+
+fn strip_text<'a>(content: impl text::IntoFragment<'a>, color: Color) -> text::Text<'a, Theme> {
+    text(content).size(STRIP_TEXT_SIZE).color(color).wrapping(Wrapping::None)
+}
+
+fn chip_content(first_line: Row<'static, Message>, size: String) -> Column<'static, Message> {
+    column![first_line.spacing(STRIP_SPACING).align_y(Alignment::Center), strip_text(size, theme::TEXT_DIM)]
+}
+
+fn strip_chip(entry: StripEntry) -> Element<'static, Message> {
+    let first_line = row![dot(entry.shown_color(), STRIP_DOT), strip_text(entry.label, entry.label_color())];
+    let content = chip_content(first_line, entry.size.clone());
+    let tooltip = entry.tooltip;
+    let chip = entry.into_button(content, Length::Shrink, CHIP_PADDING_Y);
+    match tooltip {
+        Some(label) => tooltip_at(chip, label, tooltip::Position::Bottom),
+        None => chip.into(),
+    }
+}
+
+fn more_chip_width() -> f32 {
+    chip_width(WIDEST_MORE_CHIP_LABEL, WIDEST_SIZE)
+}
+
+fn folded_entry_width(entry: &StripEntry) -> f32 {
+    STRIP_DOT
+        + STRIP_SPACING
+        + generous_text_width(entry.label, STRIP_TEXT_SIZE)
+        + FOLDED_ENTRY_SIZE_GAP
+        + generous_text_width(&entry.size, STRIP_TEXT_SIZE)
+        + 2.0 * CHIP_PADDING_X
+}
+
+fn folded_entry(entry: StripEntry) -> Element<'static, Message> {
+    let content = row![
+        dot(entry.shown_color(), STRIP_DOT),
+        strip_text(entry.label, entry.label_color()),
+        Space::new().width(Fill),
+        strip_text(entry.size.clone(), theme::TEXT_DIM),
+    ]
+    .spacing(STRIP_SPACING)
+    .align_y(Alignment::Center);
+    entry.into_button(content, Fill, FOLDED_ENTRY_PADDING_Y).into()
+}
+
+fn folded_menu(left_out: Vec<StripEntry>) -> Element<'static, Message> {
+    let width = left_out.iter().map(folded_entry_width).fold(0.0, f32::max) + 2.0 * FOLDED_MENU_PADDING;
+    let entries = Column::with_children(left_out.into_iter().map(folded_entry));
+    floating_card(container(entries).width(width).padding(FOLDED_MENU_PADDING), FRAME_RADIUS).into()
+}
+
+fn more_chip(left_out: Vec<StripEntry>, menu_open: bool) -> Element<'static, Message> {
+    let bytes = left_out.iter().map(|e| e.bytes).sum();
+    let label = row![
+        strip_text(format!("+{} more", left_out.len()), theme::TEXT_DIM),
+        icon::chevron_down(STRIP_DOT, theme::TEXT_DIM)
+    ];
+    let opener = button(chip_content(label, format_size(bytes)))
+        .padding([CHIP_PADDING_Y, CHIP_PADDING_X])
+        .style(shown_or_quiet_style(menu_open, theme::TEXT_DIM))
+        .on_press(Message::ShowFoldedChips(!menu_open));
+    dropdown(opener, folded_menu(left_out), menu_open, Message::ShowFoldedChips(false)).gap(TOOLTIP_GAP).into()
+}
+
+fn row_width(widths: impl Iterator<Item = f32>) -> f32 {
+    let (sum, count) = widths.fold((0.0, 0), |(sum, count), w| (sum + w, count + 1));
+    sum + STRIP_SPACING * (count as f32 - 1.0).max(0.0)
+}
+
+struct FittedChips {
+    shown: Vec<StripEntry>,
+    left_out: Vec<StripEntry>,
+    width: f32,
+}
+
+fn fit_chips(entries: Vec<StripEntry>, width: f32) -> FittedChips {
+    let widths: Vec<f32> = entries.iter().map(StripEntry::width).collect();
+    let everything = row_width(widths.iter().copied());
+    if everything <= width {
+        return FittedChips { shown: entries, left_out: Vec::new(), width: everything };
+    }
+    let room = width - more_chip_width() - STRIP_SPACING;
+    let chosen = entries.iter().position(|e| e.chosen);
+    let fits = |leading: usize| {
+        let kept_chosen = chosen.filter(|&c| c >= leading).map(|c| widths[c]);
+        row_width(widths[..leading].iter().copied().chain(kept_chosen)) <= room
+    };
+    let leading = (0..=entries.len()).rev().find(|&n| fits(n)).unwrap_or(0);
+    let mut fitted = FittedChips { shown: Vec::new(), left_out: Vec::new(), width: more_chip_width() };
+    for (i, (entry, entry_width)) in entries.into_iter().zip(widths).enumerate() {
+        if i < leading || Some(i) == chosen {
+            fitted.width += entry_width + STRIP_SPACING;
+            fitted.shown.push(entry);
+        } else {
+            fitted.left_out.push(entry);
+        }
+    }
+    fitted
+}
+
+fn strip_chips(strip: Strip, width: f32, menu_open: bool) -> Element<'static, Message> {
+    let FittedChips { shown, left_out, width: chips_width } = fit_chips(strip.entries, width);
+    let mut chips =
+        Row::with_children(shown.into_iter().map(strip_chip)).spacing(STRIP_SPACING).align_y(Alignment::Center);
+    if !left_out.is_empty() {
+        chips = chips.push(more_chip(left_out, menu_open));
+    }
+    if let Some(summary) = strip.summary
+        && chips_width + STRIP_SUMMARY_GAP + generous_text_width(&summary, STRIP_TEXT_SIZE) <= width
+    {
+        chips = chips.push(Space::new().width(Fill)).push(strip_text(summary, theme::TEXT));
+    }
+    chips.into()
+}
+
+fn strip(shown: Option<Strip>, menu_open: bool) -> Element<'static, Message> {
+    let content: Element<'static, Message> = match shown {
+        Some(shown) => column![
+            container(strip_bar(&shown.entries)).padding([0.0, CHIP_PADDING_X]),
+            responsive(move |size| strip_chips(shown.clone(), size.width, menu_open)),
+        ]
+        .spacing(STRIP_SPACING)
+        .into(),
+        None => Space::new().into(),
+    };
+    container(content)
+        .padding(STRIP_PADDING)
+        .width(Fill)
+        .height(STRIP_HEIGHT)
+        .style(|_| depth::well(theme::WELL, FRAME_RADIUS))
+        .into()
+}
 
 fn unit_names(unit: AgeUnit) -> (&'static str, &'static str) {
     match unit {
@@ -819,65 +1020,8 @@ fn age_texts(bucket: AgeBucket) -> &'static AgeTexts {
     &AGE_TEXTS[bucket.index()]
 }
 
-fn shown_in_full(b: &Browser, bucket: AgeBucket) -> bool {
-    bucket.stays_lit(b.aged_at_least)
-}
-
-fn age_strip_color(b: &Browser, bucket: AgeBucket) -> Color {
-    let color = theme::age_color(bucket);
-    if shown_in_full(b, bucket) { color } else { theme::mix(theme::WELL, color, DIMMED_AGE_STRENGTH) }
-}
-
 fn ages_present(ages: &AgeBreakdown) -> impl Iterator<Item = (AgeBucket, u64)> + '_ {
     AgeBucket::ALL.into_iter().map(|bucket| (bucket, ages.bytes(bucket))).filter(|&(_, bytes)| bytes > 0)
-}
-
-fn age_bar<'a>(b: &'a Browser, ages: &AgeBreakdown) -> Element<'a, Message> {
-    let total = ages.total().max(1) as f64;
-    let parts = ages_present(ages).map(|(bucket, bytes)| {
-        let portion = ((bytes as f64 / total) * AGE_BAR_PORTIONS).round().max(1.0) as u16;
-        let color = age_strip_color(b, bucket);
-        container(Space::new())
-            .width(Length::FillPortion(portion))
-            .height(AGE_STRIP_BAR_HEIGHT)
-            .style(move |_| rounded_box(color, AGE_STRIP_BAR_RADIUS))
-            .into()
-    });
-    Row::with_children(parts).spacing(1).into()
-}
-
-fn age_chip_width(bucket: AgeBucket, size: &str) -> f32 {
-    let label = generous_text_width(&age_texts(bucket).label, AGE_STRIP_TEXT_SIZE) + AGE_STRIP_DOT + AGE_STRIP_SPACING;
-    label.max(generous_text_width(size, AGE_STRIP_TEXT_SIZE)) + 2.0 * AGE_CHIP_PADDING_X
-}
-
-fn age_chip(b: &Browser, bucket: AgeBucket, size: String) -> Element<'_, Message> {
-    let in_full = shown_in_full(b, bucket);
-    let is_the_threshold = b.aged_at_least == Some(bucket);
-    let label_color = if in_full { theme::TEXT } else { theme::TEXT_DIM };
-    let content = column![
-        row![
-            dot(age_strip_color(b, bucket), AGE_STRIP_DOT),
-            text(age_texts(bucket).label.as_str())
-                .size(AGE_STRIP_TEXT_SIZE)
-                .color(label_color)
-                .wrapping(Wrapping::None),
-        ]
-        .spacing(AGE_STRIP_SPACING)
-        .align_y(Alignment::Center),
-        text(size).size(AGE_STRIP_TEXT_SIZE).color(theme::TEXT_DIM).wrapping(Wrapping::None),
-    ];
-    let message = bucket.from().map(|_| Message::ShowAgesFrom((!is_the_threshold).then_some(bucket)));
-    let chip = button(content)
-        .padding([AGE_CHIP_PADDING_Y, AGE_CHIP_PADDING_X])
-        .style(shown_or_quiet_style(is_the_threshold, label_color))
-        .on_press_maybe(message);
-    let tooltip_label =
-        if is_the_threshold { Some(SHOW_EVERY_AGE_TOOLTIP) } else { age_texts(bucket).dim_newer_tooltip.as_deref() };
-    match tooltip_label {
-        Some(label) => with_tooltip(chip, label),
-        None => chip.into(),
-    }
 }
 
 fn age_summary(b: &Browser, ages: &AgeBreakdown) -> Option<String> {
@@ -886,40 +1030,80 @@ fn age_summary(b: &Browser, ages: &AgeBreakdown) -> Option<String> {
     Some(format!("{} unchanged for {unchanged_for}", format_size(ages.bytes_at_least(oldest))))
 }
 
-fn age_chips(b: &Browser, ages: AgeBreakdown, width: f32) -> Element<'_, Message> {
-    let sized: Vec<(AgeBucket, String)> =
-        ages_present(&ages).map(|(bucket, bytes)| (bucket, format_size(bytes))).collect();
-    let chips_width: f32 = sized.iter().map(|(bucket, size)| age_chip_width(*bucket, size)).sum::<f32>()
-        + AGE_STRIP_SPACING * sized.len().saturating_sub(1) as f32;
-    let mut chips = Row::with_children(sized.into_iter().map(|(bucket, size)| age_chip(b, bucket, size)))
-        .spacing(AGE_STRIP_SPACING)
-        .align_y(Alignment::Center);
-    if let Some(summary) = age_summary(b, &ages)
-        && chips_width + AGE_SUMMARY_GAP + generous_text_width(&summary, AGE_STRIP_TEXT_SIZE) <= width
-    {
-        chips = chips
-            .push(Space::new().width(Fill))
-            .push(text(summary).size(AGE_STRIP_TEXT_SIZE).color(theme::TEXT).wrapping(Wrapping::None));
+fn age_entry(b: &Browser, bucket: AgeBucket, bytes: u64) -> StripEntry {
+    let chosen = b.aged_at_least == Some(bucket);
+    StripEntry {
+        color: theme::age_color(bucket),
+        label: age_texts(bucket).label.as_str(),
+        bytes,
+        size: format_size(bytes),
+        in_full: bucket.stays_lit(b.aged_at_least),
+        chosen,
+        press: bucket.from().map(|_| Message::ShowAgesFrom((!chosen).then_some(bucket))),
+        tooltip: if chosen { Some(SHOW_EVERY_AGE_TOOLTIP) } else { age_texts(bucket).dim_newer_tooltip.as_deref() },
     }
-    chips.into()
 }
 
-fn age_strip(b: &Browser) -> Element<'_, Message> {
-    let content: Element<'_, Message> = match b.ages {
-        Some(ages) => column![
-            container(age_bar(b, &ages)).padding([0.0, AGE_CHIP_PADDING_X]),
-            responsive(move |size| age_chips(b, ages, size.width)),
-        ]
-        .spacing(AGE_STRIP_SPACING)
-        .into(),
-        None => Space::new().into(),
+fn age_strip(b: &Browser) -> Option<Strip> {
+    let ages = b.ages.value?;
+    let entries = ages_present(&ages).map(|(bucket, bytes)| age_entry(b, bucket, bytes)).collect();
+    Some(Strip { entries, summary: age_summary(b, &ages) })
+}
+
+pub(crate) struct KindTexts {
+    pub(crate) label: &'static str,
+    noun: &'static str,
+    show_only_tooltip: &'static str,
+}
+
+pub(crate) fn kind_texts(kind: Kind) -> KindTexts {
+    let (label, noun, show_only_tooltip) = match kind {
+        Kind::Video => ("Videos", "videos", "Dim all but videos"),
+        Kind::Image => ("Images", "images", "Dim all but images"),
+        Kind::Audio => ("Audio", "audio", "Dim all but audio"),
+        Kind::Archive => ("Archives", "archives", "Dim all but archives"),
+        Kind::DiskImage => ("Disk images", "disk images", "Dim all but disk images"),
+        Kind::Document => ("Documents", "documents", "Dim all but documents"),
+        Kind::Code => ("Code", "code", "Dim all but code"),
+        Kind::App => ("Apps", "apps", "Dim all but apps"),
+        Kind::Library => ("Libraries", "libraries", "Dim all but libraries"),
+        Kind::Cache => ("Caches", "caches", "Dim all but caches"),
+        Kind::System => ("System", "system files", "Dim all but system files"),
+        Kind::Other => ("Other", "other files", "Dim all but other files"),
+        Kind::Hidden => ("Hidden", "hidden space", "Dim all but hidden space"),
+        Kind::Purgeable => ("Purgeable", "purgeable space", "Dim all but purgeable space"),
+        Kind::SmallItems => ("Small items", "small items", "Dim all but small items"),
     };
-    container(content)
-        .padding(AGE_STRIP_PADDING)
-        .width(Fill)
-        .height(AGE_STRIP_HEIGHT)
-        .style(|_| depth::well(theme::WELL, FRAME_RADIUS))
-        .into()
+    KindTexts { label, noun, show_only_tooltip }
+}
+
+fn kind_entry(b: &Browser, kind: Kind, bytes: u64) -> StripEntry {
+    let chosen = b.only_kind == Some(kind);
+    let texts = kind_texts(kind);
+    StripEntry {
+        color: theme::kind_color(kind),
+        label: texts.label,
+        bytes,
+        size: format_size(bytes),
+        in_full: b.only_kind.is_none_or(|only| only == kind),
+        chosen,
+        press: Some(Message::ShowOnlyKind((!chosen).then_some(kind))),
+        tooltip: Some(if chosen { SHOW_EVERY_KIND_TOOLTIP } else { texts.show_only_tooltip }),
+    }
+}
+
+fn kind_strip(b: &Browser) -> Option<Strip> {
+    let kinds = b.kinds.value?;
+    let mut present = kinds.largest_first();
+    if let Some(only) = b.only_kind
+        && present.iter().all(|&(kind, _)| kind != only)
+    {
+        present.push((only, 0));
+    }
+    let entries = present.into_iter().map(|(kind, bytes)| kind_entry(b, kind, bytes)).collect();
+    let summary =
+        b.only_kind.map(|only| format!("{} {}", share_phrase(kinds.bytes(only), kinds.total()), kind_texts(only).noun));
+    Some(Strip { entries, summary })
 }
 
 const NOTICE_MARGIN: f32 = 8.0;

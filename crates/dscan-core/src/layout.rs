@@ -422,6 +422,17 @@ mod search_tests {
     }
 
     #[test]
+    fn a_kind_filter_lights_the_folders_holding_it_and_splits_the_small_items_like_a_search() {
+        let mut kids = vec![D("big", vec![F("x.pdf", 9_000), F("clip.mov", 1)])];
+        kids.extend((0..50).map(|_| F("noise", 10)));
+        kids.extend((0..5).map(|_| F("clip.mov", 10)));
+        let t = tree(kids);
+        let (l, groups) = small_groups(&t, Paint { only_kind: Some(Kind::Video), ..Paint::default() });
+        assert!(l.rings[0][0].relevant, "the folder of documents holds a video, so it stays lit");
+        assert_eq!(groups, [group(50, 500, false), group(5, 50, true)]);
+    }
+
+    #[test]
     fn matches_too_small_to_see_on_their_own_keep_the_whole_group_lit_instead_of_vanishing() {
         let t = noise_and_needles(2, 1);
         let s = crate::search::search(&t, "needle", &Default::default()).unwrap();

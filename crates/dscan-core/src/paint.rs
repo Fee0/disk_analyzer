@@ -1,4 +1,5 @@
 use crate::age::{AgeBucket, Day};
+use crate::kind::Kind;
 use crate::search::{SearchResult, is_relevant_under};
 use crate::tree::{NodeId, Tree};
 
@@ -14,6 +15,7 @@ pub struct Paint<'a> {
     pub color_by: ColorBy,
     pub search: Option<&'a SearchResult>,
     pub aged_at_least: Option<AgeBucket>,
+    pub only_kind: Option<Kind>,
 }
 
 impl ColorBy {
@@ -30,14 +32,15 @@ impl ColorBy {
 impl Paint<'_> {
     pub(crate) fn lights(&self, tree: &Tree, id: NodeId) -> bool {
         let old_enough = || self.aged_at_least.is_none() || tree.age(id).stays_lit(self.aged_at_least);
-        is_relevant_under(self.search, id) && old_enough()
+        let holds_the_kind = || self.only_kind.is_none_or(|kind| tree.kinds_inside(id).contains(kind));
+        is_relevant_under(self.search, id) && old_enough() && holds_the_kind()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tree::test_util::{T::*, descend, tree_scanned_on};
+    use crate::tree::test_util::{T::*, descend, tree, tree_scanned_on};
 
     #[test]
     fn a_node_stays_lit_only_when_it_matches_the_search_and_is_old_enough() {
@@ -64,5 +67,29 @@ mod tests {
         assert_eq!(lit(Paint { aged_at_least: older_than_two_years, ..Paint::default() }), ["old-report", "old-photo"]);
         let both = Paint { search: Some(&reports), aged_at_least: older_than_two_years, ..Paint::default() };
         assert_eq!(lit(both), ["old-report"]);
+    }
+
+    #[test]
+    fn a_kind_lights_what_holds_it_anywhere_inside_and_everything_inside_a_bundle_of_it() {
+        let t = tree(vec![
+            D("mostly-documents", vec![F("big.pdf", 1_000), F("clip.mov", 1)]),
+            D("Safari.app", vec![F("Safari", 10)]),
+            F("notes.txt", 1),
+        ]);
+        let lit = |only_kind: Kind| -> Vec<&str> {
+            let paint = Paint { only_kind: Some(only_kind), ..Paint::default() };
+            [&["mostly-documents"][..], &["Safari.app"], &["Safari.app", "Safari"], &["notes.txt"]]
+                .into_iter()
+                .filter(|path| paint.lights(&t, descend(&t, path)))
+                .map(|path| *path.last().unwrap())
+                .collect()
+        };
+        assert_eq!(
+            lit(Kind::Video),
+            ["mostly-documents"],
+            "a folder lights for a kind it holds, not only its main one"
+        );
+        assert_eq!(lit(Kind::App), ["Safari.app", "Safari"], "the app's files light with it");
+        assert_eq!(lit(Kind::Other), Vec::<&str>::new(), "the app's binary counts as the app, not as other");
     }
 }

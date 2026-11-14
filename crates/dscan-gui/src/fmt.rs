@@ -12,6 +12,13 @@ pub fn thousands(n: u64) -> String {
 
 pub const NAME_IN_A_MESSAGE_MAX_CHARS: usize = 40;
 
+const WHOLE_PERCENT: f64 = 100.0;
+
+pub fn share_phrase(bytes: u64, total: u64) -> String {
+    let percent = bytes as f64 / total.max(1) as f64 * WHOLE_PERCENT;
+    if bytes > 0 && percent < 1.0 { "<1%".to_string() } else { format!("{percent:.0}%") }
+}
+
 pub fn count_phrase(count: u64, one: &str, many: &str) -> String {
     if count == 1 { format!("1 {one}") } else { format!("{} {many}", thousands(count)) }
 }

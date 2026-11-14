@@ -23,7 +23,8 @@
 - **Sunburst chart.** Each ring is one folder level, colored by file type: video,
   images, audio, archives, disk images, documents, code, apps, libraries and
   caches. Hover a segment for its size and share. Items too small to show are
-  grouped together.
+  grouped together. A strip above the chart sums up the bytes per type; click a
+  type to dim everything else. An app bundle counts as an app as a whole.
 - **Icicle chart.** The sunburst unrolled into rows: the folder on top, each
   level below it, with every bar as wide as its share. Straight bars leave room
   for names and sizes, and deep folders stay as readable as shallow ones.

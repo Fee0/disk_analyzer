@@ -1,7 +1,7 @@
 use std::num::NonZeroU16;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::exclusions::Exclusions;
+use crate::exclusions::{Exclusions, Step};
 use crate::tree::{NodeId, Tree};
 
 pub(crate) const SECONDS_PER_DAY: i64 = 86_400;
@@ -168,17 +168,16 @@ impl AgeBreakdown {
 
 pub fn age_breakdown(tree: &Tree, focus: NodeId, excluded: &Exclusions) -> AgeBreakdown {
     let mut breakdown = AgeBreakdown::default();
-    let mut folders = vec![focus];
-    while let Some(folder) = folders.pop() {
-        for (child, size) in excluded.children_with_sizes(tree, folder) {
-            let node = tree.node(child);
-            if node.is_dir() {
-                folders.push(child);
-            } else if !node.is_synthetic() {
-                breakdown.bytes[tree.age(child).index()] += size;
-            }
+    excluded.walk_below(tree, focus, |child, size| {
+        let node = tree.node(child);
+        if node.is_dir() {
+            return Step::Descend;
         }
-    }
+        if !node.is_synthetic() {
+            breakdown.bytes[tree.age(child).index()] += size;
+        }
+        Step::Stop
+    });
     breakdown
 }
 
