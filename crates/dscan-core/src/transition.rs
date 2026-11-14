@@ -174,13 +174,13 @@ fn reveal_frame(layout: &Layout, t: f64) -> Vec<FrameArc> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Key {
     Node(NodeId),
-    SmallItemsOf(NodeId),
+    SmallItemsOf { parent: NodeId, lit: bool },
 }
 
 fn key(segment: Segment) -> Key {
     match segment {
         Segment::Node(n) => Key::Node(n),
-        Segment::Small { parent, .. } => Key::SmallItemsOf(parent),
+        Segment::Small { parent, lit, .. } => Key::SmallItemsOf { parent, lit },
     }
 }
 

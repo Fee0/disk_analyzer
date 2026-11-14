@@ -13,7 +13,7 @@ const TURN_FRACTION_EPSILON: f64 = 1e-12;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Segment {
     Node(NodeId),
-    Small { parent: NodeId, count: u32 },
+    Small { parent: NodeId, count: u32, lit: bool },
 }
 
 impl Segment {
@@ -25,37 +25,92 @@ impl Segment {
     }
 }
 
-#[derive(Default)]
-pub(crate) struct SmallItems {
+#[derive(Clone, Copy)]
+struct SmallGroup {
+    lit: bool,
     size: u64,
     count: u32,
-    relevant: bool,
     newest: Option<Day>,
     last: Option<NodeId>,
 }
 
-impl SmallItems {
-    pub(crate) fn add(&mut self, tree: &Tree, child: NodeId, size: u64, relevant: bool) {
+impl SmallGroup {
+    fn empty(lit: bool) -> SmallGroup {
+        SmallGroup { lit, size: 0, count: 0, newest: None, last: None }
+    }
+
+    fn add(&mut self, tree: &Tree, child: NodeId, size: u64) {
         self.size += size;
         self.count += 1;
-        self.relevant |= relevant;
         self.newest = self.newest.max(tree.newest_change(child));
         self.last = Some(child);
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
+    fn is_empty(&self) -> bool {
         self.count == 0
     }
 
-    pub(crate) fn piece(&self, tree: &Tree, parent: NodeId, color_by: ColorBy) -> Option<Piece> {
+    fn piece(&self, tree: &Tree, parent: NodeId, color_by: ColorBy) -> Option<Piece> {
         let last = self.last?;
         let (segment, kind, shown_age) = if self.count == 1 {
             (Segment::Node(last), tree.node(last).kind(), color_by.shown_age(tree, last))
         } else {
-            let group = Segment::Small { parent, count: self.count };
+            let group = Segment::Small { parent, count: self.count, lit: self.lit };
             (group, Kind::SmallItems, color_by.shown_age_of_newest(tree, self.newest))
         };
-        Some(Piece { segment, size: self.size, kind, shown_age, relevant: self.relevant })
+        Some(Piece { segment, size: self.size, kind, shown_age, relevant: self.lit })
+    }
+}
+
+pub(crate) struct SmallItems {
+    lit: SmallGroup,
+    dimmed: SmallGroup,
+}
+
+impl Default for SmallItems {
+    fn default() -> Self {
+        SmallItems { lit: SmallGroup::empty(true), dimmed: SmallGroup::empty(false) }
+    }
+}
+
+impl SmallItems {
+    pub(crate) fn add(&mut self, tree: &Tree, child: NodeId, size: u64, lit: bool) {
+        let group = if lit { &mut self.lit } else { &mut self.dimmed };
+        group.add(tree, child, size);
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.lit.is_empty() && self.dimmed.is_empty()
+    }
+
+    pub(crate) fn pieces(
+        &self,
+        tree: &Tree,
+        parent: NodeId,
+        color_by: ColorBy,
+        big_enough_to_show: impl Fn(u64) -> bool,
+    ) -> impl Iterator<Item = Piece> {
+        let shows = |group: &SmallGroup| !group.is_empty() && big_enough_to_show(group.size);
+        let groups = if shows(&self.lit) && shows(&self.dimmed) {
+            let (larger, smaller) =
+                if self.dimmed.size > self.lit.size { (self.dimmed, self.lit) } else { (self.lit, self.dimmed) };
+            [Some(larger), Some(smaller)]
+        } else {
+            [Some(self.together()), None]
+        };
+        groups.into_iter().flatten().filter_map(move |group| group.piece(tree, parent, color_by))
+    }
+
+    fn together(&self) -> SmallGroup {
+        let lit = !self.lit.is_empty();
+        let colored_like = if lit { &self.lit } else { &self.dimmed };
+        SmallGroup {
+            lit,
+            size: self.lit.size + self.dimmed.size,
+            count: self.lit.count + self.dimmed.count,
+            newest: colored_like.newest,
+            last: colored_like.last,
+        }
     }
 }
 
@@ -223,11 +278,14 @@ impl Placer<'_> {
             }
             cursor += s;
         }
-        if let Some(piece) = small.piece(tree, node, self.paint.color_by) {
+        let min_span = self.params.min_span;
+        let wide_enough = |size: u64| size as f64 * scale >= min_span;
+        for piece in small.pieces(tree, node, self.paint.color_by, wide_enough) {
             let end = (cursor + piece.size as f64 * scale).min(start + span);
             if end > cursor {
                 let arc = self.arc(piece, cursor, end, branch);
                 self.push_returning_branch(depth, arc);
+                cursor = end;
             }
         }
     }
@@ -314,42 +372,94 @@ mod search_tests {
     use super::*;
     use crate::tree::test_util::{T::*, tree};
 
-    #[test]
-    fn relevance_marks_small_buckets() {
+    #[derive(Debug, PartialEq)]
+    struct SmallGroupArc {
+        count: u32,
+        size: u64,
+        lit: bool,
+        shown_age: Option<AgeBucket>,
+    }
+
+    fn small_groups(t: &Tree, paint: Paint<'_>) -> (Layout, Vec<SmallGroupArc>) {
+        let l = partition(t, t.root(), LayoutParams::default(), paint, &Exclusions::default());
+        let groups = l.rings[0]
+            .iter()
+            .filter_map(|a| match a.segment {
+                Segment::Small { count, lit, .. } => {
+                    assert_eq!(lit, a.relevant, "a group is lit exactly when it is drawn lit");
+                    Some(SmallGroupArc { count, size: a.size, lit, shown_age: a.shown_age })
+                }
+                Segment::Node(_) => None,
+            })
+            .collect();
+        (l, groups)
+    }
+
+    fn group(count: u32, size: u64, lit: bool) -> SmallGroupArc {
+        SmallGroupArc { count, size, lit, shown_age: None }
+    }
+
+    fn aged_group(count: u32, size: u64, lit: bool, age: AgeBucket) -> SmallGroupArc {
+        SmallGroupArc { shown_age: Some(age), ..group(count, size, lit) }
+    }
+
+    fn noise_and_needles(needles: usize, needle_size: u64) -> Tree {
         let mut kids = vec![D("big", vec![F("x.mov", 10_000)])];
-        kids.extend((0..50).map(|_| F("noise", 1)));
-        kids.push(F("needle", 1));
-        let t = tree(kids);
-        let s = crate::search::search(&t, "needle", &Default::default()).unwrap();
-        let l = partition(
-            &t,
-            t.root(),
-            LayoutParams::default(),
-            Paint { search: Some(&s), ..Paint::default() },
-            &Exclusions::default(),
-        );
-        let big = &l.rings[0][0];
-        assert!(!big.relevant);
-        let small = l.rings[0].iter().find(|a| matches!(a.segment, Segment::Small { .. })).unwrap();
-        assert!(small.relevant, "bucket containing the match stays lit");
+        kids.extend((0..50).map(|_| F("noise", 10)));
+        kids.extend((0..needles).map(|_| F("needle", needle_size)));
+        tree(kids)
     }
 
     #[test]
-    fn arcs_carry_their_age_and_a_bucket_of_small_items_is_as_new_as_its_newest_member() {
+    fn a_search_splits_the_small_items_into_a_dimmed_group_and_a_lit_group_of_matches_largest_first() {
+        let t = noise_and_needles(5, 10);
+        let s = crate::search::search(&t, "needle", &Default::default()).unwrap();
+        let (l, groups) = small_groups(&t, Paint { search: Some(&s), ..Paint::default() });
+        assert!(!l.rings[0][0].relevant, "the big folder holds no match");
+        assert_eq!(groups, [group(50, 500, false), group(5, 50, true)], "the matches are lit and sized on their own");
+        let (_, unsearched) = small_groups(&t, Paint::default());
+        assert_eq!(unsearched, [group(55, 550, true)], "without a filter they stay one group");
+    }
+
+    #[test]
+    fn matches_too_small_to_see_on_their_own_keep_the_whole_group_lit_instead_of_vanishing() {
+        let t = noise_and_needles(2, 1);
+        let s = crate::search::search(&t, "needle", &Default::default()).unwrap();
+        let (_, groups) = small_groups(&t, Paint { search: Some(&s), ..Paint::default() });
+        assert_eq!(groups, [group(52, 502, true)]);
+    }
+
+    #[test]
+    fn small_items_take_their_newest_member_s_age_and_an_age_filter_splits_off_the_old_ones() {
         use crate::tree::test_util::tree_scanned_on;
         let day = Day::from_days_since_1970;
-        let mut kids = vec![Aged("old.mov", 10_000, day(15_000))];
-        kids.extend((0..50).map(|_| Aged("old-noise", 1, day(15_000))));
-        kids.push(Aged("fresh", 1, day(19_995)));
-        let t = tree_scanned_on(day(20_000), kids);
-        let by_age =
-            Paint { color_by: ColorBy::Age, aged_at_least: Some(AgeBucket::UnderFiveYears), ..Paint::default() };
-        let l = partition(&t, t.root(), LayoutParams::default(), by_age, &Exclusions::default());
-        let old = &l.rings[0][0];
-        assert_eq!(old.shown_age, Some(AgeBucket::FiveYearsOrMore));
-        assert!(old.relevant, "old enough to stay lit");
-        let small = l.rings[0].iter().find(|a| matches!(a.segment, Segment::Small { .. })).unwrap();
-        assert_eq!(small.shown_age, Some(AgeBucket::UnderAMonth), "one fresh file makes the bucket fresh");
-        assert!(small.relevant, "the bucket still holds old files, so it stays lit");
+        let with_fresh = |fresh: usize| {
+            let mut kids = vec![Aged("old.mov", 10_000, day(15_000))];
+            kids.extend((0..50).map(|_| Aged("old-noise", 1, day(15_000))));
+            kids.extend((0..fresh).map(|_| Aged("fresh", 1, day(19_995))));
+            tree_scanned_on(day(20_000), kids)
+        };
+        let by_age = Paint { color_by: ColorBy::Age, ..Paint::default() };
+        let older_than_two_years = Paint { aged_at_least: Some(AgeBucket::UnderFiveYears), ..by_age };
+        let (_, unfiltered) = small_groups(&with_fresh(30), by_age);
+        assert_eq!(
+            unfiltered,
+            [aged_group(80, 80, true, AgeBucket::UnderAMonth)],
+            "one group, as new as its newest member"
+        );
+        let (l, filtered) = small_groups(&with_fresh(30), older_than_two_years);
+        assert_eq!(
+            filtered,
+            [aged_group(50, 50, true, AgeBucket::FiveYearsOrMore), aged_group(30, 30, false, AgeBucket::UnderAMonth)],
+            "the old ones stay lit in their own old color, the fresh ones are dimmed"
+        );
+        assert_eq!(l.rings[0][0].shown_age, Some(AgeBucket::FiveYearsOrMore));
+        assert!(l.rings[0][0].relevant, "old enough to stay lit");
+        let (_, too_few_fresh) = small_groups(&with_fresh(3), older_than_two_years);
+        assert_eq!(
+            too_few_fresh,
+            [aged_group(53, 53, true, AgeBucket::FiveYearsOrMore)],
+            "too few fresh ones to show apart, so they join the lit group, which takes the old ones' color"
+        );
     }
 }

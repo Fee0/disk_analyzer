@@ -1476,6 +1476,32 @@ fn dated_fixture(root: &Path) {
     for (relative, days) in days_ago {
         modified_days_ago(&root.join(relative), days);
     }
+    let mail: Vec<(String, u32)> = (0..OLD_MAILS)
+        .map(|i| (format!("Mail/old-{i}.eml"), 2000))
+        .chain((0..NEW_MAILS).map(|i| (format!("Mail/new-{i}.eml"), 3)))
+        .collect();
+    let mail_files: Vec<(&str, usize)> = mail.iter().map(|(relative, _)| (relative.as_str(), MAIL_SIZE)).collect();
+    write_files(root, &mail_files, 0x5a);
+    for (relative, days) in &mail {
+        modified_days_ago(&root.join(relative), *days);
+    }
+}
+
+const OLD_MAILS: u32 = 45;
+const NEW_MAILS: u32 = 15;
+const MAIL_SIZE: usize = 8_192;
+
+fn small_item_groups(app: &App, folder: dscan_core::NodeId) -> Vec<(u32, bool)> {
+    let dscan_core::Chart::Sunburst(layout) = &on_screen(app).chart else { panic!("a sunburst") };
+    layout
+        .rings
+        .iter()
+        .flatten()
+        .filter_map(|arc| match arc.segment {
+            dscan_core::Segment::Small { parent, count, lit } if parent == folder => Some((count, lit)),
+            _ => None,
+        })
+        .collect()
 }
 
 fn count_ages_without_their_thread(app: &mut App) {
@@ -1538,6 +1564,18 @@ fn inspect_age_colors() -> Result<(), Error> {
     let lit = |id| layout.find(dscan_core::Segment::Node(id)).map(|(_, arc)| arc.relevant);
     assert_eq!(lit(movies), Some(true), "years-old movies stay lit");
     assert_eq!(lit(notes), Some(false), "today's notes are dimmed");
+    let mail = descend(&on_screen(&app).tree, &["Mail"]);
+    assert_eq!(
+        small_item_groups(&app, mail),
+        [(OLD_MAILS, true), (NEW_MAILS, false)],
+        "the old mails stay lit as a group of their own and the new ones are dimmed apart"
+    );
+    let dimmed_mails = dscan_core::Segment::Small { parent: mail, count: NEW_MAILS, lit: false };
+    assert_eq!(
+        crate::chart_canvas::segment_name(&on_screen(&app).tree, dimmed_mails),
+        "15 other smaller items",
+        "the dimmed group's tooltip tells it apart from the lit one"
+    );
 
     let _ = app.update(Message::ShowChart(ChartKind::Icicle));
     finish_chart_animation(&mut app);

@@ -204,7 +204,10 @@ pub struct TooltipSubject<'a> {
 pub fn segment_name(tree: &Tree, segment: Segment) -> String {
     match segment {
         Segment::Node(n) => tree.name(n).into_owned(),
-        Segment::Small { count, .. } => count_phrase(count as u64, "smaller item", "smaller items"),
+        Segment::Small { count, lit: true, .. } => count_phrase(count as u64, "smaller item", "smaller items"),
+        Segment::Small { count, lit: false, .. } => {
+            count_phrase(count as u64, "other smaller item", "other smaller items")
+        }
     }
 }
 

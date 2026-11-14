@@ -222,7 +222,8 @@ impl Tiler<'_> {
         }
         let too_small_to_show_anything_inside = pieces.is_empty() && !is_the_focus;
         if !too_small_to_show_anything_inside {
-            pieces.extend(small.piece(self.tree, folder, self.paint.color_by));
+            let big_enough = |size: u64| size as f64 * area_per_byte >= SMALLEST_TILE_AREA;
+            pieces.extend(small.pieces(self.tree, folder, self.paint.color_by, big_enough));
         }
         pieces
     }
@@ -517,16 +518,23 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_search_dims_what_does_not_match_but_keeps_buckets_holding_a_match_lit() {
+    fn a_search_dims_what_does_not_match_and_gives_the_matching_small_items_their_own_lit_tile() {
         let mut kids = vec![D("big", vec![F("x.mov", 10_000_000)])];
-        kids.extend((0..50).map(|_| F("noise", 10)));
-        kids.push(F("needle", 10));
+        kids.extend((0..50).map(|_| F("noise", 500)));
+        kids.extend((0..5).map(|_| F("needle", 500)));
         let t = tree(kids);
         let s = crate::search::search(&t, "needle", &Default::default()).unwrap();
         let map = treemap(&t, t.root(), SIZE, Paint { search: Some(&s), ..Paint::default() }, &Exclusions::default());
         assert!(!map.tiles[0].relevant);
-        let bucket = map.tiles.iter().find(|t| matches!(t.segment, Segment::Small { .. })).unwrap();
-        assert!(bucket.relevant, "the bucket holding the match stays lit");
+        let groups: Vec<(u32, bool, bool)> = map
+            .tiles
+            .iter()
+            .filter_map(|tile| match tile.segment {
+                Segment::Small { count, lit, .. } => Some((count, lit, tile.relevant)),
+                Segment::Node(_) => None,
+            })
+            .collect();
+        assert_eq!(groups, [(50, false, false), (5, true, true)], "the matches get a lit tile of their own");
     }
 
     #[test]
