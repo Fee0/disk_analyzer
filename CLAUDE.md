@@ -108,8 +108,6 @@ If you touched platform code or dependencies, also:
   Reflink changes also need a run with `TMPDIR` on btrfs and on XFS, or the
   shared-block path is never exercised (the test prints which case it ran).
 
-- Optionally, Windows core tests run under Wine: see `ci/windows-wine.Dockerfile`.
-
 If you touched `Cargo.toml` or features, also test each crate alone
 (`cargo test -p dscan-core`, `cargo test -p dscan-gui`): the workspace build
 can hide a feature that only the other crate enables.
