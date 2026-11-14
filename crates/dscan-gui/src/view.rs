@@ -7,8 +7,8 @@ use dscan_core::{
 use iced::border;
 use iced::widget::text::Wrapping;
 use iced::widget::{
-    Column, Space, Svg, button, center, column, container, mouse_area, pin, progress_bar, responsive, row, scrollable,
-    sensor, stack, text, text_input, tooltip,
+    Column, Row, Space, Svg, button, center, column, container, mouse_area, pin, progress_bar, responsive, row,
+    scrollable, sensor, stack, text, text_input, tooltip,
 };
 use iced::{Alignment, Color, Element, Fill, Length, Theme};
 
@@ -22,6 +22,7 @@ use crate::fmt::{
     NAME_IN_A_MESSAGE_MAX_CHARS, count_phrase, elapsed_phrase, fit_width, fit_width_keeping_both_ends,
     generous_text_width, items_phrase, thousands, truncate, with_folder_mark,
 };
+use crate::icicle_chart::Icicle;
 use crate::icon;
 use crate::list_scroll::{LIST_ID, SELECTED_ROW_ID};
 use crate::sunburst::Sunburst;
@@ -518,8 +519,10 @@ static BACK_TOOLTIP: LazyLock<String> = LazyLock::new(|| with_command_shortcut("
 static FORWARD_TOOLTIP: LazyLock<String> = LazyLock::new(|| with_command_shortcut("Forward", "]"));
 static RESCAN_TOOLTIP: LazyLock<String> = LazyLock::new(|| format!("Scan again  {RESCAN_SHORTCUT}"));
 const SUNBURST_NAME: &str = "Sunburst";
+const ICICLE_NAME: &str = "Icicle";
 const TREEMAP_NAME: &str = "Treemap";
 static SWITCH_TO_SUNBURST_TOOLTIP: LazyLock<String> = LazyLock::new(|| with_command_shortcut(SUNBURST_NAME, "T"));
+static SWITCH_TO_ICICLE_TOOLTIP: LazyLock<String> = LazyLock::new(|| with_command_shortcut(ICICLE_NAME, "T"));
 static SWITCH_TO_TREEMAP_TOOLTIP: LazyLock<String> = LazyLock::new(|| with_command_shortcut(TREEMAP_NAME, "T"));
 
 const NAV_ICON_SIZE: f32 = 16.0;
@@ -548,9 +551,11 @@ fn chart_kind_button(kind: ChartKind, shown: ChartKind) -> Element<'static, Mess
     let tint = if is_shown { theme::TEXT } else { theme::TEXT_DIM };
     let (icon, name, switch_tooltip): (_, _, &'static str) = match kind {
         ChartKind::Sunburst => (icon::sunburst_chart(NAV_ICON_SIZE, tint), SUNBURST_NAME, &SWITCH_TO_SUNBURST_TOOLTIP),
+        ChartKind::Icicle => (icon::icicle_chart(NAV_ICON_SIZE, tint), ICICLE_NAME, &SWITCH_TO_ICICLE_TOOLTIP),
         ChartKind::Treemap => (icon::treemap_chart(NAV_ICON_SIZE, tint), TREEMAP_NAME, &SWITCH_TO_TREEMAP_TOOLTIP),
     };
-    let tooltip_label = if is_shown { name } else { switch_tooltip };
+    let the_shortcut_switches_to_it = kind == shown.next();
+    let tooltip_label = if the_shortcut_switches_to_it { switch_tooltip } else { name };
     let button = toolbar_icon_button(icon)
         .style(move |theme, status| {
             let quiet = quiet_button_style(tint)(theme, status);
@@ -562,9 +567,7 @@ fn chart_kind_button(kind: ChartKind, shown: ChartKind) -> Element<'static, Mess
 
 fn chart_switch(b: &Browser) -> Element<'_, Message> {
     let shown = b.chart.kind();
-    raised_group(
-        row![chart_kind_button(ChartKind::Sunburst, shown), chart_kind_button(ChartKind::Treemap, shown)].spacing(2),
-    )
+    raised_group(Row::with_children(ChartKind::ALL.map(|kind| chart_kind_button(kind, shown))).spacing(2))
 }
 
 fn toolbar(b: &Browser) -> Element<'_, Message> {
@@ -693,6 +696,15 @@ fn breadcrumbs_that_fit(b: &Browser, available_width: f32) -> Element<'_, Messag
 fn chart_panel(b: &Browser) -> Element<'_, Message> {
     let chart: Element<'_, Message> = match &b.chart {
         Chart::Sunburst(layout) => chart_with_cursor_overlay(Sunburst {
+            tree: &b.tree,
+            layout,
+            chart_cache: &b.chart_cache,
+            highlight_cache: &b.highlight_cache,
+            hovered: b.hovered,
+            selected: b.selected,
+            moving: b.animation.as_ref().map(ChartAnimation::frame),
+        }),
+        Chart::Icicle(layout) => chart_with_cursor_overlay(Icicle {
             tree: &b.tree,
             layout,
             chart_cache: &b.chart_cache,

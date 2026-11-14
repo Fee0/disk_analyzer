@@ -61,7 +61,7 @@ impl ChartGeometry {
 mod tests {
     use super::*;
     use crate::exclusions::Exclusions;
-    use crate::layout::{LayoutParams, sunburst};
+    use crate::layout::{LayoutParams, partition};
     use crate::tree::test_util::{T::*, descend, tree};
 
     const SIDE: f32 = 600.0;
@@ -98,7 +98,7 @@ mod tests {
     #[test]
     fn a_point_hits_the_hole_the_arc_drawn_under_it_or_nothing() {
         let t = tree(vec![F("big", 600), F("small", 200)]);
-        let layout = sunburst(&t, t.root(), LayoutParams::default(), None, &Exclusions::default());
+        let layout = partition(&t, t.root(), LayoutParams::default(), None, &Exclusions::default());
         let g = ChartGeometry::fitting(SIDE, SIDE);
         assert_eq!(g.hit(&layout, g.center), ChartHit::Hole);
         for name in ["big", "small"] {

@@ -5,9 +5,9 @@ use iced::{Color, Pixels, Point, Rectangle, Renderer, Size, Theme, Vector, align
 
 use crate::app::Message;
 use crate::chart_canvas::{
-    CursorOverlay, OPAQUE, Pointed, PointerState, SEPARATOR_GAP, SOFT_SHADOW_DROP, TooltipSubject, chart_point,
-    draw_tooltip, fill_soft_shadow, go_up_outline, iced_point, interaction, lit_from_above, on_pointer, rim,
-    selection_outline, style_color,
+    AT_REST, CursorOverlay, OPAQUE, Pointed, PointerState, SEPARATOR_GAP, SOFT_SHADOW_DROP, TooltipSubject, can_go_up,
+    chart_point, draw_tooltip, fill_soft_shadow, frame_arc_color, go_up_outline, iced_point, interaction,
+    lit_from_above, on_pointer, rim, selection_outline,
 };
 use crate::fmt::{fit_width, generous_text_width};
 use crate::theme;
@@ -57,16 +57,6 @@ impl Geo {
     }
 }
 
-const AT_REST: f64 = 1.0;
-
-fn frame_arc_color(a: &FrameArc, style_progress: f64) -> Color {
-    let ring = a.inner_ring as f32;
-    if a.style_before == a.style_after {
-        return style_color(a.style_after, ring);
-    }
-    theme::mix(style_color(a.style_before, ring), style_color(a.style_after, ring), style_progress as f32)
-}
-
 #[derive(Clone, Copy)]
 struct ArcEdge {
     radius: f32,
@@ -113,7 +103,7 @@ impl Sunburst<'_> {
     }
 
     fn can_go_up(&self) -> bool {
-        self.layout.focus != self.tree.root()
+        can_go_up(self.tree, self.layout.focus)
     }
 
     fn draw_chart(&self, frame: &mut Frame, geo: &Geo, arcs: &[FrameArc], style_progress: f64) {
@@ -279,7 +269,7 @@ mod tests {
             tree: &b.tree,
             layout: match &b.chart {
                 dscan_core::Chart::Sunburst(layout) => layout,
-                dscan_core::Chart::Treemap(_) => panic!("a new browser shows the sunburst"),
+                _ => panic!("a new browser shows the sunburst"),
             },
             chart_cache: &b.chart_cache,
             highlight_cache: &b.highlight_cache,

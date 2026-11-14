@@ -16,7 +16,7 @@ pub struct SegmentStyle {
 }
 
 impl SegmentStyle {
-    fn of(arc: &Arc) -> Self {
+    pub fn of(arc: &Arc) -> Self {
         SegmentStyle { kind: arc.kind, branch: arc.branch, relevant: arc.relevant }
     }
 }
@@ -465,7 +465,7 @@ fn morph_frame(rings: &[Vec<MorphArc>], t: f64) -> Vec<FrameArc> {
 mod tests {
     use super::*;
     use crate::exclusions::Exclusions;
-    use crate::layout::{LayoutParams, sunburst};
+    use crate::layout::{LayoutParams, partition};
     use crate::tree::Tree;
     use crate::tree::test_util::{T::*, descend, tree};
 
@@ -481,7 +481,7 @@ mod tests {
     }
 
     fn layout(t: &Tree, focus: NodeId, excluded: &[NodeId]) -> Layout {
-        sunburst(t, focus, SHOW_EVERY_ARC, None, &Exclusions::new(t, excluded))
+        partition(t, focus, SHOW_EVERY_ARC, None, &Exclusions::new(t, excluded))
     }
 
     fn assert_same_picture(actual: &[FrameArc], expected: &[FrameArc], what: &str) {

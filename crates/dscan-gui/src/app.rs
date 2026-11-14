@@ -251,7 +251,7 @@ pub enum Message {
     Reveal,
     DesktopActionFailed(String),
     ShowChart(ChartKind),
-    ToggleChart,
+    NextChart,
     ChartMeasured(Size),
     ForBrowser(BrowserId, Box<Message>),
 }
@@ -430,8 +430,8 @@ impl App {
                     return self.start_scan(opts);
                 }
             }
-            Message::ToggleChart if matches!(self.screen, Screen::Browse(_)) => {
-                return self.show_chart(self.chart_kind.other());
+            Message::NextChart if matches!(self.screen, Screen::Browse(_)) => {
+                return self.show_chart(self.chart_kind.next());
             }
             Message::ShowChart(kind) => return self.show_chart(kind),
             Message::ChartMeasured(size) => {
@@ -578,7 +578,7 @@ fn navigation_shortcut(key: Key<&str>, cmd: bool) -> Option<Message> {
         Key::Character("]") if cmd => Message::Forward,
         Key::Named(Named::F5) | Key::Named(Named::BrowserRefresh) => Message::Rescan,
         Key::Character("r") if cmd => Message::Rescan,
-        Key::Character("t") if cmd => Message::ToggleChart,
+        Key::Character("t") if cmd => Message::NextChart,
         _ => return None,
     })
 }
@@ -689,7 +689,8 @@ impl Browser {
         self.chart_size = size;
         if kind != self.chart.kind() {
             self.hovered = None;
-            self.install_chart(self.computed_chart(kind));
+            let next = std::mem::take(&mut self.chart).redrawn_as(kind).unwrap_or_else(|_| self.computed_chart(kind));
+            self.install_chart(next);
             self.animation = Some(ChartAnimation::new(self.chart.reveal()));
         } else if resized && kind.depends_on_size() {
             let revealing = self.animation.as_ref().is_some_and(|a| a.kind() == TransitionKind::Reveal);

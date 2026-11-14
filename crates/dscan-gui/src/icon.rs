@@ -48,6 +48,11 @@ static SUNBURST_CHART: LazyLock<Handle> = LazyLock::new(|| {
         r#"<circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="9"/><path d="M12 3v6M21 12h-6M5.6 18.4l4.3-4.3"/>"#,
     )
 });
+static ICICLE_CHART: LazyLock<Handle> = LazyLock::new(|| {
+    black_line_icon_svg(
+        r#"<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9.5h18M3 15h18M13 9.5V20M8 15v5M17 15v5"/>"#,
+    )
+});
 static TREEMAP_CHART: LazyLock<Handle> = LazyLock::new(|| {
     black_line_icon_svg(r#"<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 4v16M12 12h9M16.5 12v8"/>"#)
 });
@@ -106,6 +111,10 @@ pub fn folder<'a>(size: f32, color: Color) -> Svg<'a, Theme> {
 
 pub fn sunburst_chart<'a>(size: f32, color: Color) -> Svg<'a, Theme> {
     tinted(&SUNBURST_CHART, size, color)
+}
+
+pub fn icicle_chart<'a>(size: f32, color: Color) -> Svg<'a, Theme> {
+    tinted(&ICICLE_CHART, size, color)
 }
 
 pub fn treemap_chart<'a>(size: f32, color: Color) -> Svg<'a, Theme> {

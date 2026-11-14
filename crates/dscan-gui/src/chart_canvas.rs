@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use dscan_core::{ChartPoint, Segment, SegmentStyle, Tree, format_size};
+use dscan_core::{ChartPoint, FrameArc, NodeId, Segment, SegmentStyle, Tree, format_size};
 use iced::widget::canvas::{self, Event, Frame, Geometry, Path, Stroke, Text, gradient};
 use iced::widget::{canvas as canvas_widget, stack};
 use iced::{Color, Element, Fill, Pixels, Point, Rectangle, Renderer, Size, Theme, Vector, mouse};
@@ -125,6 +125,10 @@ pub fn on_pointer(
     }
 }
 
+pub fn can_go_up(tree: &Tree, focus: NodeId) -> bool {
+    focus != tree.root()
+}
+
 pub fn interaction(pointed: Option<Pointed>, can_go_up: bool) -> mouse::Interaction {
     match pointed {
         Some(Pointed::Segment(_)) => mouse::Interaction::Pointer,
@@ -136,6 +140,16 @@ pub fn interaction(pointed: Option<Pointed>, can_go_up: bool) -> mouse::Interact
 pub fn style_color(style: SegmentStyle, layer: f32) -> Color {
     let color = theme::segment_color(style.kind, layer, style.branch);
     if style.relevant { color } else { theme::mix(theme::BG, color, IRRELEVANT_SEGMENT_STRENGTH) }
+}
+
+pub const AT_REST: f64 = 1.0;
+
+pub fn frame_arc_color(a: &FrameArc, style_progress: f64) -> Color {
+    let ring = a.inner_ring as f32;
+    if a.style_before == a.style_after {
+        return style_color(a.style_after, ring);
+    }
+    theme::mix(style_color(a.style_before, ring), style_color(a.style_after, ring), style_progress as f32)
 }
 
 pub fn fill_soft_shadow(frame: &mut Frame, outset_shape: impl Fn(f32) -> Path) {

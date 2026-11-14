@@ -16,6 +16,7 @@ use dscan_core::ChartKind;
 const VIEW: (f32, f32) = (view::DEFAULT_WINDOW_SIZE.width, view::DEFAULT_WINDOW_SIZE.height);
 const OUT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/iced-inspect");
 const A_CHART_SEGMENT: (f32, f32) = (440.0, 320.0);
+const AN_ICICLE_BAR: (f32, f32) = (200.0, 130.0);
 const CLOSE_BUTTON_COLUMN_X: f32 = 960.0;
 
 pub(crate) fn write_files(root: &Path, files: &[(&str, usize)], fill: u8) {
@@ -117,8 +118,26 @@ fn sim(app: &App) -> Simulator<'_, Message> {
     Simulator::with_size(Settings::default(), VIEW, view::view(app))
 }
 
+fn file_name_no_other_shot_starts_with(name: &str) -> String {
+    name.replace('-', "_")
+}
+
 fn shoot(ui: &mut Simulator<'_, Message>, name: &str) -> Result<(), Error> {
-    println!("shot: {}", ui_inspect::shot(ui, &theme::app_theme(), OUT, name)?.display());
+    let file_name = file_name_no_other_shot_starts_with(name);
+    println!("shot: {}", ui_inspect::shot(ui, &theme::app_theme(), OUT, &file_name)?.display());
+    Ok(())
+}
+
+#[test]
+fn a_shot_named_like_the_start_of_another_keeps_the_other_s_file() -> Result<(), Error> {
+    let (app, _) = App::new(None);
+    let mut ui = sim(&app);
+    shoot(&mut ui, "prefix-check-family-member")?;
+    shoot(&mut ui, "prefix-check")?;
+    let kept = std::fs::read_dir(OUT)?
+        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+        .any(|file| file.starts_with(&file_name_no_other_shot_starts_with("prefix-check-family-member")));
+    assert!(kept, "ui_inspect::shot clears files starting with \"<name>-\", which must not reach another shot's file");
     Ok(())
 }
 
@@ -1273,10 +1292,11 @@ fn treemap_app(dir: &Path) -> App {
 }
 
 const SUNBURST_BUTTON: usize = 3;
-const TREEMAP_BUTTON: usize = 4;
+const ICICLE_BUTTON: usize = 4;
+const TREEMAP_BUTTON: usize = 5;
 
 #[test]
-fn the_chart_switch_toggles_between_sunburst_and_treemap_for_every_result() -> Result<(), Error> {
+fn the_chart_switch_shows_each_chart_and_the_shortcut_cycles_through_them_for_every_result() -> Result<(), Error> {
     use iced::keyboard::Key;
     let dir = tempfile::tempdir().unwrap();
     let mut app = browser_app(dir.path());
@@ -1304,16 +1324,21 @@ fn the_chart_switch_toggles_between_sunburst_and_treemap_for_every_result() -> R
     {
         let mut ui = sim(&app);
         shoot(&mut ui, "toolbar-treemap-shown")?;
-        let sunburst_button = toolbar_icon_buttons_left_to_right(&mut ui)[SUNBURST_BUTTON];
-        ui_inspect::click_at(&mut ui, sunburst_button.center());
-        let msgs: Vec<Message> = ui.into_messages().collect();
-        assert!(msgs.iter().any(|m| matches!(m, Message::ShowChart(ChartKind::Sunburst))), "{msgs:?}");
+        for (button, kind) in [(SUNBURST_BUTTON, ChartKind::Sunburst), (ICICLE_BUTTON, ChartKind::Icicle)] {
+            let mut ui = sim(&app);
+            let at = toolbar_icon_buttons_left_to_right(&mut ui)[button];
+            ui_inspect::click_at(&mut ui, at.center());
+            let msgs: Vec<Message> = ui.into_messages().collect();
+            assert!(msgs.iter().any(|m| matches!(m, Message::ShowChart(k) if *k == kind)), "{kind:?}: {msgs:?}");
+        }
     }
 
-    key(&mut app, Key::Character("t".into()), true);
-    assert_eq!(on_screen(&app).chart.kind(), ChartKind::Sunburst, "Cmd-T switches back");
+    for expected in ChartKind::ALL {
+        key(&mut app, Key::Character("t".into()), true);
+        assert_eq!(on_screen(&app).chart.kind(), expected, "Cmd-T moves on to the next chart in the toolbar's order");
+    }
     key(&mut app, Key::Character("t".into()), false);
-    assert_eq!(on_screen(&app).chart.kind(), ChartKind::Sunburst, "a plain T does nothing");
+    assert_eq!(on_screen(&app).chart.kind(), ChartKind::Treemap, "a plain T does nothing");
 
     let _ = app.update(Message::GoHome);
     let _ = app.update(Message::ShowChart(ChartKind::Treemap));
@@ -1362,5 +1387,62 @@ fn inspect_treemap() -> Result<(), Error> {
     let _ = app.update(Message::SearchChanged("img".into()));
     deliver_search_result_without_its_thread(&mut app, "img");
     shoot(&mut sim(&app), "treemap-search")?;
+    Ok(())
+}
+
+fn icicle_app(dir: &Path) -> App {
+    let mut app = browser_app(dir);
+    let _ = app.update(Message::ShowChart(ChartKind::Icicle));
+    let_the_chart_measure_itself(&mut app);
+    app
+}
+
+#[test]
+fn inspect_icicle() -> Result<(), Error> {
+    use dscan_core::{Segment, TransitionKind};
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = icicle_app(dir.path());
+    shoot_chart_animation(&mut app, "icicle-reveal", TransitionKind::Reveal)?;
+    {
+        let mut ui = sim(&app);
+        println!("{}", ui_inspect::report(&mut ui, VIEW));
+        shoot(&mut ui, "icicle")?;
+        ui_inspect::hover(&mut ui, AN_ICICLE_BAR);
+        shoot(&mut ui, "icicle-tooltip")?;
+        let msgs: Vec<Message> = ui.into_messages().collect();
+        assert!(msgs.iter().any(|m| matches!(m, Message::Hover(Some(_)))), "hovering a bar hovers it: {msgs:?}");
+    }
+    {
+        let mut ui = sim(&app);
+        let treemap_button = toolbar_icon_buttons_left_to_right(&mut ui)[TREEMAP_BUTTON];
+        ui_inspect::hover(&mut ui, treemap_button.center());
+        shoot(&mut ui, "toolbar-icicle-shown-next-chart-tooltip")?;
+    }
+
+    let movies = descend(&on_screen(&app).tree, &["Movies"]);
+    let _ = app.update(Message::Hover(Some(Segment::Node(movies))));
+    let _ = app.update(Message::Press(Segment::Node(descend(&on_screen(&app).tree, &["Downloads"]))));
+    shoot(&mut sim(&app), "icicle-hover-and-selection")?;
+    let _ = app.update(Message::Deselect);
+    let _ = app.update(Message::Hover(None));
+
+    let _ = app.update(Message::Navigate(movies));
+    shoot_chart_animation(&mut app, "icicle-zoom-in", TransitionKind::ZoomIn)?;
+    shoot(&mut sim(&app), "icicle-movies")?;
+    let _ = app.update(Message::Back);
+    shoot_chart_animation(&mut app, "icicle-zoom-out", TransitionKind::ZoomOut)?;
+
+    let pictures = descend(&on_screen(&app).tree, &["Pictures"]);
+    let total_before = on_screen(&app).chart.total();
+    let _ = app.update(Message::Press(Segment::Node(pictures)));
+    let _ = app.update(Message::CollectSelected);
+    let b = on_screen(&app);
+    assert_eq!(b.chart.total(), total_before - b.tree.size(pictures), "the icicle leaves out what is collected");
+    assert!(!b.chart.shows(Segment::Node(pictures)), "the collected folder has no bar");
+    shoot_chart_animation(&mut app, "icicle-collect", TransitionKind::Morph)?;
+
+    let _ = app.update(Message::SearchChanged("img".into()));
+    deliver_search_result_without_its_thread(&mut app, "img");
+    shoot(&mut sim(&app), "icicle-search")?;
     Ok(())
 }

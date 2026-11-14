@@ -21,7 +21,7 @@ code path may assume one OS:
 Two crates:
 
 - `dscan-core`: everything except presentation. Scanning, the result tree,
-  sizes, hidden and purgeable space, sunburst and treemap layout,
+  sizes, hidden and purgeable space, sunburst, icicle and treemap layout,
   hit-testing and transitions, search, collecting, the Trash, preview and
   reveal.
 - `dscan-gui`: the iced app. It maps core state to widgets and input, and
@@ -145,6 +145,6 @@ iced-ui-inspect skill; keep it as shipped.
 - Tests stay inside a temp dir: never the real Trash, and never launching
   other apps (assert that preview or reveal *messages* are sent; don't run them).
 - Performance-sensitive paths are the scan walk, `tree::build`, search and
-  chart layout (sunburst and treemap). Measure with `examples/scan.rs` before
+  chart layout (the sunburst and icicle partition, and the treemap). Measure with `examples/scan.rs` before
   and after: the whole-disk scan is bound by APFS metadata I/O, and many
   obvious tweaks were measured there without effect.

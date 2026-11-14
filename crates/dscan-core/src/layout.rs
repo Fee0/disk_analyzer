@@ -136,7 +136,7 @@ impl Layout {
     }
 }
 
-pub fn sunburst(
+pub fn partition(
     tree: &Tree,
     focus: NodeId,
     params: LayoutParams,
@@ -235,7 +235,7 @@ mod tests {
             F("tiny1", 1),
             F("tiny2", 1),
         ]);
-        let l = sunburst(&t, t.root(), LayoutParams { max_depth: 4, min_span: 0.01 }, None, &Exclusions::default());
+        let l = partition(&t, t.root(), LayoutParams { max_depth: 4, min_span: 0.01 }, None, &Exclusions::default());
         assert_eq!(l.total, 1001);
         assert_eq!(l.rings.len(), 2);
         assert_eq!(l.rings[0].len(), 3, "ring 0 holds the focus's children: a, b and one bucket of small items");
@@ -272,7 +272,7 @@ mod tests {
         let t = tree(vec![D("a", vec![F("x.mov", 600), F("y.mov", 200)]), D("b", vec![F("w.png", 400)])]);
         let x = descend(&t, &["a", "x.mov"]);
         let params = LayoutParams { max_depth: 4, min_span: 0.01 };
-        let l = sunburst(&t, t.root(), params, None, &Exclusions::new(&t, &[x]));
+        let l = partition(&t, t.root(), params, None, &Exclusions::new(&t, &[x]));
 
         assert_eq!(l.total, t.size(t.root()) - t.size(x));
         assert!(l.find(Segment::Node(x)).is_none(), "an excluded file has no arc");
@@ -285,7 +285,7 @@ mod tests {
     fn small_items_keep_total() {
         let kids: Vec<_> = (0..1000).map(|_| F("f", 1)).collect();
         let t = tree(kids);
-        let l = sunburst(&t, t.root(), LayoutParams::default(), None, &Exclusions::default());
+        let l = partition(&t, t.root(), LayoutParams::default(), None, &Exclusions::default());
         assert_eq!(l.rings[0].len(), 1);
         assert_eq!(l.rings[0][0].size, 1000);
         assert!((l.rings[0][0].span() - 1.0).abs() < 1e-9);
@@ -304,7 +304,7 @@ mod search_tests {
         kids.push(F("needle", 1));
         let t = tree(kids);
         let s = crate::search::search(&t, "needle", &Default::default()).unwrap();
-        let l = sunburst(&t, t.root(), LayoutParams::default(), Some(&s), &Exclusions::default());
+        let l = partition(&t, t.root(), LayoutParams::default(), Some(&s), &Exclusions::default());
         let big = &l.rings[0][0];
         assert!(!big.relevant);
         let small = l.rings[0].iter().find(|a| matches!(a.segment, Segment::Small { .. })).unwrap();

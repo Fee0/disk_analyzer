@@ -42,7 +42,7 @@ fn main() {
         scan_time
     );
     let exclusions = dscan_core::Exclusions::default();
-    let layout = || dscan_core::sunburst(&tree, root, dscan_core::LayoutParams::default(), None, &exclusions);
+    let layout = || dscan_core::partition(&tree, root, dscan_core::LayoutParams::default(), None, &exclusions);
     let (arcs, fastest, median) = fastest_and_median(layout);
     println!("layout: {} arcs, fastest {fastest:.2?}, median {median:.2?} of {LAYOUT_RUNS} runs", arcs.len());
     let treemap = || dscan_core::treemap(&tree, root, TYPICAL_CHART_SIZE, None, &exclusions);

@@ -1,16 +1,19 @@
 use dscan_core::{
     ChartFrame, FrameTile, NodeId, Segment, Tile, TileLook, TileRect, Tree, Treemap, TreemapHit, format_size,
 };
-use iced::widget::canvas::{self, Cache, Event, Fill, Frame, Geometry, Path, Stroke, Text};
-use iced::{Color, Font, Pixels, Point, Rectangle, Renderer, Size, Theme, Vector, alignment, font, mouse};
+use iced::widget::canvas::{self, Cache, Event, Fill, Frame, Geometry, Stroke, Text};
+use iced::{Color, Pixels, Point, Rectangle, Renderer, Theme, alignment, mouse};
 
 use crate::app::Message;
 use crate::chart_canvas::{
-    CursorOverlay, Pointed, PointerState, SELECTION_OUTLINE_WIDTH, SEPARATOR_GAP, SOFT_SHADOW_DROP, TooltipSubject,
-    chart_point, draw_raised_card, draw_tooltip, go_up_outline, interaction, lit_from_above, on_pointer, segment_name,
-    selection_outline, style_color,
+    CursorOverlay, Pointed, PointerState, TooltipSubject, can_go_up, chart_point, draw_tooltip, go_up_outline,
+    interaction, lit_from_above, on_pointer, segment_name, style_color,
 };
 use crate::fmt::{fit_width, generous_text_width};
+use crate::rect_chart::{
+    FocusBar, LABEL_FONT, LABEL_SIZE_LINE_STRENGTH, Label, draw_focus_bar, draw_label, focus_bar_path, outline_hovered,
+    outline_selected, rectangle, size_of, text_color_on, top_left, with_separator,
+};
 use crate::theme;
 
 const FOLDER_TINT: f32 = 0.10;
@@ -21,28 +24,6 @@ const HEADER_TEXT_SIZE: f32 = 11.5;
 const HEADER_PADDING_X: f32 = 5.0;
 const HEADER_LABEL_GAP: f32 = 8.0;
 const HEADER_NAME_ROOM_WORTH_A_SIZE: f32 = 36.0;
-const FOCUS_BAR_RADIUS: f32 = 8.0;
-const FOCUS_BAR_PADDING_X: f32 = 12.0;
-const FOCUS_NAME_SIZE: f32 = 14.0;
-const FOCUS_TOTAL_SIZE: f32 = 15.0;
-const FOCUS_BAR_LABEL_GAP: f32 = 16.0;
-const UP_CHEVRON_HALF_WIDTH: f32 = 4.5;
-const UP_CHEVRON_HALF_HEIGHT: f32 = 2.5;
-const UP_CHEVRON_ROOM: f32 = 18.0;
-const UP_CHEVRON_STROKE: f32 = 1.6;
-const LABEL_NAME_SIZE: f32 = 12.0;
-const LABEL_SIZE_SIZE: f32 = 11.0;
-const LABEL_PADDING: f32 = 5.0;
-const LABEL_LINE_GAP: f32 = 15.0;
-const LABEL_MIN_WIDTH: f32 = 60.0;
-const LABEL_MIN_HEIGHT: f32 = 34.0;
-const LABEL_SIZE_LINE_STRENGTH: f32 = 0.75;
-const LIGHT_TILE_LUMINANCE: f32 = 0.45;
-const HOVER_FILL_ALPHA: f32 = 0.16;
-const HOVER_OUTLINE_ALPHA: f32 = 0.6;
-const SELECTION_FILL_ALPHA: f32 = 0.12;
-
-const LABEL_FONT: Font = Font { weight: font::Weight::Semibold, ..Font::DEFAULT };
 
 #[derive(Clone, Copy)]
 pub struct TreemapChart<'a> {
@@ -55,23 +36,6 @@ pub struct TreemapChart<'a> {
     pub moving: Option<&'a ChartFrame>,
 }
 
-fn top_left(rect: &TileRect) -> Point {
-    Point::new(rect.x, rect.y)
-}
-
-fn size_of(rect: &TileRect) -> Size {
-    Size::new(rect.width, rect.height)
-}
-
-fn rectangle(rect: &TileRect) -> Path {
-    Path::rectangle(top_left(rect), size_of(rect))
-}
-
-fn with_separator(rect: &TileRect) -> TileRect {
-    let room_for_a_gap = rect.width > 2.0 * SEPARATOR_GAP && rect.height > 2.0 * SEPARATOR_GAP;
-    if room_for_a_gap { rect.inset(SEPARATOR_GAP / 2.0) } else { *rect }
-}
-
 fn folder_tint(depth: usize) -> f32 {
     (FOLDER_TINT + FOLDER_TINT_PER_DEPTH * depth as f32).min(DEEPEST_FOLDER_TINT)
 }
@@ -79,14 +43,6 @@ fn folder_tint(depth: usize) -> f32 {
 fn look_color(look: &TileLook) -> Color {
     let solid = style_color(look.style, look.depth as f32);
     if look.holds_tiles { theme::mix(theme::BG, solid, folder_tint(look.depth)) } else { solid }
-}
-
-fn luminance(c: Color) -> f32 {
-    0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b
-}
-
-fn text_color_on(background: Color) -> Color {
-    if luminance(background) > LIGHT_TILE_LUMINANCE { theme::BG } else { theme::TEXT }
 }
 
 fn fill_tile(frame: &mut Frame, tile: &FrameTile) {
@@ -109,7 +65,7 @@ fn outline_folder(frame: &mut Frame, folder: &FrameTile) {
 
 impl TreemapChart<'_> {
     fn can_go_up(&self) -> bool {
-        self.map.focus != self.tree.root()
+        can_go_up(self.tree, self.map.focus)
     }
 
     fn pointed(&self, bounds: Rectangle, cursor: mouse::Cursor) -> Option<Pointed> {
@@ -172,93 +128,25 @@ impl TreemapChart<'_> {
     }
 
     fn draw_label(&self, frame: &mut Frame, tile: &Tile) {
-        let rect = with_separator(&tile.rect);
-        if rect.width < LABEL_MIN_WIDTH || rect.height < LABEL_MIN_HEIGHT {
-            return;
-        }
-        let (name, size) = (segment_name(self.tree, tile.segment), format_size(tile.size));
-        let room = rect.width - 2.0 * LABEL_PADDING;
-        let name = fit_width(&name, room, LABEL_NAME_SIZE);
-        let color = text_color_on(look_color(&TileLook::of(tile)));
-        let origin = top_left(&rect) + Vector::new(LABEL_PADDING, LABEL_PADDING);
-        frame.fill_text(Text {
-            content: name,
-            position: origin,
-            color,
-            size: Pixels(LABEL_NAME_SIZE),
-            font: LABEL_FONT,
-            ..Text::default()
-        });
-        frame.fill_text(Text {
-            content: fit_width(&size, room, LABEL_SIZE_SIZE),
-            position: origin + Vector::new(0.0, LABEL_LINE_GAP),
-            color: color.scale_alpha(LABEL_SIZE_LINE_STRENGTH),
-            size: Pixels(LABEL_SIZE_SIZE),
-            ..Text::default()
-        });
-    }
-
-    fn focus_bar_path(&self) -> Path {
-        let bar = &self.map.focus_bar;
-        Path::rounded_rectangle(top_left(bar), size_of(bar), FOCUS_BAR_RADIUS.into())
+        let label = Label {
+            tree: self.tree,
+            segment: tile.segment,
+            size: tile.size,
+            background: look_color(&TileLook::of(tile)),
+        };
+        draw_label(frame, &with_separator(&tile.rect), label);
     }
 
     fn draw_focus_bar(&self, frame: &mut Frame, total: u64) {
-        let bar = self.map.focus_bar;
-        if bar.width <= 0.0 {
-            return;
-        }
-        draw_raised_card(frame, top_left(&bar), size_of(&bar), FOCUS_BAR_RADIUS, SOFT_SHADOW_DROP, theme::PANEL);
-
-        let middle_y = bar.center().y;
-        let mut name_x = bar.x + FOCUS_BAR_PADDING_X;
-        if self.can_go_up() {
-            self.draw_up_chevron(frame, Point::new(name_x + UP_CHEVRON_HALF_WIDTH, middle_y));
-            name_x += UP_CHEVRON_ROOM;
-        }
-        let total = format_size(total);
-        let total_width = generous_text_width(&total, FOCUS_TOTAL_SIZE);
-        let total_x = bar.right() - FOCUS_BAR_PADDING_X;
-        frame.fill_text(Text {
-            content: total,
-            position: Point::new(total_x, middle_y),
-            color: theme::kind_color(self.tree.node(self.map.focus).kind()),
-            size: Pixels(FOCUS_TOTAL_SIZE),
-            font: LABEL_FONT,
-            align_x: alignment::Horizontal::Right.into(),
-            align_y: alignment::Vertical::Center,
-            ..Text::default()
-        });
-        let name_room = total_x - total_width - FOCUS_BAR_LABEL_GAP - name_x;
-        frame.fill_text(Text {
-            content: fit_width(&self.tree.name(self.map.focus), name_room, FOCUS_NAME_SIZE),
-            position: Point::new(name_x, middle_y),
-            color: theme::TEXT,
-            size: Pixels(FOCUS_NAME_SIZE),
-            align_y: alignment::Vertical::Center,
-            ..Text::default()
-        });
-    }
-
-    fn draw_up_chevron(&self, frame: &mut Frame, center: Point) {
-        let chevron = Path::new(|b| {
-            b.move_to(center + Vector::new(-UP_CHEVRON_HALF_WIDTH, UP_CHEVRON_HALF_HEIGHT));
-            b.line_to(center + Vector::new(0.0, -UP_CHEVRON_HALF_HEIGHT));
-            b.line_to(center + Vector::new(UP_CHEVRON_HALF_WIDTH, UP_CHEVRON_HALF_HEIGHT));
-        });
-        frame.stroke(&chevron, Stroke::default().with_color(theme::TEXT_DIM).with_width(UP_CHEVRON_STROKE));
+        draw_focus_bar(frame, FocusBar { rect: self.map.focus_bar, tree: self.tree, focus: self.map.focus, total });
     }
 
     fn draw_highlight(&self, frame: &mut Frame) {
         if let Some(tile) = self.selected.and_then(|s| self.map.find(Segment::Node(s))) {
-            let outline = rectangle(&tile.rect.inset(SELECTION_OUTLINE_WIDTH / 2.0));
-            frame.fill(&outline, Color::WHITE.scale_alpha(SELECTION_FILL_ALPHA));
-            frame.stroke(&outline, selection_outline());
+            outline_selected(frame, &tile.rect);
         }
         if let Some(tile) = self.hovered.and_then(|h| self.map.find(h)) {
-            let outline = rectangle(&with_separator(&tile.rect));
-            frame.fill(&outline, Color::WHITE.scale_alpha(HOVER_FILL_ALPHA));
-            frame.stroke(&outline, Stroke::default().with_color(Color::WHITE.scale_alpha(HOVER_OUTLINE_ALPHA)));
+            outline_hovered(frame, &tile.rect);
         }
     }
 }
@@ -268,7 +156,9 @@ impl CursorOverlay for TreemapChart<'_> {
         let mut overlay = Frame::new(renderer, bounds.size());
         if let Some(p) = cursor.position_in(bounds) {
             match self.map.hit(chart_point(p)) {
-                TreemapHit::FocusBar if self.can_go_up() => overlay.stroke(&self.focus_bar_path(), go_up_outline()),
+                TreemapHit::FocusBar if self.can_go_up() => {
+                    overlay.stroke(&focus_bar_path(&self.map.focus_bar), go_up_outline())
+                }
                 TreemapHit::Tile(tile) => {
                     let subject = TooltipSubject {
                         tree: self.tree,
@@ -326,6 +216,7 @@ mod tests {
     use super::*;
     use crate::chart_canvas::iced_point;
     use dscan_core::Chart as ChartLayout;
+    use iced::Size;
 
     const CHART: Size = Size::new(700.0, 500.0);
 

@@ -24,6 +24,9 @@
   images, audio, archives, disk images, documents, code, apps, libraries and
   caches. Hover a segment for its size and share. Items too small to show are
   grouped together.
+- **Icicle chart.** The sunburst unrolled into rows: the folder on top, each
+  level below it, with every bar as wide as its share. Straight bars leave room
+  for names and sizes, and deep folders stay as readable as shallow ones.
 - **Treemap.** Switch to a treemap to see every file as a rectangle sized by the
   space it takes, nested inside framed, labeled folders, so the biggest files
   stand out at a glance.
@@ -72,11 +75,11 @@ To scan a folder at launch, pass it as an argument: `disk-analyzer ~/Downloads`
 |---|---|---|---|
 | Select | Arrow keys | Arrow keys | Click |
 | Open the selected folder | Enter or Ctrl+↓ | Enter or ⌘↓ | Double-click |
-| Go up a level | Ctrl+↑ | ⌘↑ | Click the center, or the bar above the treemap |
+| Go up a level | Ctrl+↑ | ⌘↑ | Click the center, or the bar above the icicle or treemap |
 | Back | Backspace or Ctrl+[ | Backspace or ⌘[ | Back button |
 | Forward | Ctrl+] | ⌘] | Forward button |
 | Search | Ctrl+F | ⌘F | |
-| Switch between sunburst and treemap | Ctrl+T | ⌘T | Chart buttons in the toolbar |
+| Switch to the next chart: sunburst, icicle, treemap | Ctrl+T | ⌘T | Chart buttons in the toolbar |
 | Open the selected item | Space | Space (Quick Look) | |
 | Collect for deletion | C | C | Drag onto the collector |
 | Scan again | F5 or Ctrl+R | ⌘R | **Rescan** |

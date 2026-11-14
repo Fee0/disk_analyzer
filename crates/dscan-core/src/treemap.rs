@@ -89,6 +89,21 @@ impl TileRect {
     }
 }
 
+pub(crate) struct FocusBarAbove {
+    pub(crate) focus_bar: TileRect,
+    pub(crate) area: TileRect,
+}
+
+impl FocusBarAbove {
+    pub(crate) fn fitting(width: f32, height: f32) -> Self {
+        let below_the_bar = FOCUS_BAR_HEIGHT + FOCUS_BAR_GAP;
+        FocusBarAbove {
+            focus_bar: TileRect::new(0.0, 0.0, width, FOCUS_BAR_HEIGHT),
+            area: TileRect::new(0.0, below_the_bar, width, (height - below_the_bar).max(0.0)),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Tile {
     pub segment: Segment,
@@ -161,14 +176,8 @@ pub fn treemap(
     search: Option<&SearchResult>,
     excluded: &Exclusions,
 ) -> Treemap {
-    let below_the_bar = FOCUS_BAR_HEIGHT + FOCUS_BAR_GAP;
-    let mut map = Treemap {
-        focus,
-        total: excluded.size(tree, focus),
-        focus_bar: TileRect::new(0.0, 0.0, width, FOCUS_BAR_HEIGHT),
-        area: TileRect::new(0.0, below_the_bar, width, (height - below_the_bar).max(0.0)),
-        tiles: Vec::new(),
-    };
+    let FocusBarAbove { focus_bar, area } = FocusBarAbove::fitting(width, height);
+    let mut map = Treemap { focus, total: excluded.size(tree, focus), focus_bar, area, tiles: Vec::new() };
     let mut tiler = Tiler { tree, search, excluded, tiles: Vec::new() };
     tiler.place_children(focus, map.area, 0, None, None);
     map.tiles = tiler.tiles;

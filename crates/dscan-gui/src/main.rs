@@ -8,10 +8,12 @@ mod depth;
 mod fmt;
 #[cfg(test)]
 mod iced_inspect;
+mod icicle_chart;
 mod icon;
 #[cfg(test)]
 mod inspect_tests;
 mod list_scroll;
+mod rect_chart;
 mod sunburst;
 mod theme;
 mod treemap_chart;
