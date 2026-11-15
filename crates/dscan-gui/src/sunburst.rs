@@ -1,5 +1,5 @@
 use dscan_core::transition::at_rest;
-use dscan_core::{ChartFrame, ChartGeometry, ChartHit, FrameArc, Layout, NodeId, Segment, Tree, format_size};
+use dscan_core::{ChartFrame, ChartGeometry, ChartHit, Depth, FrameArc, Layout, NodeId, Segment, Tree, format_size};
 use iced::widget::canvas::{self, Cache, Event, Frame, Geometry, Path, Text};
 use iced::{Color, Pixels, Point, Rectangle, Renderer, Size, Theme, Vector, alignment, mouse};
 
@@ -34,8 +34,8 @@ struct Geo {
 }
 
 impl Geo {
-    fn new(size: Size) -> Self {
-        let chart = ChartGeometry::fitting(size.width, size.height);
+    fn new(size: Size, depth: Depth) -> Self {
+        let chart = ChartGeometry::fitting(size.width, size.height, depth);
         Geo { chart, center: iced_point(chart.center) }
     }
 
@@ -90,6 +90,10 @@ fn annular_sector_as_one_polygon(center: Point, inner: ArcEdge, outer: ArcEdge) 
 }
 
 impl Sunburst<'_> {
+    fn geo(&self, size: Size) -> Geo {
+        Geo::new(size, self.layout.depth)
+    }
+
     fn locate(&self, geo: &Geo, p: Point) -> ChartHit<'_> {
         geo.chart.hit(self.layout, chart_point(p))
     }
@@ -175,7 +179,7 @@ impl Sunburst<'_> {
 
 impl CursorOverlay for Sunburst<'_> {
     fn draw_cursor_overlay(&self, renderer: &Renderer, bounds: Rectangle, cursor: mouse::Cursor) -> Geometry {
-        let geo = &Geo::new(bounds.size());
+        let geo = &self.geo(bounds.size());
         let mut overlay = Frame::new(renderer, bounds.size());
         if let Some(p) = cursor.position_in(bounds) {
             match self.locate(geo, p) {
@@ -203,7 +207,7 @@ impl canvas::Program<Message> for Sunburst<'_> {
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> Option<canvas::Action<Message>> {
-        on_pointer(state, event, || self.pointed(&Geo::new(bounds.size()), bounds, cursor), self.hovered)
+        on_pointer(state, event, || self.pointed(&self.geo(bounds.size()), bounds, cursor), self.hovered)
     }
 
     fn draw(
@@ -214,7 +218,7 @@ impl canvas::Program<Message> for Sunburst<'_> {
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
-        let geo = Geo::new(bounds.size());
+        let geo = self.geo(bounds.size());
         if let Some(ChartFrame::Arcs { arcs, style_progress, .. }) = self.moving {
             let mut moving_chart = Frame::new(renderer, bounds.size());
             self.draw_chart(&mut moving_chart, &geo, arcs, *style_progress);
@@ -228,7 +232,7 @@ impl canvas::Program<Message> for Sunburst<'_> {
     }
 
     fn mouse_interaction(&self, _state: &PointerState, bounds: Rectangle, cursor: mouse::Cursor) -> mouse::Interaction {
-        interaction(self.pointed(&Geo::new(bounds.size()), bounds, cursor), self.can_go_up())
+        interaction(self.pointed(&self.geo(bounds.size()), bounds, cursor), self.can_go_up())
     }
 }
 
@@ -277,7 +281,8 @@ mod tests {
             selected: None,
             moving: None,
         };
-        let (p, segment) = some_point_over_an_arc(&chart(None), &Geo::new(Size::new(CHART_SIDE, CHART_SIDE)));
+        let (p, segment) =
+            some_point_over_an_arc(&chart(None), &Geo::new(Size::new(CHART_SIDE, CHART_SIDE), Depth::DEFAULT));
         let mut state = PointerState::default();
 
         let entering = published_by_moving_to(&chart(None), &mut state, p);

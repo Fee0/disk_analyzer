@@ -30,7 +30,7 @@ pub use exclusions::Exclusions;
 pub use hidden::{Cause, Remedy, SpaceExplanation};
 pub use icicle::{IcicleGeometry, IcicleHit};
 pub use kind::{Kind, KindBreakdown, kind_breakdown};
-pub use layout::{Arc, Layout, LayoutParams, MAX_DEPTH, Segment, partition};
+pub use layout::{Arc, Depth, Layout, LayoutParams, Segment, partition};
 pub use paint::{ColorBy, Paint};
 pub use scan::{CancelToken, Progress, ProgressSnapshot, ScanError, ScanOptions, scan};
 pub use search::{SearchResult, search};

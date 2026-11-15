@@ -487,6 +487,10 @@ const LIST_SIDE_PORTION: u16 = 2;
 pub const TOOLBAR_LIST_SIDE_ID: &str = "toolbar-list-side";
 pub const LIST_PANEL_ID: &str = "list-panel";
 pub const PATH_BAR_ID: &str = "path-bar";
+pub const COPY_PATH_ID: &str = "copy-path";
+pub const SHALLOWER_ID: &str = "shallower";
+pub const DEEPER_ID: &str = "deeper";
+pub const COLOR_SWITCH_ID: &str = "color-switch";
 
 fn browse(b: &Browser) -> Element<'_, Message> {
     let main = column![toolbar(b), row![chart_panel(b), list_panel(b)].spacing(PANEL_GAP).height(Fill)]
@@ -570,7 +574,46 @@ fn chart_kind_button(kind: ChartKind, shown: ChartKind) -> Element<'static, Mess
 
 fn chart_switch(b: &Browser) -> Element<'_, Message> {
     let shown = b.chart.kind();
-    raised_group(Row::with_children(ChartKind::ALL.map(|kind| chart_kind_button(kind, shown))).spacing(2))
+    raised_group(
+        Row::with_children(ChartKind::ALL.map(|kind| chart_kind_button(kind, shown))).spacing(GROUP_BUTTON_SPACING),
+    )
+}
+
+const SHALLOWER_TOOLTIP: &str = "Fewer levels  -";
+const DEEPER_TOOLTIP: &str = "More levels  +";
+const DEPTH_TOOLTIP: &str = "Levels shown";
+const DEPTH_TEXT_SIZE: f32 = 13.0;
+const DEPTH_TEXT_WIDTH: f32 = 20.0;
+
+fn depth_stepper(b: &Browser) -> Element<'_, Message> {
+    let shown = text(b.depth.rings().to_string())
+        .size(DEPTH_TEXT_SIZE)
+        .width(DEPTH_TEXT_WIDTH)
+        .align_x(Alignment::Center)
+        .color(theme::TEXT_DIM);
+    let shallower = nav_icon_button(icon::minus, SHALLOWER_TOOLTIP, b.depth.shallower().map(|_| Message::Shallower));
+    let deeper = nav_icon_button(icon::plus, DEEPER_TOOLTIP, b.depth.deeper().map(|_| Message::Deeper));
+    raised_group(
+        row![
+            container(shallower).id(SHALLOWER_ID),
+            with_tooltip(shown, DEPTH_TOOLTIP),
+            container(deeper).id(DEEPER_ID),
+        ]
+        .spacing(GROUP_BUTTON_SPACING)
+        .align_y(Alignment::Center),
+    )
+}
+
+fn group_width(contents: f32, items: usize) -> f32 {
+    contents + (items - 1) as f32 * GROUP_BUTTON_SPACING + 2.0 * FRAME_INSET
+}
+
+fn icon_group_width(buttons: usize) -> f32 {
+    group_width(buttons as f32 * INNER_BUTTON_SIDE, buttons)
+}
+
+fn depth_stepper_width() -> f32 {
+    group_width(2.0 * INNER_BUTTON_SIDE + DEPTH_TEXT_WIDTH, 3)
 }
 
 const COLOR_BY_AGE_TOOLTIP: &str = "Color by last modified";
@@ -584,19 +627,41 @@ fn color_switch(b: &Browser) -> Element<'_, Message> {
     let button = toolbar_icon_button(icon::clock(NAV_ICON_SIZE, tint))
         .style(shown_or_quiet_style(by_age, tint))
         .on_press(Message::ColorBy(other));
-    raised_group(with_tooltip(button, tooltip_label))
+    container(raised_group(with_tooltip(button, tooltip_label))).id(COLOR_SWITCH_ID).into()
 }
 
-fn toolbar(b: &Browser) -> Element<'_, Message> {
+const TOOLBAR_GAP: f32 = 8.0;
+const GROUP_BUTTON_SPACING: f32 = 2.0;
+const NAV_BUTTONS: usize = 3;
+const COLOR_SWITCH_BUTTONS: usize = 1;
+
+fn leaves_the_path_bar_room_for_the_depth_stepper(b: &Browser, width: f32) -> bool {
+    let groups = [icon_group_width(NAV_BUTTONS), icon_group_width(ChartKind::ALL.len()), depth_stepper_width()];
+    let other_controls: f32 = groups.iter().sum::<f32>() + icon_group_width(COLOR_SWITCH_BUTTONS);
+    let gaps = groups.len() as f32 * TOOLBAR_GAP + TOOLBAR_GAP;
+    width - other_controls - gaps >= narrowest_path_bar(b)
+}
+
+fn chart_side_controls(b: &Browser, width: f32) -> Element<'_, Message> {
     let nav = raised_group(
         row![
             nav_icon_button(icon::home, "Start page", Some(Message::GoHome)),
             nav_icon_button(icon::chevron_left, &BACK_TOOLTIP, Some(Message::Back)),
             nav_icon_button(icon::chevron_right, &FORWARD_TOOLTIP, b.can_forward().then_some(Message::Forward)),
         ]
-        .spacing(2),
+        .spacing(GROUP_BUTTON_SPACING),
     );
+    let stepper_fits = b.chart.kind().has_rings() && leaves_the_path_bar_room_for_the_depth_stepper(b, width);
+    row![nav, chart_switch(b)]
+        .push(stepper_fits.then(|| depth_stepper(b)))
+        .push(color_switch(b))
+        .push(path_bar(b))
+        .spacing(TOOLBAR_GAP)
+        .align_y(Alignment::Center)
+        .into()
+}
 
+fn toolbar(b: &Browser) -> Element<'_, Message> {
     let search = text_input(&SEARCH_PLACEHOLDER_WITH_SHORTCUT, &b.search_text)
         .id(SEARCH_ID)
         .on_input(Message::SearchChanged)
@@ -605,9 +670,8 @@ fn toolbar(b: &Browser) -> Element<'_, Message> {
         .width(Fill)
         .style(depth::well_input(FRAME_RADIUS));
 
-    let chart_side = row![nav, chart_switch(b), color_switch(b), path_bar(b)]
-        .spacing(8)
-        .align_y(Alignment::Center)
+    let chart_side = container(responsive(move |room| chart_side_controls(b, room.width)))
+        .height(TOOLBAR_CONTROL_HEIGHT)
         .width(Length::FillPortion(CHART_SIDE_PORTION));
     let list_side = container(row![rescan_button(), search].spacing(8).align_y(Alignment::Center))
         .id(TOOLBAR_LIST_SIDE_ID)
@@ -627,20 +691,58 @@ const BREADCRUMBS_AFTER_ELLIPSIS: usize = 5;
 
 fn path_bar(b: &Browser) -> Element<'_, Message> {
     let content = row![
-        container(icon::scan_root(b.opts.whole_disk, PATH_ROOT_ICON_SIZE, theme::TEXT_DIM)).padding([0, 6]),
+        container(icon::scan_root(b.opts.whole_disk, PATH_ROOT_ICON_SIZE, theme::TEXT_DIM))
+            .padding([0.0, PATH_ROOT_ICON_PADDING_X]),
         responsive(move |available| container(breadcrumbs_that_fit(b, available.width))
             .height(Fill)
             .align_y(Alignment::Center)
             .into()),
+        copy_path_button(b),
     ]
     .align_y(Alignment::Center);
     framed_group(content)
         .id(PATH_BAR_ID)
-        .padding([FRAME_INSET, 2.0 * FRAME_INSET])
+        .padding([FRAME_INSET, PATH_BAR_PADDING_X])
         .width(Fill)
         .clip(true)
         .style(|_| depth::well(theme::WELL, FRAME_RADIUS))
         .into()
+}
+
+const COPY_PATH_TOOLTIP: &str = "Copy path";
+const PATH_COPIED_TOOLTIP: &str = "Copied";
+
+fn copy_path_button(b: &Browser) -> Element<'_, Message> {
+    let copied = b.path_copied == Some(b.focus);
+    let (shown_icon, tooltip_label) = if copied {
+        (icon::check(PATH_ROOT_ICON_SIZE, theme::TEXT), PATH_COPIED_TOOLTIP)
+    } else {
+        (icon::copy(PATH_ROOT_ICON_SIZE, theme::TEXT_DIM), COPY_PATH_TOOLTIP)
+    };
+    let copy = path_bar_button(shown_icon, theme::TEXT).on_press(Message::CopyPath);
+    container(with_tooltip(copy, tooltip_label)).id(COPY_PATH_ID).into()
+}
+
+fn copy_path_button_width() -> f32 {
+    PATH_ROOT_ICON_SIZE + 2.0 * CRUMB_PADDING_X
+}
+
+fn narrowest_path_bar(b: &Browser) -> f32 {
+    let root = b.tree.root();
+    let crumb_width = |id: NodeId| generous_crumb_width(&truncate(&b.tree.name(id), CRUMB_NAME_MAX_CHARS));
+    let root_icon = PATH_ROOT_ICON_SIZE + 2.0 * PATH_ROOT_ICON_PADDING_X;
+    let hides_folders = b.tree.parent(b.focus).is_some_and(|parent| parent != root);
+    let ellipsis = if hides_folders { PATH_SEPARATOR_SIZE + generous_crumb_width(ELLIPSIS) } else { 0.0 };
+    let shortened_current = if b.focus == root {
+        0.0
+    } else {
+        PATH_SEPARATOR_SIZE + crumb_width(b.focus).min(SHORTEST_CURRENT_CRUMB_WIDTH)
+    };
+    2.0 * PATH_BAR_PADDING_X + root_icon + crumb_width(root) + ellipsis + shortened_current + copy_path_button_width()
+}
+
+fn path_bar_button<'a>(content: impl Into<Element<'a, Message>>, idle_text: Color) -> button::Button<'a, Message> {
+    button(content).padding([CRUMB_PADDING_Y, CRUMB_PADDING_X]).style(quiet_button_style(idle_text))
 }
 
 fn path_separator<'a>() -> Element<'a, Message> {
@@ -649,33 +751,38 @@ fn path_separator<'a>() -> Element<'a, Message> {
 
 const CRUMB_TEXT_SIZE: f32 = 13.0;
 const CRUMB_PADDING_X: f32 = 6.0;
+const CRUMB_PADDING_Y: f32 = 3.0;
+const SHORTEST_CURRENT_CRUMB_WIDTH: f32 = 80.0;
+const PATH_ROOT_ICON_PADDING_X: f32 = 6.0;
+const PATH_BAR_PADDING_X: f32 = 2.0 * FRAME_INSET;
 const ELLIPSIS: &str = "…";
 
 fn crumb<'a>(label: String, msg: Option<Message>) -> Element<'a, Message> {
     let idle_text = if msg.is_some() { theme::TEXT_DIM } else { theme::TEXT };
-    button(text(label).size(CRUMB_TEXT_SIZE).wrapping(Wrapping::None))
-        .padding([3.0, CRUMB_PADDING_X])
-        .style(quiet_button_style(idle_text))
-        .on_press_maybe(msg)
-        .into()
+    path_bar_button(text(label).size(CRUMB_TEXT_SIZE).wrapping(Wrapping::None), idle_text).on_press_maybe(msg).into()
 }
 
 fn generous_crumb_width(label: &str) -> f32 {
     generous_text_width(label, CRUMB_TEXT_SIZE) + 2.0 * CRUMB_PADDING_X
 }
 
-fn crumbs_after_the_root_that_fit(root_to_focus_labels: &[String], available_width: f32) -> usize {
+fn breadcrumbs_width(root_to_focus_labels: &[String], shown_after_root: usize) -> f32 {
     let after_root = root_to_focus_labels.len() - 1;
-    let width_with_last = |shown: usize| {
-        let ellipsis = if shown < after_root { PATH_SEPARATOR_SIZE + generous_crumb_width(ELLIPSIS) } else { 0.0 };
-        let tail: f32 = root_to_focus_labels[root_to_focus_labels.len() - shown..]
-            .iter()
-            .map(|label| PATH_SEPARATOR_SIZE + generous_crumb_width(label))
-            .sum();
-        generous_crumb_width(&root_to_focus_labels[0]) + ellipsis + tail
-    };
-    let most = after_root.min(BREADCRUMBS_AFTER_ELLIPSIS);
-    (1..=most).rev().find(|&shown| width_with_last(shown) <= available_width).unwrap_or(most.min(1))
+    let ellipsis =
+        if shown_after_root < after_root { PATH_SEPARATOR_SIZE + generous_crumb_width(ELLIPSIS) } else { 0.0 };
+    let tail: f32 = root_to_focus_labels[root_to_focus_labels.len() - shown_after_root..]
+        .iter()
+        .map(|label| PATH_SEPARATOR_SIZE + generous_crumb_width(label))
+        .sum();
+    generous_crumb_width(&root_to_focus_labels[0]) + ellipsis + tail
+}
+
+fn crumbs_after_the_root_that_fit(root_to_focus_labels: &[String], available_width: f32) -> usize {
+    let most = (root_to_focus_labels.len() - 1).min(BREADCRUMBS_AFTER_ELLIPSIS);
+    (1..=most)
+        .rev()
+        .find(|&shown| breadcrumbs_width(root_to_focus_labels, shown) <= available_width)
+        .unwrap_or(most.min(1))
 }
 
 fn breadcrumbs_that_fit(b: &Browser, available_width: f32) -> Element<'_, Message> {

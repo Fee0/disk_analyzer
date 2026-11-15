@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::exclusions::Exclusions;
-use crate::layout::{Layout, LayoutParams, Segment, partition};
+use crate::layout::{Depth, Layout, LayoutParams, Segment, partition};
 use crate::paint::Paint;
 use crate::transition::{FrameArc, Transition, TransitionKind};
 use crate::tree::{NodeId, Tree};
@@ -30,12 +30,17 @@ impl ChartKind {
     pub fn depends_on_size(self) -> bool {
         self == ChartKind::Treemap
     }
+
+    pub fn has_rings(self) -> bool {
+        matches!(self, ChartKind::Sunburst | ChartKind::Icicle)
+    }
 }
 
 pub struct ChartInput<'a> {
     pub tree: &'a Tree,
     pub focus: NodeId,
     pub size: (f32, f32),
+    pub depth: Depth,
     pub paint: Paint<'a>,
     pub excluded: &'a Exclusions,
 }
@@ -55,8 +60,8 @@ impl Default for Chart {
 
 impl Chart {
     pub fn new(kind: ChartKind, input: ChartInput<'_>) -> Self {
-        let ChartInput { tree, focus, size, paint, excluded } = input;
-        let partitioned = || partition(tree, focus, LayoutParams::default(), paint, excluded);
+        let ChartInput { tree, focus, size, depth, paint, excluded } = input;
+        let partitioned = || partition(tree, focus, LayoutParams::for_depth(depth), paint, excluded);
         match kind {
             ChartKind::Sunburst => Chart::Sunburst(partitioned()),
             ChartKind::Icicle => Chart::Icicle(partitioned()),
@@ -69,6 +74,13 @@ impl Chart {
             (Chart::Sunburst(layout) | Chart::Icicle(layout), ChartKind::Sunburst) => Ok(Chart::Sunburst(layout)),
             (Chart::Sunburst(layout) | Chart::Icicle(layout), ChartKind::Icicle) => Ok(Chart::Icicle(layout)),
             (chart, _) => Err(chart),
+        }
+    }
+
+    pub fn depth(&self) -> Option<Depth> {
+        match self {
+            Chart::Sunburst(layout) | Chart::Icicle(layout) => Some(layout.depth),
+            Chart::Treemap(_) => None,
         }
     }
 
@@ -152,7 +164,14 @@ mod tests {
         let excluded = Exclusions::default();
         Chart::new(
             kind,
-            ChartInput { tree: t, focus: t.root(), size: (800.0, 600.0), paint: Paint::default(), excluded: &excluded },
+            ChartInput {
+                tree: t,
+                focus: t.root(),
+                size: (800.0, 600.0),
+                depth: Depth::DEFAULT,
+                paint: Paint::default(),
+                excluded: &excluded,
+            },
         )
     }
 
@@ -227,7 +246,17 @@ mod tests {
         let excluded = Exclusions::default();
         let colored = |kind: ChartKind, color_by: ColorBy| {
             let paint = Paint { color_by, ..Paint::default() };
-            Chart::new(kind, ChartInput { tree: &t, focus: t.root(), size: (800.0, 600.0), paint, excluded: &excluded })
+            Chart::new(
+                kind,
+                ChartInput {
+                    tree: &t,
+                    focus: t.root(),
+                    size: (800.0, 600.0),
+                    depth: Depth::DEFAULT,
+                    paint,
+                    excluded: &excluded,
+                },
+            )
         };
         for kind in ChartKind::ALL {
             let recolor = colored(kind, ColorBy::Kind).transition_to(&colored(kind, ColorBy::Age));

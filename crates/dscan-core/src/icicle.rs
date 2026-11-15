@@ -1,11 +1,12 @@
 use crate::chart_geometry::ChartPoint;
-use crate::layout::{Arc, Layout, MAX_DEPTH};
+use crate::layout::{Arc, Depth, Layout};
 use crate::treemap::{FocusBarAbove, TileRect};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct IcicleGeometry {
     pub focus_bar: TileRect,
     pub rows: TileRect,
+    pub row_height: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -16,13 +17,9 @@ pub enum IcicleHit<'a> {
 }
 
 impl IcicleGeometry {
-    pub fn fitting(width: f32, height: f32) -> Self {
+    pub fn fitting(width: f32, height: f32, depth: Depth) -> Self {
         let FocusBarAbove { focus_bar, area } = FocusBarAbove::fitting(width, height);
-        IcicleGeometry { focus_bar, rows: area }
-    }
-
-    pub fn row_height(&self) -> f32 {
-        self.rows.height / MAX_DEPTH as f32
+        IcicleGeometry { focus_bar, rows: area, row_height: area.height / depth.rings() as f32 }
     }
 
     fn x(&self, share_of_the_width: f64) -> f32 {
@@ -30,7 +27,7 @@ impl IcicleGeometry {
     }
 
     fn y(&self, ring: f64) -> f32 {
-        self.rows.y + ring as f32 * self.row_height()
+        self.rows.y + ring as f32 * self.row_height
     }
 
     pub fn rect(&self, inner_ring: f64, outer_ring: f64, start: f64, end: f64) -> TileRect {
@@ -49,7 +46,7 @@ impl IcicleGeometry {
         if !self.rows.contains(p) {
             return IcicleHit::Nothing;
         }
-        let ring = ((p.y - self.rows.y) / self.row_height()) as usize;
+        let ring = ((p.y - self.rows.y) / self.row_height) as usize;
         let share_of_the_width = f64::from((p.x - self.rows.x) / self.rows.width);
         layout.hit(ring, share_of_the_width).map_or(IcicleHit::Nothing, IcicleHit::Bar)
     }
@@ -76,37 +73,40 @@ mod tests {
 
     #[test]
     fn the_focus_bar_sits_on_top_and_the_deepest_ring_ends_at_the_bottom() {
-        let g = IcicleGeometry::fitting(SIZE.0, SIZE.1);
-        assert_eq!(g.focus_bar.y, 0.0);
-        assert!(g.rows.y > g.focus_bar.bottom(), "a gap separates the bar from the rows");
-        let deepest = g.rect(MAX_DEPTH as f64 - 1.0, MAX_DEPTH as f64, 0.0, 1.0);
-        assert!((deepest.bottom() - SIZE.1).abs() < PIXEL, "{deepest:?} reaches the bottom");
-        assert_eq!((deepest.x, deepest.width), (0.0, SIZE.0), "a whole ring spans the full width");
+        for depth in [Depth::SHALLOWEST, Depth::DEFAULT, Depth::DEEPEST] {
+            let g = IcicleGeometry::fitting(SIZE.0, SIZE.1, depth);
+            assert_eq!(g.focus_bar.y, 0.0);
+            assert!(g.rows.y > g.focus_bar.bottom(), "a gap separates the bar from the rows");
+            let outermost = depth.rings() as f64;
+            let deepest = g.rect(outermost - 1.0, outermost, 0.0, 1.0);
+            assert!((deepest.bottom() - SIZE.1).abs() < PIXEL, "{deepest:?} reaches the bottom at {depth:?}");
+            assert_eq!((deepest.x, deepest.width), (0.0, SIZE.0), "a whole ring spans the full width");
+        }
     }
 
     #[test]
     fn a_bar_is_as_wide_as_its_share_of_the_focus_and_one_row_tall() {
         let t = sample();
         let layout = layout_of(&t);
-        let g = IcicleGeometry::fitting(SIZE.0, SIZE.1);
+        let g = IcicleGeometry::fitting(SIZE.0, SIZE.1, layout.depth);
         let (ring, x) = layout.find(Segment::Node(descend(&t, &["a", "x.mov"]))).unwrap();
         let bar = g.bar(ring, x);
         assert!((bar.width - SIZE.0 * 0.6).abs() < PIXEL, "x.mov holds 60% of the focus: {bar:?}");
-        assert!((bar.height - g.row_height()).abs() < PIXEL);
-        assert!((bar.y - (g.rows.y + g.row_height())).abs() < PIXEL, "a child sits one row below its folder");
+        assert!((bar.height - g.row_height).abs() < PIXEL);
+        assert!((bar.y - (g.rows.y + g.row_height)).abs() < PIXEL, "a child sits one row below its folder");
     }
 
     #[test]
     fn a_point_hits_the_focus_bar_the_bar_drawn_under_it_or_nothing() {
         let t = sample();
         let layout = layout_of(&t);
-        let g = IcicleGeometry::fitting(SIZE.0, SIZE.1);
+        let g = IcicleGeometry::fitting(SIZE.0, SIZE.1, layout.depth);
         assert_eq!(g.hit(&layout, g.focus_bar.center()), IcicleHit::FocusBar);
         for path in [&["a"][..], &["b"], &["a", "x.mov"], &["a", "y.mov"]] {
             let (ring, arc) = layout.find(Segment::Node(descend(&t, path))).unwrap();
             assert_eq!(g.hit(&layout, g.bar(ring, arc).center()), IcicleHit::Bar(arc), "{path:?}");
         }
-        let below_the_file_b = ChartPoint { x: SIZE.0 - 1.0, y: g.rows.y + 1.5 * g.row_height() };
+        let below_the_file_b = ChartPoint { x: SIZE.0 - 1.0, y: g.rows.y + 1.5 * g.row_height };
         assert_eq!(g.hit(&layout, below_the_file_b), IcicleHit::Nothing, "a file has nothing below it");
         let between_bar_and_rows = ChartPoint { x: 10.0, y: g.focus_bar.bottom() + 1.0 };
         assert_eq!(g.hit(&layout, between_bar_and_rows), IcicleHit::Nothing);
@@ -116,7 +116,7 @@ mod tests {
     #[test]
     fn a_chart_with_no_room_hits_nothing_instead_of_dividing_by_zero() {
         let t = sample();
-        let g = IcicleGeometry::fitting(0.0, 0.0);
+        let g = IcicleGeometry::fitting(0.0, 0.0, Depth::DEFAULT);
         assert_eq!(g.hit(&layout_of(&t), ChartPoint { x: 0.0, y: 0.0 }), IcicleHit::Nothing);
     }
 }

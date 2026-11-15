@@ -5,9 +5,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use dscan_core::{
-    Accounting, AgeBreakdown, AgeBucket, CancelToken, Chart, ChartInput, ChartKind, ColorBy, DesktopError, Exclusions,
-    Kind, KindBreakdown, NodeId, PREVIEW_ACTION, Paint, Progress, ProgressSnapshot, REVEAL_ACTION, Refusal, Removal,
-    RemovalPlan, RemovalProgress, RemovalReport, RemovalStatus, ScanError, ScanOptions, SearchResult, Segment,
+    Accounting, AgeBreakdown, AgeBucket, CancelToken, Chart, ChartInput, ChartKind, ColorBy, Depth, DesktopError,
+    Exclusions, Kind, KindBreakdown, NodeId, PREVIEW_ACTION, Paint, Progress, ProgressSnapshot, REVEAL_ACTION, Refusal,
+    Removal, RemovalPlan, RemovalProgress, RemovalReport, RemovalStatus, ScanError, ScanOptions, SearchResult, Segment,
     TRASH_NAME, TransitionKind, Tree, Volume, desktop, format_size,
 };
 use iced::keyboard::{self, Key, key::Named};
@@ -82,10 +82,16 @@ pub struct App {
     pub error: Option<String>,
     pub parked_newest_first: Vec<Browser>,
     pub scans: Vec<ScanJob>,
-    chart_kind: ChartKind,
-    color_by: ColorBy,
+    chart: ChartPrefs,
     chart_size: Option<Size>,
     stepped_back_from_newest_parked: bool,
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct ChartPrefs {
+    pub kind: ChartKind,
+    pub color_by: ColorBy,
+    pub depth: Depth,
 }
 
 pub enum Screen {
@@ -186,11 +192,13 @@ pub struct Browser {
     search_cancel: CancelToken,
     pub search: Option<Arc<SearchResult>>,
     pub color_by: ColorBy,
+    pub depth: Depth,
     pub aged_at_least: Option<AgeBucket>,
     pub ages: Counted<AgeBreakdown>,
     pub only_kind: Option<Kind>,
     pub kinds: Counted<KindBreakdown>,
     pub folded_chips_shown: bool,
+    pub path_copied: Option<NodeId>,
     pub list: ListView,
     pub collector: Collector,
     pub animation: Option<ChartAnimation>,
@@ -261,6 +269,10 @@ pub enum Message {
     ShowChart(ChartKind),
     NextChart,
     ColorBy(ColorBy),
+    Deeper,
+    Shallower,
+    ShowDepth(Depth),
+    CopyPath,
     ShowAgesFrom(Option<AgeBucket>),
     AgesCounted { generation: u64, ages: Option<AgeBreakdown> },
     ShowOnlyKind(Option<Kind>),
@@ -279,8 +291,7 @@ impl App {
             error: None,
             parked_newest_first: Vec::new(),
             scans: Vec::new(),
-            chart_kind: ChartKind::default(),
-            color_by: ColorBy::default(),
+            chart: ChartPrefs::default(),
             chart_size: None,
             stepped_back_from_newest_parked: false,
         };
@@ -446,13 +457,15 @@ impl App {
                 }
             }
             Message::NextChart if matches!(self.screen, Screen::Browse(_)) => {
-                return self.show_chart(self.chart_kind.next());
+                return self.show_chart(self.chart.kind.next());
             }
             Message::ShowChart(kind) => return self.show_chart(kind),
             Message::ColorBy(color_by) => {
-                self.color_by = color_by;
+                self.chart.color_by = color_by;
                 return self.update_browser(Message::ColorBy(color_by));
             }
+            Message::Deeper if self.shows_rings() => return self.step_depth(Depth::deeper),
+            Message::Shallower if self.shows_rings() => return self.step_depth(Depth::shallower),
             Message::ChartMeasured(size) => {
                 self.chart_size = Some(size);
                 return self.update_browser(Message::ChartMeasured(size));
@@ -462,8 +475,18 @@ impl App {
         Task::none()
     }
 
+    fn step_depth(&mut self, step: fn(Depth) -> Option<Depth>) -> Task<Message> {
+        let Some(depth) = step(self.chart.depth) else { return Task::none() };
+        self.chart.depth = depth;
+        self.update_browser(Message::ShowDepth(depth))
+    }
+
+    fn shows_rings(&self) -> bool {
+        matches!(self.screen, Screen::Browse(_)) && self.chart.kind.has_rings()
+    }
+
     fn show_chart(&mut self, kind: ChartKind) -> Task<Message> {
-        self.chart_kind = kind;
+        self.chart.kind = kind;
         self.update_browser(Message::ShowChart(kind))
     }
 
@@ -513,7 +536,7 @@ impl App {
             return Task::none();
         }
         let mut resumed = Box::new(self.parked_newest_first.remove(i));
-        let catch_up = resumed.resume(self.chart_kind, self.color_by, self.chart_size);
+        let catch_up = resumed.resume(self.chart, self.chart_size);
         self.screen = Screen::Browse(resumed);
         self.stepped_back_from_newest_parked = false;
         catch_up
@@ -522,7 +545,7 @@ impl App {
     fn open_or_park_scan_result(&mut self, tree: Tree, opts: ScanOptions) -> Task<Message> {
         self.drop_parked_results_superseded_by(&tree);
         let finished = format!("Finished scanning {}. Open it from the start page.", opts.display_name());
-        let browser = Browser::new(tree, opts, self.chart_kind, self.color_by, self.chart_size);
+        let browser = Browser::new(tree, opts, self.chart, self.chart_size);
         let notice = match &mut self.screen {
             Screen::Start if self.scans.is_empty() => {
                 self.screen = Screen::Browse(Box::new(browser.with_opening_reveal()));
@@ -598,6 +621,8 @@ fn navigation_shortcut(key: Key<&str>, cmd: bool) -> Option<Message> {
         Key::Named(Named::F5) | Key::Named(Named::BrowserRefresh) => Message::Rescan,
         Key::Character("r") if cmd => Message::Rescan,
         Key::Character("t") if cmd => Message::NextChart,
+        Key::Character("+" | "=") if !cmd => Message::Deeper,
+        Key::Character("-") if !cmd => Message::Shallower,
         _ => return None,
     })
 }
@@ -657,7 +682,7 @@ impl<T: Send + 'static> Counted<T> {
 }
 
 impl Browser {
-    pub fn new(tree: Tree, opts: ScanOptions, chart: ChartKind, color_by: ColorBy, chart_size: Option<Size>) -> Self {
+    pub fn new(tree: Tree, opts: ScanOptions, chart: ChartPrefs, chart_size: Option<Size>) -> Self {
         let root = tree.root();
         let mut b = Browser {
             id: next_id(),
@@ -677,12 +702,14 @@ impl Browser {
             search_status: SearchStatus::Shown,
             search_cancel: CancelToken::default(),
             search: None,
-            color_by,
+            color_by: chart.color_by,
+            depth: chart.depth,
             aged_at_least: None,
             ages: Counted::default(),
             only_kind: None,
             kinds: Counted::default(),
             folded_chips_shown: false,
+            path_copied: None,
             list: ListView::default(),
             collector: Collector::default(),
             animation: None,
@@ -694,7 +721,7 @@ impl Browser {
             notice_expires_at: None,
             notice_hovered: false,
         };
-        b.install_chart(b.computed_chart(chart));
+        b.install_chart(b.computed_chart(chart.kind));
         b.sync_list();
         b
     }
@@ -728,6 +755,7 @@ impl Browser {
                 tree: &self.tree,
                 focus: self.focus,
                 size: (room.width, room.height),
+                depth: self.depth,
                 paint: Paint {
                     color_by: self.color_by,
                     search: self.search.as_deref(),
@@ -760,6 +788,20 @@ impl Browser {
         self.aged_at_least = None;
         self.only_kind = None;
         if animated { self.relayout_animated() } else { self.relayout() }
+    }
+
+    fn show_depth(&mut self, depth: Depth) {
+        self.depth = depth;
+        if self.chart.depth().is_some_and(|laid_out| laid_out != depth) {
+            self.animation = None;
+            self.install_chart(self.computed_chart(self.chart.kind()));
+            self.hovered = self.hovered.filter(|&segment| self.chart.shows(segment));
+        }
+    }
+
+    fn copy_path(&mut self) -> Task<Message> {
+        self.path_copied = Some(self.focus);
+        iced::clipboard::write(self.tree.path(self.focus).to_string_lossy().into_owned())
     }
 
     fn show_ages_from(&mut self, oldest: Option<AgeBucket>) {
@@ -887,6 +929,7 @@ impl Browser {
             self.forward.clear();
         }
         self.focus = id;
+        self.path_copied = None;
         if self.selected.is_some_and(|sel| !self.tree.is_strict_ancestor_of(id, sel)) {
             self.selected = None;
         }
@@ -1209,9 +1252,10 @@ impl Browser {
         }
     }
 
-    fn resume(&mut self, chart: ChartKind, color_by: ColorBy, chart_size: Option<Size>) -> Task<Message> {
-        self.show_chart(chart, chart_size);
-        self.set_color_by(color_by, false);
+    fn resume(&mut self, chart: ChartPrefs, chart_size: Option<Size>) -> Task<Message> {
+        self.show_depth(chart.depth);
+        self.show_chart(chart.kind, chart_size);
+        self.set_color_by(chart.color_by, false);
         self.updating(|b| {
             if b.notice.is_some() {
                 b.notice_expires_at = Some(Instant::now() + NOTICE_LIFETIME);
@@ -1266,6 +1310,8 @@ impl Browser {
             Message::GoUp => self.go_up(),
             Message::ShowChart(kind) => self.show_chart(kind, self.chart_size),
             Message::ColorBy(color_by) => self.set_color_by(color_by, true),
+            Message::ShowDepth(depth) => self.show_depth(depth),
+            Message::CopyPath => return self.copy_path(),
             Message::ShowAgesFrom(oldest) => self.show_ages_from(oldest),
             Message::AgesCounted { generation, ages } => self.ages.finish(generation, ages),
             Message::ShowOnlyKind(kind) => self.show_only_kind(kind),
@@ -1413,7 +1459,7 @@ pub(crate) mod test_util {
     }
 
     pub fn scanned(opts: ScanOptions) -> Browser {
-        Browser::new(scan_result(&opts).unwrap(), opts, ChartKind::default(), ColorBy::default(), None)
+        Browser::new(scan_result(&opts).unwrap(), opts, ChartPrefs::default(), None)
     }
 
     pub fn descend(tree: &Tree, names: &[&str]) -> NodeId {
@@ -1661,6 +1707,21 @@ mod tests {
 
     fn resume_newest_parked(app: &mut App) -> Task<Message> {
         app.update(Message::ResumeParked(app.parked_newest_first[0].id))
+    }
+
+    #[test]
+    fn a_result_resumed_in_another_chart_and_depth_reveals_itself_at_that_depth() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_showing(browser(dir.path()));
+        let _ = app.update(Message::GoHome);
+        let deeper = Depth::DEFAULT.deeper().unwrap();
+        app.chart = ChartPrefs { kind: ChartKind::Icicle, depth: deeper, ..app.chart };
+        let _ = resume_newest_parked(&mut app);
+
+        let b = on_screen(&app);
+        assert_eq!((b.chart.kind(), b.chart.depth()), (ChartKind::Icicle, Some(deeper)));
+        let revealing = b.animation.as_ref().is_some_and(|a| a.kind() == TransitionKind::Reveal);
+        assert!(revealing, "the switched chart reveals itself instead of popping in");
     }
 
     #[test]

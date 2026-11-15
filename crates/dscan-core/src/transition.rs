@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::age::AgeBucket;
 use crate::kind::Kind;
-use crate::layout::{Arc, Layout, MAX_DEPTH, Segment};
+use crate::layout::{Arc, Depth, Layout, Segment};
 use crate::tree::NodeId;
 
 const LAYER_REVEAL_DELAY: f64 = 0.07;
@@ -217,6 +217,7 @@ struct Zoom {
     anchor_start: f64,
     anchor_width: f64,
     direction: ZoomDirection,
+    depth: Depth,
 }
 
 impl Zoom {
@@ -256,7 +257,14 @@ impl Zoom {
             outer_arcs.map(|(ring, a)| placed(ring as f64, a.start, a.end, a)).collect();
         arcs_in_outer_frame
             .extend(inner_arcs_in_outer_frame.map(|(ring, a, start, end)| placed(ring as f64, start, end, a)));
-        Zoom { arcs_in_outer_frame, anchor_ring, anchor_start: anchor.start, anchor_width: anchor.span(), direction }
+        Zoom {
+            arcs_in_outer_frame,
+            anchor_ring,
+            anchor_start: anchor.start,
+            anchor_width: anchor.span(),
+            direction,
+            depth: to.depth,
+        }
     }
 
     fn window(&self, zoomed_in: f64) -> Window {
@@ -276,7 +284,7 @@ impl Zoom {
             ZoomDirection::Outward => 1.0 - t,
         };
         let w = self.window(zoomed_in);
-        let outermost = MAX_DEPTH as f64;
+        let outermost = self.depth.rings() as f64;
         let mut out: Vec<FrameArc> = self
             .arcs_in_outer_frame
             .iter()
@@ -472,7 +480,7 @@ mod tests {
     use crate::tree::Tree;
     use crate::tree::test_util::{T::*, descend, tree};
 
-    const SHOW_EVERY_ARC: LayoutParams = LayoutParams { max_depth: MAX_DEPTH, min_span: 1e-9 };
+    const SHOW_EVERY_ARC: LayoutParams = LayoutParams { depth: Depth::DEFAULT, min_span: 1e-9 };
     const SAME_PLACE: f64 = 1e-9;
 
     fn sample() -> Tree {

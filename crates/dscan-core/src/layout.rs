@@ -4,7 +4,32 @@ use crate::kind::Kind;
 use crate::paint::{ColorBy, Paint};
 use crate::tree::{NodeId, Tree};
 
-pub const MAX_DEPTH: usize = 7;
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Depth(usize);
+
+impl Depth {
+    pub const SHALLOWEST: Depth = Depth(1);
+    pub const DEFAULT: Depth = Depth(7);
+    pub const DEEPEST: Depth = Depth(12);
+
+    pub fn rings(self) -> usize {
+        self.0
+    }
+
+    pub fn deeper(self) -> Option<Depth> {
+        (self < Self::DEEPEST).then_some(Depth(self.0 + 1))
+    }
+
+    pub fn shallower(self) -> Option<Depth> {
+        (self > Self::SHALLOWEST).then_some(Depth(self.0 - 1))
+    }
+}
+
+impl Default for Depth {
+    fn default() -> Self {
+        Depth::DEFAULT
+    }
+}
 
 const DEGREES_PER_TURN: f64 = 360.0;
 const NARROWEST_DRAWN_ARC_DEGREES: f64 = 0.6;
@@ -161,13 +186,19 @@ impl Arc {
 
 #[derive(Clone, Copy, Debug)]
 pub struct LayoutParams {
-    pub max_depth: usize,
+    pub depth: Depth,
     pub min_span: f64,
+}
+
+impl LayoutParams {
+    pub fn for_depth(depth: Depth) -> Self {
+        LayoutParams { depth, min_span: NARROWEST_DRAWN_ARC_DEGREES / DEGREES_PER_TURN }
+    }
 }
 
 impl Default for LayoutParams {
     fn default() -> Self {
-        LayoutParams { max_depth: MAX_DEPTH, min_span: NARROWEST_DRAWN_ARC_DEGREES / DEGREES_PER_TURN }
+        LayoutParams::for_depth(Depth::DEFAULT)
     }
 }
 
@@ -175,6 +206,7 @@ impl Default for LayoutParams {
 pub struct Layout {
     pub focus: NodeId,
     pub total: u64,
+    pub depth: Depth,
     pub rings: Vec<Vec<Arc>>,
 }
 
@@ -212,7 +244,7 @@ impl Layout {
 
 pub fn partition(tree: &Tree, focus: NodeId, params: LayoutParams, paint: Paint<'_>, excluded: &Exclusions) -> Layout {
     let total = excluded.size(tree, focus);
-    let mut layout = Layout { focus, total, rings: vec![Vec::new(); params.max_depth] };
+    let mut layout = Layout { focus, total, depth: params.depth, rings: vec![Vec::new(); params.depth.rings()] };
     if total > 0 {
         let mut placer = Placer { tree, params, paint, excluded, rings: &mut layout.rings };
         placer.place(focus, 0.0, 1.0, 0, 0);
@@ -251,7 +283,7 @@ impl Placer<'_> {
     }
 
     fn place(&mut self, node: NodeId, start: f64, span: f64, depth: usize, branch: u32) {
-        if depth >= self.params.max_depth {
+        if depth >= self.params.depth.rings() {
             return;
         }
         let tree = self.tree;
@@ -307,7 +339,7 @@ mod tests {
         let l = partition(
             &t,
             t.root(),
-            LayoutParams { max_depth: 4, min_span: 0.01 },
+            LayoutParams { depth: Depth(4), min_span: 0.01 },
             Paint::default(),
             &Exclusions::default(),
         );
@@ -346,7 +378,7 @@ mod tests {
     fn excluded_items_leave_the_chart_and_their_space_goes_to_the_rest() {
         let t = tree(vec![D("a", vec![F("x.mov", 600), F("y.mov", 200)]), D("b", vec![F("w.png", 400)])]);
         let x = descend(&t, &["a", "x.mov"]);
-        let params = LayoutParams { max_depth: 4, min_span: 0.01 };
+        let params = LayoutParams { depth: Depth(4), min_span: 0.01 };
         let l = partition(&t, t.root(), params, Paint::default(), &Exclusions::new(&t, &[x]));
 
         assert_eq!(l.total, t.size(t.root()) - t.size(x));
@@ -354,6 +386,26 @@ mod tests {
         let ring0: Vec<_> = l.rings[0].iter().map(|arc| t.name(arc.node().unwrap()).into_owned()).collect();
         assert_eq!(ring0, ["b", "a"], "the shrunken folder is re-ranked");
         assert!((l.rings[0].last().unwrap().end - 1.0).abs() < 1e-9, "the remaining arcs still fill the turn");
+    }
+
+    #[test]
+    fn the_depth_caps_how_many_rings_are_laid_out() {
+        let t = tree(vec![D("a", vec![D("b", vec![D("c", vec![F("d", 100)])])])]);
+        let rings_at = |depth: Depth| {
+            let params = LayoutParams { depth, min_span: 0.01 };
+            partition(&t, t.root(), params, Paint::default(), &Exclusions::default()).rings.len()
+        };
+        assert_eq!(rings_at(Depth::SHALLOWEST), 1);
+        assert_eq!(rings_at(Depth(2)), 2);
+        assert_eq!(rings_at(Depth::DEFAULT), 4, "a shallow tree needs fewer rings than the depth allows");
+    }
+
+    #[test]
+    fn the_depth_steps_one_ring_at_a_time_and_stops_at_its_bounds() {
+        assert_eq!(Depth::DEFAULT.deeper().map(Depth::rings), Some(Depth::DEFAULT.rings() + 1));
+        assert_eq!(Depth::DEFAULT.shallower().map(Depth::rings), Some(Depth::DEFAULT.rings() - 1));
+        assert_eq!(Depth::DEEPEST.deeper(), None);
+        assert_eq!(Depth::SHALLOWEST.shallower(), None);
     }
 
     #[test]

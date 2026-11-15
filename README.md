@@ -28,6 +28,8 @@
 - **Icicle chart.** The sunburst unrolled into rows: the folder on top, each
   level below it, with every bar as wide as its share. Straight bars leave room
   for names and sizes, and deep folders stay as readable as shallow ones.
+- **Depth.** Choose how many folder levels the sunburst and icicle show, from 1
+  to 12 (7 by default), with the − and + buttons in the toolbar.
 - **Treemap.** Switch to a treemap to see every file as a rectangle sized by the
   space it takes, nested inside framed, labeled folders, so the biggest files
   stand out at a glance.
@@ -86,6 +88,8 @@ To scan a folder at launch, pass it as an argument: `disk-analyzer ~/Downloads`
 | Forward | Ctrl+] | ⌘] | Forward button |
 | Search | Ctrl+F | ⌘F | |
 | Switch to the next chart: sunburst, icicle, treemap | Ctrl+T | ⌘T | Chart buttons in the toolbar |
+| Show fewer or more levels | - or + | - or + | − and + buttons in the toolbar |
+| Copy the current folder's path | | | Copy button at the end of the path bar |
 | Open the selected item | Space | Space (Quick Look) | |
 | Collect for deletion | C | C | Drag onto the collector |
 | Scan again | F5 or Ctrl+R | ⌘R | **Rescan** |

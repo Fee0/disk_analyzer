@@ -1,6 +1,6 @@
 use std::f32::consts::{FRAC_PI_2, TAU};
 
-use crate::layout::{Arc, Layout, MAX_DEPTH};
+use crate::layout::{Arc, Depth, Layout};
 
 const MARGIN: f32 = 16.0;
 const SMALLEST_RADIUS: f32 = 60.0;
@@ -27,13 +27,13 @@ pub enum ChartHit<'a> {
 }
 
 impl ChartGeometry {
-    pub fn fitting(width: f32, height: f32) -> Self {
+    pub fn fitting(width: f32, height: f32, depth: Depth) -> Self {
         let radius = (width.min(height) / 2.0 - MARGIN).max(SMALLEST_RADIUS);
         let hole_radius = radius * HOLE_SHARE_OF_RADIUS;
         ChartGeometry {
             center: ChartPoint { x: width / 2.0, y: height / 2.0 },
             hole_radius,
-            ring_width: (radius - hole_radius) / MAX_DEPTH as f32,
+            ring_width: (radius - hole_radius) / depth.rings() as f32,
         }
     }
 
@@ -73,21 +73,32 @@ mod tests {
 
     #[test]
     fn the_chart_fills_the_shorter_side_and_splits_the_rest_of_the_radius_into_rings() {
-        let g = ChartGeometry::fitting(SIDE + 200.0, SIDE);
+        let g = ChartGeometry::fitting(SIDE + 200.0, SIDE, Depth::DEFAULT);
+        let outermost = Depth::DEFAULT.rings() as f64;
         assert_eq!(g.center, ChartPoint { x: (SIDE + 200.0) / 2.0, y: SIDE / 2.0 });
-        assert_eq!(g.radius(MAX_DEPTH as f64), SIDE / 2.0 - MARGIN, "the outer ring keeps a margin from the edge");
-        assert_eq!(g.hole_radius, g.radius(MAX_DEPTH as f64) * HOLE_SHARE_OF_RADIUS);
+        assert_eq!(g.radius(outermost), SIDE / 2.0 - MARGIN, "the outer ring keeps a margin from the edge");
+        assert_eq!(g.hole_radius, g.radius(outermost) * HOLE_SHARE_OF_RADIUS);
+    }
+
+    #[test]
+    fn a_deeper_chart_splits_the_same_radius_into_narrower_rings() {
+        let (shallow, deep) = (Depth::SHALLOWEST, Depth::DEEPEST);
+        let (g_shallow, g_deep) =
+            (ChartGeometry::fitting(SIDE, SIDE, shallow), ChartGeometry::fitting(SIDE, SIDE, deep));
+        let outer_radius_gap = g_shallow.radius(shallow.rings() as f64) - g_deep.radius(deep.rings() as f64);
+        assert!(outer_radius_gap.abs() < 1e-3, "both reach the same outer radius");
+        assert!(g_deep.ring_width < g_shallow.ring_width);
     }
 
     #[test]
     fn a_tiny_chart_keeps_its_smallest_radius() {
-        let g = ChartGeometry::fitting(10.0, 10.0);
-        assert_eq!(g.radius(MAX_DEPTH as f64), SMALLEST_RADIUS);
+        let g = ChartGeometry::fitting(10.0, 10.0, Depth::DEFAULT);
+        assert_eq!(g.radius(Depth::DEFAULT.rings() as f64), SMALLEST_RADIUS);
     }
 
     #[test]
     fn turns_start_at_twelve_o_clock_and_run_clockwise_on_screen() {
-        let g = ChartGeometry::fitting(SIDE, SIDE);
+        let g = ChartGeometry::fitting(SIDE, SIDE, Depth::DEFAULT);
         let at = |turn_fraction| point_at(&g, 0.5, turn_fraction);
         let (top, right, bottom) = (at(0.0), at(0.25), at(0.5));
         assert!(top.y < g.center.y && (top.x - g.center.x).abs() < 1e-3, "{top:?}");
@@ -100,7 +111,7 @@ mod tests {
         let t = tree(vec![F("big", 600), F("small", 200)]);
         let layout =
             partition(&t, t.root(), LayoutParams::default(), crate::paint::Paint::default(), &Exclusions::default());
-        let g = ChartGeometry::fitting(SIDE, SIDE);
+        let g = ChartGeometry::fitting(SIDE, SIDE, layout.depth);
         assert_eq!(g.hit(&layout, g.center), ChartHit::Hole);
         for name in ["big", "small"] {
             let (ring, arc) = layout.find(crate::layout::Segment::Node(descend(&t, &[name]))).unwrap();

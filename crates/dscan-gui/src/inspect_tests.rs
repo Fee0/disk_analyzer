@@ -217,6 +217,14 @@ fn toolbar_shows_only_on_disk_sizes_with_a_rescan_text_button() -> Result<(), Er
     Ok(())
 }
 
+fn bounds_of_id(ui: &mut Simulator<'_, Message>, id: &str) -> iced::Rectangle {
+    ui_inspect::nodes(ui)
+        .into_iter()
+        .find(|n| n.id.as_deref() == Some(id))
+        .unwrap_or_else(|| panic!("no {id} on screen"))
+        .bounds
+}
+
 fn bounds_of_text(ui: &mut Simulator<'_, Message>, label: &str) -> iced::Rectangle {
     ui_inspect::nodes(ui)
         .into_iter()
@@ -239,17 +247,16 @@ fn toolbar_lines_up_with_the_file_list_and_a_long_path_stops_before_it() -> Resu
 
     let mut ui = sim(&app);
     shoot(&mut ui, "toolbar-aligned")?;
-    let nodes = ui_inspect::nodes(&mut ui);
-    let bounds_of =
-        |id: &str| nodes.iter().find(|n| n.id.as_deref() == Some(id)).unwrap_or_else(|| panic!("no {id}")).bounds;
-    let (toolbar_list_side, list) = (bounds_of(view::TOOLBAR_LIST_SIDE_ID), bounds_of(view::LIST_PANEL_ID));
+    let (toolbar_list_side, list) =
+        (bounds_of_id(&mut ui, view::TOOLBAR_LIST_SIDE_ID), bounds_of_id(&mut ui, view::LIST_PANEL_ID));
     assert_eq!(toolbar_list_side.x, list.x, "Rescan starts where the file list starts");
     assert_eq!(
         toolbar_list_side.x + toolbar_list_side.width,
         list.x + list.width,
         "search ends where the file list ends"
     );
-    let path_bar = bounds_of(view::PATH_BAR_ID);
+    let path_bar = bounds_of_id(&mut ui, view::PATH_BAR_ID);
+    let nodes = ui_inspect::nodes(&mut ui);
     assert!(path_bar.x + path_bar.width < list.x, "the path bar stops before the file list: {path_bar:?} vs {list:?}");
     let current = nodes
         .iter()
@@ -278,27 +285,29 @@ fn deep_path_bar_shows_root_ellipsis_and_last_folders_and_the_ellipsis_steps_int
     let images = descend(&on_screen(&app).tree, &chain);
     let _ = app.update(Message::Navigate(images));
 
-    let msgs: Vec<Message> = {
+    let (msgs, hidden) = {
         let mut ui = sim(&app);
         println!("{}", ui_inspect::report(&mut ui, VIEW));
         shoot(&mut ui, "path-bar-deep")?;
-        for hidden in ["Projects", "clients"] {
-            assert!(ui.find(hidden).is_err(), "{hidden} is folded into the ellipsis");
+        let hidden = chain.iter().take_while(|name| ui.find(**name).is_err()).count();
+        assert!(hidden >= 2, "the first folders fold into the ellipsis");
+        for shown in &chain[hidden..] {
+            assert!(ui.find(*shown).is_ok(), "{shown} keeps its crumb after the ellipsis");
         }
         ui.click("…")?;
-        clicks_only(ui.into_messages())
+        (clicks_only(ui.into_messages()), hidden)
     };
-    let clients = descend(&on_screen(&app).tree, &chain[..2]);
+    let deepest_hidden = descend(&on_screen(&app).tree, &chain[..hidden]);
     assert!(
-        matches!(msgs[..], [Message::Navigate(id)] if id == clients),
+        matches!(msgs[..], [Message::Navigate(id)] if id == deepest_hidden),
         "the ellipsis opens the deepest folder it hides: {msgs:?}"
     );
 
     let mut ui = sim(&app);
     let back_button = ui_inspect::nodes(&mut ui)
         .into_iter()
-        .find(|n| n.text.as_deref() == Some("acme"))
-        .map(|acme| Point::new(54.0, acme.bounds.center_y()))
+        .find(|n| n.text.as_deref() == Some("images"))
+        .map(|images| Point::new(54.0, images.bounds.center_y()))
         .unwrap();
     ui_inspect::hover(&mut ui, back_button);
     shoot(&mut ui, "path-bar-back-hover")?;
@@ -812,12 +821,7 @@ fn collector_fixed_height_fits_every_state_without_clipping() -> Result<(), Erro
 }
 
 fn list_panel_left(ui: &mut Simulator<'_, Message>) -> f32 {
-    ui_inspect::nodes(ui)
-        .into_iter()
-        .find(|n| n.id.as_deref() == Some(view::LIST_PANEL_ID))
-        .expect("the list panel is on screen")
-        .bounds
-        .x
+    bounds_of_id(ui, view::LIST_PANEL_ID).x
 }
 
 fn collected_rows_over_the_chart(ui: &mut Simulator<'_, Message>, names: &[&str]) -> Vec<String> {
@@ -1456,7 +1460,6 @@ fn inspect_icicle() -> Result<(), Error> {
     Ok(())
 }
 
-const COLOR_BY_AGE_BUTTON: usize = 6;
 const DAY: std::time::Duration = std::time::Duration::from_secs(86_400);
 
 fn modified_days_ago(path: &Path, days: u32) {
@@ -1523,7 +1526,7 @@ fn inspect_age_colors() -> Result<(), Error> {
 
     let pressed = {
         let mut ui = sim(&app);
-        let color_by_age = toolbar_icon_buttons_left_to_right(&mut ui)[COLOR_BY_AGE_BUTTON];
+        let color_by_age = bounds_of_id(&mut ui, view::COLOR_SWITCH_ID);
         ui_inspect::hover(&mut ui, color_by_age.center());
         shoot(&mut ui, "age-toolbar-tooltip")?;
         ui_inspect::click_at(&mut ui, color_by_age.center());
@@ -1615,6 +1618,116 @@ fn the_more_chip_label(ui: &mut Simulator<'_, Message>) -> Option<String> {
         .map(|left_out| format!("+{left_out} more"))
         .find(|label| ui.find(label.as_str()).is_ok())
 }
+
+fn clicking_id(app: &App, id: &str) -> Vec<Message> {
+    let mut ui = sim(app);
+    let target = bounds_of_id(&mut ui, id);
+    ui_inspect::click_at(&mut ui, target.center());
+    clicks_only(ui.into_messages())
+}
+
+#[test]
+fn inspect_chart_depth() -> Result<(), Error> {
+    use dscan_core::{Chart, ChartKind, Depth};
+    use iced::keyboard::Key;
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = browser_app(dir.path());
+    let_the_chart_measure_itself(&mut app);
+    let laid_out = |app: &App| match &on_screen(app).chart {
+        Chart::Sunburst(layout) | Chart::Icicle(layout) => layout.depth,
+        Chart::Treemap(_) => panic!("a chart with rings"),
+    };
+    shoot(&mut sim(&app), "depth-stepper")?;
+    assert_eq!(laid_out(&app), Depth::DEFAULT);
+
+    let plus = clicking_id(&app, view::DEEPER_ID);
+    assert!(matches!(plus[..], [Message::Deeper]), "the plus button shows one more level: {plus:?}");
+    let _ = app.update(Message::Deeper);
+    let one_deeper = Depth::DEFAULT.deeper().unwrap();
+    assert_eq!(laid_out(&app), one_deeper, "the chart is laid out one ring deeper");
+    shoot(&mut sim(&app), "depth-deeper")?;
+
+    let minus = clicking_id(&app, view::SHALLOWER_ID);
+    assert!(matches!(minus[..], [Message::Shallower]), "the minus button shows one level less: {minus:?}");
+    key(&mut app, Key::Character("-".into()), false);
+    assert_eq!(laid_out(&app), Depth::DEFAULT, "minus is the shortcut for one level less");
+    key(&mut app, Key::Character("=".into()), false);
+    assert_eq!(laid_out(&app), one_deeper, "plus, unshifted or not, is the shortcut for one more level");
+    key(&mut app, Key::Character("+".into()), false);
+    assert_eq!(laid_out(&app), one_deeper.deeper().unwrap());
+
+    let first_arc_of_ring = |app: &App, ring: usize| match &on_screen(app).chart {
+        Chart::Sunburst(layout) | Chart::Icicle(layout) => layout.rings[ring][0].segment,
+        Chart::Treemap(_) => panic!("a chart with rings"),
+    };
+    let (inner, outer) = (first_arc_of_ring(&app, 0), first_arc_of_ring(&app, 1));
+    let _ = app.update(Message::Hover(Some(outer)));
+    while on_screen(&app).depth > Depth::SHALLOWEST {
+        let _ = app.update(Message::Shallower);
+    }
+    assert_eq!(laid_out(&app), Depth::SHALLOWEST);
+    assert_eq!(on_screen(&app).hovered, None, "an arc that is no longer drawn is no longer hovered");
+    let _ = app.update(Message::Deeper);
+    let _ = app.update(Message::Hover(Some(inner)));
+    let _ = app.update(Message::Shallower);
+    assert_eq!(on_screen(&app).hovered, Some(inner), "an arc that is still drawn stays hovered");
+    assert!(clicking_id(&app, view::SHALLOWER_ID).is_empty(), "the minus button stops at one level");
+    shoot(&mut sim(&app), "depth-shallowest")?;
+
+    let _ = app.update(Message::ShowChart(ChartKind::Icicle));
+    assert_eq!(laid_out(&app), Depth::SHALLOWEST, "the icicle keeps the depth");
+    finish_chart_animation(&mut app);
+    shoot(&mut sim(&app), "depth-shallowest-icicle")?;
+
+    let _ = app.update(Message::ShowChart(ChartKind::Treemap));
+    finish_chart_animation(&mut app);
+    let shallowest = Depth::SHALLOWEST.rings().to_string();
+    assert!(sim(&app).find(shallowest.as_str()).is_err(), "the treemap has no rings to count");
+    key(&mut app, Key::Character("+".into()), false);
+    assert_eq!(on_screen(&app).depth, Depth::SHALLOWEST, "the shortcut does nothing on the treemap");
+    let _ = app.update(Message::ShowChart(ChartKind::Sunburst));
+    assert_eq!(laid_out(&app), Depth::SHALLOWEST, "the sunburst comes back as deep as it was");
+    Ok(())
+}
+
+#[test]
+fn the_path_bar_copies_the_shown_folder_s_path() -> Result<(), Error> {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = browser_app(dir.path());
+    let clicked = clicking_id(&app, view::COPY_PATH_ID);
+    assert!(matches!(clicked[..], [Message::CopyPath]), "the copy button copies the path: {clicked:?}");
+    let _ = app.update(Message::CopyPath);
+    let b = on_screen(&app);
+    assert_eq!(b.path_copied, Some(b.focus), "the button shows the path was copied");
+    shoot(&mut sim(&app), "path-copied")?;
+    let movies = descend(&on_screen(&app).tree, &["Movies"]);
+    let _ = app.update(Message::Navigate(movies));
+    let b = on_screen(&app);
+    assert_ne!(b.path_copied, Some(b.focus), "another folder's path is not copied yet");
+    let _ = app.update(Message::Back);
+    assert_eq!(on_screen(&app).path_copied, None, "coming back does not claim the clipboard still holds the path");
+    Ok(())
+}
+
+#[test]
+fn a_long_folder_name_does_not_push_the_depth_stepper_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let long_name = "a-folder-with-a-rather-long-name";
+    let deepest = dir.path().join("outer").join(long_name);
+    std::fs::create_dir_all(&deepest).unwrap();
+    std::fs::write(deepest.join("file.bin"), vec![0u8; 50_000]).unwrap();
+    let mut app = browser_app(dir.path());
+    let stepper_shown = |app: &App| {
+        let mut ui = Simulator::with_size(Settings::default(), ROOMY_ENOUGH_FOR_THE_STEPPER, view::view(app));
+        ui_inspect::nodes(&mut ui).iter().any(|n| n.id.as_deref() == Some(view::SHALLOWER_ID))
+    };
+    assert!(stepper_shown(&app), "the stepper fits next to a short path");
+    let long_named = descend(&on_screen(&app).tree, &["outer", long_name]);
+    let _ = app.update(Message::Navigate(long_named));
+    assert!(stepper_shown(&app), "the current folder's crumb shortens instead of hiding the stepper");
+}
+
+const ROOMY_ENOUGH_FOR_THE_STEPPER: (f32, f32) = (1000.0, 700.0);
 
 #[test]
 fn inspect_kind_strip() -> Result<(), Error> {

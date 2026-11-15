@@ -57,6 +57,15 @@ static TREEMAP_CHART: LazyLock<Handle> = LazyLock::new(|| {
     black_line_icon_svg(r#"<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 4v16M12 12h9M16.5 12v8"/>"#)
 });
 
+static MINUS: LazyLock<Handle> = LazyLock::new(|| black_line_icon_svg(r#"<path d="M5 12h14"/>"#));
+static PLUS: LazyLock<Handle> = LazyLock::new(|| black_line_icon_svg(r#"<path d="M12 5v14M5 12h14"/>"#));
+static COPY: LazyLock<Handle> = LazyLock::new(|| {
+    black_line_icon_svg(
+        r#"<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/>"#,
+    )
+});
+static CHECK: LazyLock<Handle> = LazyLock::new(|| black_line_icon_svg(r#"<path d="m5 12.5 4.5 4.5L19 7.5"/>"#));
+
 static CLOCK: LazyLock<Handle> =
     LazyLock::new(|| black_line_icon_svg(r#"<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/>"#));
 
@@ -126,6 +135,22 @@ pub fn treemap_chart<'a>(size: f32, color: Color) -> Svg<'a, Theme> {
 
 pub fn clock<'a>(size: f32, color: Color) -> Svg<'a, Theme> {
     tinted(&CLOCK, size, color)
+}
+
+pub fn minus<'a>(size: f32, color: Color) -> Svg<'a, Theme> {
+    tinted(&MINUS, size, color)
+}
+
+pub fn plus<'a>(size: f32, color: Color) -> Svg<'a, Theme> {
+    tinted(&PLUS, size, color)
+}
+
+pub fn copy<'a>(size: f32, color: Color) -> Svg<'a, Theme> {
+    tinted(&COPY, size, color)
+}
+
+pub fn check<'a>(size: f32, color: Color) -> Svg<'a, Theme> {
+    tinted(&CHECK, size, color)
 }
 
 pub fn scan_root<'a>(whole_disk: bool, size: f32, color: Color) -> Svg<'a, Theme> {

@@ -26,11 +26,11 @@ pub struct Icicle<'a> {
     pub moving: Option<&'a ChartFrame>,
 }
 
-fn geometry(size: Size) -> IcicleGeometry {
-    IcicleGeometry::fitting(size.width, size.height)
-}
-
 impl Icicle<'_> {
+    fn geometry(&self, size: Size) -> IcicleGeometry {
+        IcicleGeometry::fitting(size.width, size.height, self.layout.depth)
+    }
+
     fn can_go_up(&self) -> bool {
         can_go_up(self.tree, self.layout.focus)
     }
@@ -91,7 +91,7 @@ impl Icicle<'_> {
 
 impl CursorOverlay for Icicle<'_> {
     fn draw_cursor_overlay(&self, renderer: &Renderer, bounds: Rectangle, cursor: mouse::Cursor) -> Geometry {
-        let geo = geometry(bounds.size());
+        let geo = self.geometry(bounds.size());
         let mut overlay = Frame::new(renderer, bounds.size());
         if let Some(p) = cursor.position_in(bounds) {
             match geo.hit(self.layout, chart_point(p)) {
@@ -124,7 +124,7 @@ impl canvas::Program<Message> for Icicle<'_> {
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> Option<canvas::Action<Message>> {
-        on_pointer(state, event, || self.pointed(&geometry(bounds.size()), bounds, cursor), self.hovered)
+        on_pointer(state, event, || self.pointed(&self.geometry(bounds.size()), bounds, cursor), self.hovered)
     }
 
     fn draw(
@@ -135,7 +135,7 @@ impl canvas::Program<Message> for Icicle<'_> {
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
-        let geo = geometry(bounds.size());
+        let geo = self.geometry(bounds.size());
         if let Some(ChartFrame::Arcs { arcs, total, style_progress }) = self.moving {
             let mut moving_chart = Frame::new(renderer, bounds.size());
             self.draw_bars(&mut moving_chart, &geo, arcs, *style_progress, *total);
@@ -147,7 +147,7 @@ impl canvas::Program<Message> for Icicle<'_> {
     }
 
     fn mouse_interaction(&self, _state: &PointerState, bounds: Rectangle, cursor: mouse::Cursor) -> mouse::Interaction {
-        interaction(self.pointed(&geometry(bounds.size()), bounds, cursor), self.can_go_up())
+        interaction(self.pointed(&self.geometry(bounds.size()), bounds, cursor), self.can_go_up())
     }
 }
 
@@ -186,8 +186,8 @@ mod tests {
         std::fs::write(dir.path().join("b.bin"), vec![1u8; 20_000]).unwrap();
         let mut b = crate::app::test_util::scanned(dscan_core::ScanOptions::folder(dir.path()));
         let _ = b.update(Message::ShowChart(dscan_core::ChartKind::Icicle));
-        let geo = geometry(CHART);
         let ChartLayout::Icicle(layout) = &b.chart else { panic!("the browser switched to the icicle") };
+        let geo = IcicleGeometry::fitting(CHART.width, CHART.height, layout.depth);
         let first = layout.rings[0][0];
         let over_the_bar = iced_point(geo.bar(0, &first).center());
 
