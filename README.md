@@ -10,10 +10,8 @@
   Inspired by <a href="https://daisydiskapp.com">DaisyDisk</a>.
 </p>
 
-https://github.com/user-attachments/assets/52e2b884-10dd-4b34-8f44-efc1fef065c4
-
 <p align="center">
-  <img src="assets/screenshot-sunburst.png" width="60%" alt="Disk Analyzer showing a sunburst chart of drive C: next to a list of the largest folders">
+  <img src="assets/tour.gif" alt="A tour of Disk Analyzer: scanning a drive, exploring the sunburst, icicle and treemap charts, setting the depth, coloring by age and file type, searching, collecting items for cleanup and copying the path">
 </p>
 
 ## Features
