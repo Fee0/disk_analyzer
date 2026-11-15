@@ -10,10 +10,10 @@
   Inspired by <a href="https://daisydiskapp.com">DaisyDisk</a>.
 </p>
 
+https://github.com/user-attachments/assets/52e2b884-10dd-4b34-8f44-efc1fef065c4
+
 <p align="center">
-  <img src="assets/screenshot-disks.png" width="32%" alt="The start page listing each disk with its free space and a Scan button">
-  <img src="assets/screenshot-sunburst.png" width="32%" alt="Disk Analyzer showing a sunburst chart of drive C: next to a list of the largest folders">
-  <img src="assets/screenshot-treemap.png" width="34.3%" alt="Disk Analyzer showing a treemap of drive C:, with every file as a rectangle sized by its space, nested in framed folders, next to a list of the largest items">
+  <img src="assets/screenshot-sunburst.png" width="60%" alt="Disk Analyzer showing a sunburst chart of drive C: next to a list of the largest folders">
 </p>
 
 ## Features
