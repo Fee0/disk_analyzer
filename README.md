@@ -5,6 +5,12 @@
 <h1 align="center">Disk Analyzer</h1>
 
 <p align="center">
+  <a href="https://github.com/Fee0/disk_analyzer/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Fee0/disk_analyzer/ci.yml?branch=main&label=CI" alt="CI status"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/Fee0/disk_analyzer" alt="License: MIT"></a>
+  <a href="https://github.com/Fee0/disk_analyzer/releases/latest"><img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Windows%20%7C%20Linux-blue" alt="Platforms: macOS, Windows, Linux"></a>
+</p>
+
+<p align="center">
   See what takes up space on your disk, and clean it up.<br>
   For macOS, Windows and Linux. Fast, local, no network access.<br>
   Inspired by <a href="https://daisydiskapp.com">DaisyDisk</a>.
