@@ -122,6 +122,16 @@ cargo run -p dscan-core --release --example scan -- / --disk   # benchmark a who
 cargo build --profile profiling                                # release with symbols, for profilers
 ```
 
+## Website
+
+`site/` is the promo page (plain HTML, CSS and JS, no build step). The
+`Website` workflow publishes it to GitHub Pages at https://disk-analyzer.com
+(custom domain, set in the repo's Pages settings) on pushes to `main`, adding
+`assets/tour.gif`, `icon.svg` and `icon-256.png` beside it. To preview it,
+copy those three into a temp folder with `site/` and serve that folder. Its
+download buttons resolve the newest release through the GitHub API and fall
+back to the version hard-coded in `index.html`.
+
 ## No comments in code
 
 No `//`, `///` or `/* */`. Make the code say it:

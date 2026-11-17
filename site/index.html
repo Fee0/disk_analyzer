@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Disk Analyzer: see what takes up space on your disk</title>
+<meta name="description" content="A free, fast disk usage explorer for macOS, Windows and Linux. Sunburst, icicle and treemap charts, colour by age, true sizes, and safe cleanup. Local only, no network access.">
+<meta name="theme-color" content="#1f2125" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f6f5f1" media="(prefers-color-scheme: light)">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Disk Analyzer">
+<meta property="og:description" content="See what takes up space on your disk, and clean it up. For macOS, Windows and Linux.">
+<meta property="og:url" content="https://disk-analyzer.com/">
+<meta property="og:image" content="https://disk-analyzer.com/icon-256.png">
+<meta property="og:image:width" content="256">
+<meta property="og:image:height" content="256">
+<meta name="twitter:card" content="summary">
+<link rel="canonical" href="https://disk-analyzer.com/">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="icon" href="icon-256.png" type="image/png" sizes="256x256">
+<link rel="apple-touch-icon" href="icon-256.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&amp;family=Instrument+Sans:wght@400;500;600&amp;family=JetBrains+Mono:wght@500&amp;display=swap">
+<link rel="stylesheet" href="style.css">
+<script src="site.js" defer></script>
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="#top"><img src="icon.svg" alt="">Disk Analyzer</a>
+    <nav class="links" aria-label="Sections">
+      <a href="#tour">Tour</a><a href="#features">Features</a><a href="#download">Download</a><a href="#support">Support</a>
+    </nav>
+    <div class="top-right">
+      <span class="da-chip" data-da-version>v0.6.0</span>
+      <a class="da-btn da-btn-secondary da-btn-sm" href="https://github.com/Fee0/disk_analyzer"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6"/><path d="M20 4 10 14"/><path d="M19 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5"/></svg>GitHub</a>
+    </div>
+  </div>
+</header>
+
+<main id="top">
+  <div class="wrap">
+    <section class="hero">
+      <div>
+        <span class="da-eyebrow">Free · macOS · Windows · Linux</span>
+        <h1 class="da-h-hero">Where did all my <em>disk space</em> go?</h1>
+        <p class="da-lead">See what takes up space on your disk, and clean it up. Every folder becomes a ring, every file type a colour, so the biggest offenders jump out in seconds.</p>
+        <div class="actions">
+          <a class="da-btn da-btn-primary" data-da-primary href="#download"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11"/><path d="m7 10 5 5 5-5"/><path d="M5 20h14"/></svg><span data-da-primary-label>Download</span></a>
+          <a class="da-btn da-btn-secondary" href="#download">All platforms</a>
+        </div>
+        <div class="meta da-caption"><span data-da-version class="da-mono">v0.6.0</span><span>·</span><span>Fast, local, no network access</span><span>·</span><span>Open source</span></div>
+      </div>
+      <div class="burst">
+        <svg id="burst" aria-hidden="true"></svg>
+      </div>
+    </section>
+  </div>
+
+  <div class="wrap">
+    <section class="tour" id="tour">
+      <div class="head center">
+        <span class="da-eyebrow">The tour</span>
+        <h2 class="da-h-section">Scan, explore, clean up</h2>
+        <p>Scan a drive, then dive in. Switch between sunburst, icicle and treemap, colour by age, search, and collect what can go.</p>
+      </div>
+      <figure class="da-frame" style="margin:0 auto">
+        <div class="da-frame-bar"><i></i><i></i><i></i><span>Disk Analyzer</span></div>
+        <img src="tour.gif" width="800" height="512" alt="A tour of Disk Analyzer: scanning a drive, exploring the sunburst, icicle and treemap charts, setting the depth, colouring by age and file type, searching, collecting items for cleanup and copying the path">
+      </figure>
+      <div class="legend-row"><ul class="da-legend" id="legend"></ul></div>
+    </section>
+  </div>
+
+  <div class="wrap">
+    <section id="features">
+      <div class="head">
+        <span class="da-eyebrow">Features</span>
+        <h2 class="da-h-section">Every byte, accounted for</h2>
+        <p>Built in Rust for speed. A scan uses every core, and the numbers are the space files really take on disk.</p>
+      </div>
+      <div class="features">
+        <article class="da-card da-feature">
+          <div class="da-feature-glyph"><svg viewBox="0 0 30 30"><path d="M17 3 8 17h6l-2 10 10-15h-6z" style="fill:var(--kind-archive)"/></svg></div>
+          <h3 class="da-h-card">Scans on every core</h3>
+          <p>Scan whole disks or single folders, several at once. Pause or stop each scan from its row.</p>
+        </article>
+        <article class="da-card da-feature">
+          <div class="da-feature-glyph"><svg viewBox="0 0 30 30"><circle cx="15" cy="15" r="4" style="fill:var(--accent)"/><path d="M15 5a10 10 0 0 1 9.5 7l-4.3 1.4A5.5 5.5 0 0 0 15 9.5z" style="fill:var(--kind-video)"/><path d="M24.6 13a10 10 0 0 1-8.6 12l-.5-4.5a5.5 5.5 0 0 0 4.6-6.4z" style="fill:var(--kind-document)"/><path d="M15 25A10 10 0 0 1 5.3 12.6l4.3 1.2A5.5 5.5 0 0 0 15 20.5z" style="fill:var(--kind-archive)"/></svg></div>
+          <h3 class="da-h-card">Sunburst chart</h3>
+          <p>Each ring is one folder level, coloured by file type. Hover a segment for its size and share.</p>
+        </article>
+        <article class="da-card da-feature">
+          <div class="da-feature-glyph"><svg viewBox="0 0 30 30"><rect x="4" y="5" width="22" height="5" rx="1.5" style="fill:var(--kind-document)"/><rect x="4" y="12" width="13" height="5" rx="1.5" style="fill:var(--kind-video)"/><rect x="18" y="12" width="8" height="5" rx="1.5" style="fill:var(--kind-code)"/><rect x="4" y="19" width="8" height="5" rx="1.5" style="fill:var(--kind-video)"/><rect x="13" y="19" width="4" height="5" rx="1.5" style="fill:var(--kind-image)"/></svg></div>
+          <h3 class="da-h-card">Icicle chart</h3>
+          <p>The sunburst unrolled into rows, with room for names and sizes, so deep folders stay readable.</p>
+        </article>
+        <article class="da-card da-feature">
+          <div class="da-feature-glyph"><svg viewBox="0 0 30 30"><rect x="4" y="4" width="13" height="22" rx="2" style="fill:var(--kind-video)"/><rect x="18.5" y="4" width="7.5" height="12" rx="2" style="fill:var(--kind-disk-image)"/><rect x="18.5" y="17.5" width="7.5" height="8.5" rx="2" style="fill:var(--kind-image)"/></svg></div>
+          <h3 class="da-h-card">Treemap</h3>
+          <p>Every file as a rectangle sized by the space it takes, nested in labelled folders. The giants stand out.</p>
+        </article>
+        <article class="da-card da-feature">
+          <div class="da-feature-glyph"><svg viewBox="0 0 30 30"><rect x="4" y="5" width="22" height="3" rx="1" style="fill:var(--age-0)"/><rect x="4" y="10" width="17" height="3" rx="1" style="fill:var(--age-2)"/><rect x="4" y="15" width="12" height="3" rx="1" style="fill:var(--age-3)"/><rect x="4" y="20" width="20" height="3" rx="1" style="fill:var(--age-5)"/></svg></div>
+          <h3 class="da-h-card">Colour by age</h3>
+          <p>Warm for recent, cold for years old. Click an age to find what nobody has touched in two years.</p>
+        </article>
+        <article class="da-card da-feature">
+          <div class="da-feature-glyph"><svg viewBox="0 0 30 30"><rect x="5" y="7" width="12" height="16" rx="2" style="fill:var(--kind-document)"/><rect x="13" y="7" width="12" height="16" rx="2" style="fill:var(--kind-document);fill-opacity:.45"/></svg></div>
+          <h3 class="da-h-card">True sizes</h3>
+          <p>Counts the space files use on disk, not their nominal length. Hard links and cloned copies count once.</p>
+        </article>
+        <article class="da-card da-feature">
+          <div class="da-feature-glyph"><svg viewBox="0 0 30 30"><circle cx="15" cy="15" r="9" fill="none" style="stroke:var(--kind-hidden)" stroke-width="5" stroke-dasharray="4 3"/><circle cx="15" cy="15" r="3" style="fill:var(--text-dim)"/></svg></div>
+          <h3 class="da-h-card">Hidden space</h3>
+          <p>Snapshots, purgeable space and unreadable folders get their own segment, with how to free them.</p>
+        </article>
+        <article class="da-card da-feature">
+          <div class="da-feature-glyph"><svg viewBox="0 0 30 30" fill="none" stroke-linecap="round"><circle cx="13" cy="13" r="7" style="stroke:var(--kind-image)" stroke-width="3"/><path d="m18.5 18.5 6 6" style="stroke:var(--kind-image)" stroke-width="3"/></svg></div>
+          <h3 class="da-h-card">Search</h3>
+          <p>Type a name to narrow the list. The chart lights up where the matches are.</p>
+        </article>
+        <article class="da-card da-feature">
+          <div class="da-feature-glyph"><svg viewBox="0 0 30 30"><rect x="5" y="9" width="20" height="16" rx="3" style="fill:var(--danger)"/><rect x="9" y="4" width="5" height="5" rx="1" style="fill:var(--kind-video)"/><rect x="15" y="5" width="6" height="4" rx="1" style="fill:var(--kind-archive)"/></svg></div>
+          <h3 class="da-h-card">Clean up safely</h3>
+          <p>Collect files to delete and see your disk without them first. System locations can't be collected.</p>
+        </article>
+      </div>
+    </section>
+  </div>
+
+  <div class="wrap">
+    <section>
+      <div class="keys">
+        <div>
+          <span class="da-eyebrow">Made for the keyboard</span>
+          <h2 class="da-h-section" style="margin-top:var(--space-3)">Fly through folders</h2>
+          <div class="principles">
+            <div><i style="background:var(--kind-video)"></i><span><b>Local only.</b> No accounts, no telemetry, no network access.</span></div>
+            <div><i style="background:var(--kind-document)"></i><span><b>Fresh every time.</b> No cache to go stale: each launch scans anew.</span></div>
+            <div><i style="background:var(--kind-code)"></i><span><b>Native on all three.</b> Trash or Recycle Bin, Finder or Explorer, ⌘ or Ctrl.</span></div>
+          </div>
+        </div>
+        <table aria-label="Keyboard shortcuts">
+          <tr><td>Open the selected folder</td><td><span class="da-kbd">Enter</span></td></tr>
+          <tr><td>Go up a level</td><td><span class="da-kbd" data-mod>Ctrl</span><span class="da-kbd">↑</span></td></tr>
+          <tr><td>Switch chart: sunburst, icicle, treemap</td><td><span class="da-kbd" data-mod>Ctrl</span><span class="da-kbd">T</span></td></tr>
+          <tr><td>Search</td><td><span class="da-kbd" data-mod>Ctrl</span><span class="da-kbd">F</span></td></tr>
+          <tr><td>Show fewer or more levels</td><td><span class="da-kbd">−</span><span class="da-kbd">+</span></td></tr>
+          <tr><td>Collect for deletion</td><td><span class="da-kbd">C</span></td></tr>
+          <tr><td>Preview the selected item</td><td><span class="da-kbd">Space</span></td></tr>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <div class="wrap">
+    <section id="download">
+      <div class="head">
+        <span class="da-eyebrow">Download <span data-da-version>v0.6.0</span></span>
+        <h2 class="da-h-section">Get Disk Analyzer</h2>
+        <p>Free, for every desktop. Each button downloads straight from the latest GitHub release.</p>
+      </div>
+      <div class="downloads" id="dl">
+        <div class="da-card da-dl" data-da-card="macos">
+          <div class="da-dl-os"><h3 class="da-h-card">macOS</h3><span class="da-dl-badge">Your system</span></div>
+          <span class="da-caption">macOS 11+ · Apple silicon &amp; Intel</span>
+          <a class="da-btn da-btn-secondary" data-da-os="macos" href="https://github.com/Fee0/disk_analyzer/releases/download/v0.6.0/disk-analyzer-0.6.0-macos-universal.dmg"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11"/><path d="m7 10 5 5 5-5"/><path d="M5 20h14"/></svg>Download .dmg</a>
+          <span class="da-dl-file" data-da-file="macos">disk-analyzer-0.6.0-macos-universal.dmg</span>
+          <ol class="da-dl-steps"><li>Drag the app to Applications.</li><li>Signed and notarized: no warning on first launch.</li></ol>
+        </div>
+        <div class="da-card da-dl" data-da-card="windows">
+          <div class="da-dl-os"><h3 class="da-h-card">Windows</h3><span class="da-dl-badge">Your system</span></div>
+          <span class="da-caption">Windows 10+ · x64</span>
+          <a class="da-btn da-btn-secondary" data-da-os="windows" href="https://github.com/Fee0/disk_analyzer/releases/download/v0.6.0/disk-analyzer-0.6.0-windows-x86_64.zip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11"/><path d="m7 10 5 5 5-5"/><path d="M5 20h14"/></svg>Download .zip</a>
+          <span class="da-dl-file" data-da-file="windows">disk-analyzer-0.6.0-windows-x86_64.zip</span>
+          <ol class="da-dl-steps"><li>Unzip, run disk-analyzer.exe.</li><li>SmartScreen? More info → Run anyway.</li></ol>
+        </div>
+        <div class="da-card da-dl" data-da-card="linux">
+          <div class="da-dl-os"><h3 class="da-h-card">Linux</h3><span class="da-dl-badge">Your system</span></div>
+          <span class="da-caption">x86_64 · .tar.gz</span>
+          <a class="da-btn da-btn-secondary" data-da-os="linux" href="https://github.com/Fee0/disk_analyzer/releases/download/v0.6.0/disk-analyzer-0.6.0-linux-x86_64.tar.gz"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11"/><path d="m7 10 5 5 5-5"/><path d="M5 20h14"/></svg>Download .tar.gz</a>
+          <span class="da-dl-file" data-da-file="linux">disk-analyzer-0.6.0-linux-x86_64.tar.gz</span>
+          <ol class="da-dl-steps"><li>Extract, run ./install.sh.</li><li>On ARM? Get the <a data-da-os="linuxArm" href="https://github.com/Fee0/disk_analyzer/releases/download/v0.6.0/disk-analyzer-0.6.0-linux-aarch64.tar.gz">aarch64 build</a>.</li></ol>
+        </div>
+      </div>
+      <div class="dl-foot">
+        <span>Scanning a whole disk? Give it Full Disk Access on macOS, or run it as administrator or root.</span>
+        <span>Build from source: <code>cargo run --release</code> · <a href="https://github.com/Fee0/disk_analyzer/releases">All releases</a></span>
+      </div>
+    </section>
+  </div>
+
+  <div class="wrap">
+    <section id="support">
+      <div class="head">
+        <span class="da-eyebrow">Support</span>
+        <h2 class="da-h-section">Made by one person, for everyone</h2>
+      </div>
+      <div class="da-support">
+        <div class="da-card">
+          <h3 class="da-h-card">Support the project</h3>
+          <p>Disk Analyzer is free. If it found you a few hundred gigabytes, you can chip in for the coffee that built it.</p>
+          <div style="display:flex;gap:var(--space-3);align-items:center"><a class="da-btn da-btn-primary" aria-disabled="true" id="donate"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20s-7-4.4-7-10a4 4 0 0 1 7-2.6A4 4 0 0 1 19 10c0 5.6-7 10-7 10z"/></svg>Donate</a><span class="da-soon">Coming soon</span></div>
+        </div>
+        <div class="da-card">
+          <h3 class="da-h-card">Get in touch</h3>
+          <p>Found a bug, a folder it miscounts, or an idea? Open an issue. It is read by the person who wrote the code.</p>
+          <div style="display:flex;gap:var(--space-3);align-items:center;flex-wrap:wrap"><a class="da-btn da-btn-secondary" href="https://github.com/Fee0/disk_analyzer/issues/new"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>Open an issue</a><a class="da-btn da-btn-ghost" href="https://github.com/Fee0/disk_analyzer">Star on GitHub</a></div>
+        </div>
+      </div>
+    </section>
+  </div>
+</main>
+
+<footer class="bottom">
+  <div class="wrap">
+    <a class="brand" href="#top"><img src="icon.svg" alt="">Disk Analyzer</a>
+    <span>MIT licensed · Written in Rust with iced · Inspired by DaisyDisk</span>
+    <nav aria-label="Footer">
+      <a href="https://github.com/Fee0/disk_analyzer">Source</a>
+      <a href="https://github.com/Fee0/disk_analyzer/releases">Releases</a>
+      <a href="https://github.com/Fee0/disk_analyzer/blob/main/LICENSE">License</a>
+    </nav>
+  </div>
+</footer>
+</body>
+</html>
