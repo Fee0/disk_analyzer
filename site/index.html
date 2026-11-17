@@ -3,19 +3,25 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Disk Analyzer: see what takes up space on your disk</title>
-<meta name="description" content="A free, fast disk usage explorer for macOS, Windows and Linux. Sunburst, icicle and treemap charts, colour by age, true sizes, and safe cleanup. Local only, no network access.">
+<title>Disk Analyzer: free disk space analyzer for Mac, Windows &amp; Linux</title>
+<meta name="description" content="Free, open-source disk space analyzer for macOS, Windows and Linux. See what takes up space in sunburst, icicle and treemap charts, then clean up safely.">
+<meta name="robots" content="index, follow, max-image-preview:large">
 <meta name="theme-color" content="#1f2125" media="(prefers-color-scheme: dark)">
 <meta name="theme-color" content="#f6f5f1" media="(prefers-color-scheme: light)">
 <meta property="og:type" content="website">
-<meta property="og:title" content="Disk Analyzer">
-<meta property="og:description" content="See what takes up space on your disk, and clean it up. For macOS, Windows and Linux.">
+<meta property="og:site_name" content="Disk Analyzer">
+<meta property="og:locale" content="en_US">
+<meta property="og:title" content="Disk Analyzer: where did all my disk space go?">
+<meta property="og:description" content="See what takes up space on your disk, and clean it up. Free for macOS, Windows and Linux.">
 <meta property="og:url" content="https://disk-analyzer.com/">
-<meta property="og:image" content="https://disk-analyzer.com/icon-256.png">
-<meta property="og:image:width" content="256">
-<meta property="og:image:height" content="256">
-<meta name="twitter:card" content="summary">
+<meta property="og:image" content="https://disk-analyzer.com/og.png">
+<meta property="og:image:type" content="image/png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Disk Analyzer, a free disk space analyzer for macOS, Windows and Linux">
+<meta name="twitter:card" content="summary_large_image">
 <link rel="canonical" href="https://disk-analyzer.com/">
+<link rel="icon" href="favicon.ico" sizes="32x32">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="icon" href="icon-256.png" type="image/png" sizes="256x256">
 <link rel="apple-touch-icon" href="icon-256.png">
@@ -24,14 +30,15 @@
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&amp;family=Instrument+Sans:wght@400;500;600&amp;family=JetBrains+Mono:wght@500&amp;display=swap">
 <link rel="stylesheet" href="style.css">
 <script src="site.js" defer></script>
+<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"WebSite","@id":"https://disk-analyzer.com/#website","url":"https://disk-analyzer.com/","name":"Disk Analyzer","inLanguage":"en"},{"@type":"SoftwareApplication","@id":"https://disk-analyzer.com/#app","name":"Disk Analyzer","description":"Free, open-source disk space analyzer for macOS, Windows and Linux. See what takes up space in sunburst, icicle and treemap charts, then clean up safely.","url":"https://disk-analyzer.com/","applicationCategory":"UtilitiesApplication","applicationSubCategory":"Disk space analyzer","operatingSystem":"macOS 11+, Windows 10+, Linux","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"isAccessibleForFree":true,"license":"https://github.com/Fee0/disk_analyzer/blob/main/LICENSE","downloadUrl":"https://github.com/Fee0/disk_analyzer/releases/latest","image":"https://disk-analyzer.com/icon-256.png","screenshot":"https://disk-analyzer.com/tour.gif","featureList":["Sunburst chart","Icicle chart","Treemap","Colour by file type or age","True on-disk sizes","Hidden space","Search","Safe cleanup"],"sameAs":["https://github.com/Fee0/disk_analyzer"],"author":{"@type":"Person","name":"Frederik Peukert","url":"https://github.com/Fee0"}},{"@type":"FAQPage","@id":"https://disk-analyzer.com/#faq","mainEntity":[{"@type":"Question","name":"Is Disk Analyzer free?","acceptedAnswer":{"@type":"Answer","text":"Yes. Disk Analyzer is free and open source under the MIT license. There is no paid tier, no account and no ads."}},{"@type":"Question","name":"Is it a DaisyDisk alternative for Windows and Linux?","acceptedAnswer":{"@type":"Answer","text":"Disk Analyzer is inspired by DaisyDisk and shows the same kind of sunburst chart, but it runs on macOS, Windows and Linux. It also has an icicle chart and a treemap, the view you may know from WinDirStat."}},{"@type":"Question","name":"Is it safe to delete files with it?","acceptedAnswer":{"@type":"Answer","text":"Nothing is deleted while you explore. You collect the items you want gone, review the list, and confirm. They move to the Trash on macOS and Linux or the Recycle Bin on Windows, so you can restore them. System locations cannot be collected at all."}},{"@type":"Question","name":"Does it send my files or file names anywhere?","acceptedAnswer":{"@type":"Answer","text":"No. The app has no network access, no telemetry and no accounts. Every scan stays on your computer."}},{"@type":"Question","name":"Why does it show a different size than Finder or Explorer?","acceptedAnswer":{"@type":"Answer","text":"Disk Analyzer counts the space a file really takes on disk, not its nominal length. Hard links and cloned copies count once, and space the scan cannot see, such as snapshots and purgeable space, gets its own segment."}},{"@type":"Question","name":"How do I scan my whole disk?","acceptedAnswer":{"@type":"Answer","text":"On macOS, give the app Full Disk Access in System Settings under Privacy & Security. On Windows and Linux, run it as administrator or root. Folders it cannot read are counted as hidden space."}}]}]}</script>
 </head>
 <body>
 
 <header class="top">
   <div class="wrap">
-    <a class="brand" href="#top"><img src="icon.svg" alt="">Disk Analyzer</a>
+    <a class="brand" href="#top"><img src="icon.svg" alt="" width="30" height="30">Disk Analyzer</a>
     <nav class="links" aria-label="Sections">
-      <a href="#tour">Tour</a><a href="#features">Features</a><a href="#download">Download</a><a href="#support">Support</a>
+      <a href="#tour">Tour</a><a href="#features">Features</a><a href="#download">Download</a><a href="#faq">FAQ</a><a href="#support">Support</a>
     </nav>
     <div class="top-right">
       <a class="da-btn da-btn-secondary da-btn-sm" href="https://github.com/Fee0/disk_analyzer"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6"/><path d="M20 4 10 14"/><path d="M19 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5"/></svg>GitHub</a>
@@ -43,7 +50,7 @@
   <div class="wrap">
     <section class="hero">
       <div>
-        <span class="da-eyebrow">Free · macOS · Windows · Linux</span>
+        <span class="da-eyebrow">Free disk space analyzer · macOS · Windows · Linux</span>
         <h1 class="da-h-hero">Where did all my <em>disk space</em> go?</h1>
         <p class="da-lead">See what takes up space on your disk, and clean it up. Every folder becomes a ring, every file type a colour, so the biggest offenders jump out in seconds.</p>
         <div class="actions">
@@ -65,7 +72,7 @@
       </div>
       <figure class="da-frame" style="margin:0 auto">
         <div class="da-frame-bar"><i></i><i></i><i></i><span>Disk Analyzer</span></div>
-        <img src="tour.gif" width="800" height="512" alt="A tour of Disk Analyzer: scanning a drive, exploring the sunburst, icicle and treemap charts, setting the depth, colouring by age and file type, searching, collecting items for cleanup and copying the path">
+        <img src="tour.gif" width="800" height="512" loading="lazy" decoding="async" alt="A tour of Disk Analyzer: scanning a drive, exploring the sunburst, icicle and treemap charts, setting the depth, colouring by age and file type, searching, collecting items for cleanup and copying the path">
       </figure>
       <div class="legend-row"><ul class="da-legend" id="legend"></ul></div>
     </section>
@@ -184,6 +191,40 @@
   </div>
 
   <div class="wrap">
+    <section id="faq">
+      <div class="head">
+        <h2 class="da-h-section">Questions and answers</h2>
+      </div>
+      <div class="faq">
+        <details class="da-card">
+          <summary><h3 class="da-h-card">Is Disk Analyzer free?</h3></summary>
+          <p>Yes. Disk Analyzer is free and open source under the MIT license. There is no paid tier, no account and no ads.</p>
+        </details>
+        <details class="da-card">
+          <summary><h3 class="da-h-card">Is it a DaisyDisk alternative for Windows and Linux?</h3></summary>
+          <p>Disk Analyzer is inspired by DaisyDisk and shows the same kind of sunburst chart, but it runs on macOS, Windows and Linux. It also has an icicle chart and a treemap, the view you may know from WinDirStat.</p>
+        </details>
+        <details class="da-card">
+          <summary><h3 class="da-h-card">Is it safe to delete files with it?</h3></summary>
+          <p>Nothing is deleted while you explore. You collect the items you want gone, review the list, and confirm. They move to the Trash on macOS and Linux or the Recycle Bin on Windows, so you can restore them. System locations cannot be collected at all.</p>
+        </details>
+        <details class="da-card">
+          <summary><h3 class="da-h-card">Does it send my files or file names anywhere?</h3></summary>
+          <p>No. The app has no network access, no telemetry and no accounts. Every scan stays on your computer.</p>
+        </details>
+        <details class="da-card">
+          <summary><h3 class="da-h-card">Why does it show a different size than Finder or Explorer?</h3></summary>
+          <p>Disk Analyzer counts the space a file really takes on disk, not its nominal length. Hard links and cloned copies count once, and space the scan cannot see, such as snapshots and purgeable space, gets its own segment.</p>
+        </details>
+        <details class="da-card">
+          <summary><h3 class="da-h-card">How do I scan my whole disk?</h3></summary>
+          <p>On macOS, give the app Full Disk Access in System Settings under Privacy &amp; Security. On Windows and Linux, run it as administrator or root. Folders it cannot read are counted as hidden space.</p>
+        </details>
+      </div>
+    </section>
+  </div>
+
+  <div class="wrap">
     <section id="support">
       <div class="head">
         <h2 class="da-h-section">Made by one person, for everyone</h2>
@@ -206,7 +247,7 @@
 
 <footer class="bottom">
   <div class="wrap">
-    <a class="brand" href="#top"><img src="icon.svg" alt="">Disk Analyzer</a>
+    <a class="brand" href="#top"><img src="icon.svg" alt="" width="22" height="22">Disk Analyzer</a>
     <nav aria-label="Footer">
       <a href="https://github.com/Fee0/disk_analyzer">Source</a>
       <a href="https://github.com/Fee0/disk_analyzer/releases">Releases</a>

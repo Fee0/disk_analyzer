@@ -32,6 +32,7 @@ jobs:
           mkdir _site
           cp -R site/. _site/
           cp assets/tour.gif assets/icon/icon.svg assets/icon/icon-256.png _site/
+          cp assets/icon/icon.ico _site/favicon.ico
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

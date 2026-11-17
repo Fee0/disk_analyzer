@@ -13,7 +13,8 @@
 <p align="center">
   See what takes up space on your disk, and clean it up.<br>
   For macOS, Windows and Linux. Fast, local, no network access.<br>
-  Inspired by <a href="https://daisydiskapp.com">DaisyDisk</a>.
+  Inspired by <a href="https://daisydiskapp.com">DaisyDisk</a>.<br>
+  <a href="https://disk-analyzer.com">disk-analyzer.com</a>
 </p>
 
 <p align="center">
