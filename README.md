@@ -64,7 +64,7 @@ Download the file for your system from the
 |---|---|---|
 | macOS 11+ | `.dmg` | Drag the app to *Applications*. It is signed and notarized, so it opens without a warning. |
 | Windows 10+ | `.zip` | Run `disk-analyzer.exe`. If SmartScreen appears, click **More info → Run anyway**. |
-| Linux | `.tar.gz` | Run `./install.sh` to add it to your app menu, or run `./disk-analyzer` directly. |
+| Linux (x86_64 or ARM64) | `.tar.gz` | Run `./install.sh` to add it to your app menu, or run `./disk-analyzer` directly. |
 
 **Full disk scans:** on macOS, give the app *Full Disk Access* (System Settings →
 Privacy & Security). On Windows and Linux, run it as administrator or root.

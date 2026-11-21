@@ -21,7 +21,7 @@
     macos: { label: "macOS", suffix: "macos-universal.dmg", match: /macos.*\.dmg$/i, req: "macOS 11+ · Apple silicon & Intel", steps: ["Open the .dmg", "Drag Disk Analyzer to Applications", "Signed and notarized: opens without a warning"] },
     windows: { label: "Windows", suffix: "windows-x86_64.zip", match: /windows.*\.zip$/i, req: "Windows 10+ · x64", steps: ["Unzip and run disk-analyzer.exe", "If SmartScreen appears: More info → Run anyway"] },
     linux: { label: "Linux", suffix: "linux-x86_64.tar.gz", match: /linux-x86_64\.tar\.gz$/i, req: "x86_64", steps: ["Extract the archive", "Run ./install.sh to add it to your app menu"] },
-    linuxArm: { label: "Linux ARM", suffix: "linux-aarch64.tar.gz", match: /linux-aarch64\.tar\.gz$/i, req: "aarch64", steps: [] }
+    linuxArm: { label: "Linux ARM64", suffix: "linux-aarch64.tar.gz", match: /linux-aarch64\.tar\.gz$/i, req: "aarch64", steps: [] }
   };
 
   function fileName(version, platform) {
@@ -61,6 +61,19 @@
     return null;
   }
 
+  function isArmUserAgent() {
+    return /aarch64|arm64|armv8/i.test(navigator.userAgent || "");
+  }
+
+  function detectArm(done) {
+    done(isArmUserAgent());
+    var uad = navigator.userAgentData;
+    if (!uad || !uad.getHighEntropyValues) return;
+    uad.getHighEntropyValues(["architecture"])
+      .then(function (v) { if (v.architecture === "arm") done(true); })
+      .catch(function () {});
+  }
+
   function formatBytes(n) {
     if (n == null) return "";
     var units = ["B", "KB", "MB", "GB"], i = 0;
@@ -68,13 +81,40 @@
     return (i ? n.toFixed(1) : n) + " " + units[i];
   }
 
+  function markPrimary(root, platform) {
+    root.querySelectorAll("[data-da-card] [data-da-os]").forEach(function (b) {
+      var mine = b.getAttribute("data-da-os") === platform;
+      b.classList.toggle("da-btn-primary", mine);
+      b.classList.toggle("da-btn-secondary", !mine);
+    });
+  }
+
   function wireDownloads(root) {
     root = root || document;
     var os = detectOS();
+    var platform = os || "macos";
+    var release = null;
     root.querySelectorAll("[data-da-card]").forEach(function (card) {
       if (card.getAttribute("data-da-card") === os) card.setAttribute("data-current", "");
     });
+    function wireHero() {
+      if (!release) return;
+      root.querySelectorAll("[data-da-primary]").forEach(function (el) {
+        el.setAttribute("href", os ? release.assets[platform].url : "#download");
+        var label = el.querySelector("[data-da-primary-label]");
+        if (label) label.textContent = os ? "Download for " + PLATFORMS[platform].label : "Download";
+      });
+    }
+    markPrimary(root, platform);
+    if (os === "linux") {
+      detectArm(function (arm) {
+        platform = arm ? "linuxArm" : "linux";
+        markPrimary(root, platform);
+        wireHero();
+      });
+    }
     resolveRelease(function (rel) {
+      release = rel;
       root.querySelectorAll("[data-da-os]").forEach(function (el) {
         var asset = rel.assets[el.getAttribute("data-da-os")];
         if (asset) el.setAttribute("href", asset.url);
@@ -84,13 +124,7 @@
         if (!asset) return;
         el.textContent = asset.size ? formatBytes(asset.size) : "";
       });
-      root.querySelectorAll("[data-da-primary]").forEach(function (el) {
-        var target = os || "macos";
-        el.setAttribute("href", rel.assets[target].url);
-        var label = el.querySelector("[data-da-primary-label]");
-        if (label) label.textContent = os ? "Download for " + PLATFORMS[os].label : "Download";
-        if (!os) el.setAttribute("href", "#download");
-      });
+      wireHero();
     });
     return os;
   }
@@ -207,11 +241,5 @@
   var DA = window.DiskAnalyzer;
   DA.sunburst(document.getElementById('burst'), { size: 480, rings: 4, seed: 7, spin: true });
   var os = DA.wireDownloads(document) || 'macos';
-  document.querySelectorAll('[data-da-card]').forEach(function (c) {
-    var mine = c.getAttribute('data-da-card') === os;
-    var b = c.querySelector('.da-btn');
-    b.classList.toggle('da-btn-primary', mine);
-    b.classList.toggle('da-btn-secondary', !mine);
-  });
   if (os === 'macos') document.querySelectorAll('[data-mod]').forEach(function (k) { k.textContent = '⌘'; });
 })();
