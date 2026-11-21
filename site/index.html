@@ -41,7 +41,8 @@
       <a href="#tour">Tour</a><a href="#features">Features</a><a href="#download">Download</a><a href="#faq">FAQ</a><a href="#support">Support</a>
     </nav>
     <div class="top-right">
-      <a class="da-btn da-btn-secondary da-btn-sm" href="https://github.com/Fee0/disk_analyzer"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6"/><path d="M20 4 10 14"/><path d="M19 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5"/></svg>GitHub</a>
+      <a class="da-btn da-btn-ghost da-btn-sm" href="https://www.paypal.com/donate/?hosted_button_id=B4ZUCQ6966MHN" target="_blank" rel="noopener"><svg class="heart" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20s-7-4.4-7-10a4 4 0 0 1 7-2.6A4 4 0 0 1 19 10c0 5.6-7 10-7 10z"/></svg>Donate</a>
+      <a class="da-btn da-btn-secondary da-btn-sm top-github" href="https://github.com/Fee0/disk_analyzer"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6"/><path d="M20 4 10 14"/><path d="M19 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5"/></svg>GitHub</a>
     </div>
   </div>
 </header>
@@ -230,15 +231,21 @@
         <h2 class="da-h-section">Made by one person, for everyone</h2>
       </div>
       <div class="da-support">
-        <div class="da-card">
-          <h3 class="da-h-card">Support the project</h3>
-          <p>Disk Analyzer is free. If it found you a few hundred gigabytes, you can chip in for the coffee that built it.</p>
-          <div style="display:flex;gap:var(--space-3);align-items:center"><a class="da-btn da-btn-primary" aria-disabled="true" id="donate"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20s-7-4.4-7-10a4 4 0 0 1 7-2.6A4 4 0 0 1 19 10c0 5.6-7 10-7 10z"/></svg>Donate</a><span class="da-soon">Coming soon</span></div>
+        <div class="da-card donate-card">
+          <div class="donate-text">
+            <h3 class="da-h-card">Support the project</h3>
+            <p>Disk Analyzer is free. If it found you a few hundred gigabytes, you can chip in for the coffee that built it.</p>
+            <div class="support-actions"><a class="da-btn da-btn-primary" id="donate" href="https://www.paypal.com/donate/?hosted_button_id=B4ZUCQ6966MHN" target="_blank" rel="noopener"><svg class="heart" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20s-7-4.4-7-10a4 4 0 0 1 7-2.6A4 4 0 0 1 19 10c0 5.6-7 10-7 10z"/></svg>Donate with PayPal</a></div>
+          </div>
+          <figure class="donate-qr">
+            <img src="donate-qr.png" width="128" height="128" alt="QR code for the PayPal donation page" loading="lazy">
+            <figcaption>Scan to donate</figcaption>
+          </figure>
         </div>
         <div class="da-card">
           <h3 class="da-h-card">Get in touch</h3>
           <p>Found a bug, a folder it miscounts, or an idea? Open an issue. It is read by the person who wrote the code.</p>
-          <div style="display:flex;gap:var(--space-3);align-items:center;flex-wrap:wrap"><a class="da-btn da-btn-secondary" href="https://github.com/Fee0/disk_analyzer/issues/new"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>Open an issue</a><a class="da-btn da-btn-ghost" href="https://github.com/Fee0/disk_analyzer">Star on GitHub</a></div>
+          <div class="support-actions"><a class="da-btn da-btn-secondary" href="https://github.com/Fee0/disk_analyzer/issues/new"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>Open an issue</a><a class="da-btn da-btn-ghost" href="https://github.com/Fee0/disk_analyzer">Star on GitHub</a></div>
         </div>
       </div>
     </section>

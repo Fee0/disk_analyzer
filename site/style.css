@@ -141,7 +141,6 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
 .da-support { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-6); }
 .da-support .da-card { display: flex; flex-direction: column; gap: var(--space-3); align-items: flex-start; }
 .da-support p { margin: 0; color: var(--text-dim); }
-.da-soon { font: 500 11px/1 var(--font-mono); letter-spacing: .06em; text-transform: uppercase; padding: 4px 8px; border-radius: var(--radius-sm); border: 1px dashed var(--line); color: var(--text-dim); }
 
 .da-sunburst .seg { transition: opacity .2s; }
 .da-sunburst:hover .seg { opacity: .55; }
@@ -160,6 +159,7 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
   nav.links a { color: var(--text-dim); font: 600 14px var(--font-sans); padding: 8px 12px; border-radius: var(--radius-sm); }
   nav.links a:hover { color: var(--text); background: var(--panel); text-decoration: none; }
   .top-right { margin-left: auto; display: flex; gap: var(--space-3); align-items: center; }
+  .heart { fill: var(--danger); stroke: #000; stroke-width: 1.25; }
 
   .hero { display: grid; grid-template-columns: 1.05fr .95fr; gap: var(--space-12); align-items: center; padding: var(--space-24) 0 var(--space-12); }
   .hero .da-h-hero { font-size: 72px; margin: var(--space-4) 0 var(--space-6); }
@@ -197,6 +197,14 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
   .downloads { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-6); }
   .da-dl:not([data-current]) .da-dl-badge { display: none; }
 
+  .support-actions { display: flex; gap: var(--space-3); align-items: center; flex-wrap: wrap; margin-top: auto; padding-top: var(--space-3); }
+  .da-support .donate-card { flex-direction: row; align-items: stretch; gap: var(--space-6); }
+  .donate-text { flex: 1; display: flex; flex-direction: column; gap: var(--space-3); align-items: flex-start; }
+  .donate-qr { margin: 0; flex: none; align-self: center; display: flex; flex-direction: column; align-items: center; gap: var(--space-2); }
+  .donate-qr img { display: block; width: 128px; height: 128px; background: #fff; outline: 6px solid #fff; border-radius: 2px; margin: 6px; }
+  .donate-qr figcaption { font: 500 11px/1 var(--font-mono); letter-spacing: .06em; text-transform: uppercase; color: var(--text-dim); }
+  @media (max-width: 520px) { .da-support .donate-card { flex-direction: column; } .donate-qr { align-self: flex-start; } }
+
   .faq { display: flex; flex-direction: column; gap: var(--space-3); max-width: 800px; }
   .faq details { padding: 0; }
   .faq summary { cursor: pointer; padding: var(--space-4) var(--space-6); border-radius: var(--radius-lg); }
@@ -211,6 +219,8 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
   footer.bottom nav { margin-left: auto; display: flex; gap: var(--space-6); }
   footer.bottom nav a { color: var(--text-dim); }
   footer.bottom nav a:hover { color: var(--text); }
+
+  @media (max-width: 520px) { .top-github { display: none; } }
 
   @media (max-width: 900px) {
     .wrap { padding: 0 var(--space-6); }
