@@ -108,10 +108,8 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
 .da-dl { display: flex; flex-direction: column; gap: var(--space-4); position: relative; }
 .da-dl[data-current] { border-color: var(--accent); }
 .da-dl-os { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
-.da-dl-file { font-family: var(--font-mono); font-size: 12px; line-height: 1.5; color: var(--text-dim); }
-.da-dl-size { display: block; color: var(--text); }
+.da-dl-file { font-family: var(--font-mono); font-size: 12px; line-height: 1.5; min-height: 1.5em; color: var(--text); }
 .da-dl-badge { font: 500 11px/1 var(--font-mono); letter-spacing: .06em; text-transform: uppercase; color: var(--accent); }
-.da-dl-steps { margin: 0; padding-left: 18px; color: var(--text-dim); font-size: 13px; line-height: 1.5; }
 .da-dl .da-btn { justify-content: center; }
 .da-dl-alt { display: flex; gap: var(--space-3); font-size: 13px; }
 
@@ -176,8 +174,6 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
   .head p { margin: 0; color: var(--text-dim); font-size: 17px; }
 
   .tour .da-frame { max-width: 960px; margin: 0 auto; }
-  .tour .legend-row { max-width: 960px; margin: var(--space-6) auto 0; display: flex; justify-content: center; }
-  .tour .da-legend { justify-content: center; margin: 0; }
 
   .features { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-6); }
   .da-feature { transition: border-color .12s, transform .12s; }

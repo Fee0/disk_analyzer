@@ -20,8 +20,8 @@
   var PLATFORMS = {
     macos: { label: "macOS", suffix: "macos-universal.dmg", match: /macos.*\.dmg$/i, req: "macOS 11+ · Apple silicon & Intel", steps: ["Open the .dmg", "Drag Disk Analyzer to Applications", "Signed and notarized: opens without a warning"] },
     windows: { label: "Windows", suffix: "windows-x86_64.zip", match: /windows.*\.zip$/i, req: "Windows 10+ · x64", steps: ["Unzip and run disk-analyzer.exe", "If SmartScreen appears: More info → Run anyway"] },
-    linux: { label: "Linux", suffix: "linux-x86_64.tar.gz", match: /linux-x86_64\.tar\.gz$/i, req: "x86_64 · .tar.gz", steps: ["Extract the archive", "Run ./install.sh to add it to your app menu"] },
-    linuxArm: { label: "Linux ARM", suffix: "linux-aarch64.tar.gz", match: /linux-aarch64\.tar\.gz$/i, req: "aarch64 · .tar.gz", steps: [] }
+    linux: { label: "Linux", suffix: "linux-x86_64.tar.gz", match: /linux-x86_64\.tar\.gz$/i, req: "x86_64", steps: ["Extract the archive", "Run ./install.sh to add it to your app menu"] },
+    linuxArm: { label: "Linux ARM", suffix: "linux-aarch64.tar.gz", match: /linux-aarch64\.tar\.gz$/i, req: "aarch64", steps: [] }
   };
 
   function fileName(version, platform) {
@@ -82,19 +82,8 @@
       root.querySelectorAll("[data-da-file]").forEach(function (el) {
         var asset = rel.assets[el.getAttribute("data-da-file")];
         if (!asset) return;
-        el.textContent = "";
-        asset.name.split("-").forEach(function (part, i, all) {
-          el.appendChild(document.createTextNode(part + (i < all.length - 1 ? "-" : "")));
-          if (i < all.length - 1) el.appendChild(document.createElement("wbr"));
-        });
-        if (asset.size) {
-          var size = document.createElement("span");
-          size.className = "da-dl-size";
-          size.textContent = formatBytes(asset.size);
-          el.appendChild(size);
-        }
+        el.textContent = asset.size ? formatBytes(asset.size) : "";
       });
-      root.querySelectorAll("[data-da-version]").forEach(function (el) { el.textContent = "v" + rel.version; });
       root.querySelectorAll("[data-da-primary]").forEach(function (el) {
         var target = os || "macos";
         el.setAttribute("href", rel.assets[target].url);
@@ -225,10 +214,4 @@
     b.classList.toggle('da-btn-secondary', !mine);
   });
   if (os === 'macos') document.querySelectorAll('[data-mod]').forEach(function (k) { k.textContent = '⌘'; });
-  var legend = document.getElementById('legend');
-  DA.KINDS.forEach(function (k) {
-    var li = document.createElement('li');
-    li.innerHTML = '<i style="background:var(--kind-' + k.id + ')"></i>' + k.label;
-    legend.appendChild(li);
-  });
 })();
