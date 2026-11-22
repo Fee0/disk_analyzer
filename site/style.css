@@ -210,7 +210,7 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
   .donate-qr figcaption { font: 500 11px/1 var(--font-mono); letter-spacing: .06em; text-transform: uppercase; color: var(--text-dim); }
   @media (max-width: 520px) { .da-support .donate-card { flex-direction: column; } .donate-qr { align-self: flex-start; } }
 
-  .faq { display: flex; flex-direction: column; gap: var(--space-3); max-width: 800px; }
+  .faq { display: flex; flex-direction: column; gap: var(--space-3); }
   .faq details { padding: 0; }
   .faq summary { cursor: pointer; padding: var(--space-4) var(--space-6); border-radius: var(--radius-lg); }
   .faq summary h3 { display: inline; }
