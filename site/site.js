@@ -19,7 +19,8 @@
 
   var PLATFORMS = {
     macos: { label: "macOS", suffix: "macos-universal.dmg", match: /macos.*\.dmg$/i, req: "macOS 11+ · Apple silicon & Intel", steps: ["Open the .dmg", "Drag Disk Analyzer to Applications", "Signed and notarized: opens without a warning"] },
-    windows: { label: "Windows", suffix: "windows-x86_64.zip", match: /windows.*\.zip$/i, req: "Windows 10+ · x64", steps: ["Unzip and run disk-analyzer.exe", "If SmartScreen appears: More info → Run anyway"] },
+    windows: { label: "Windows", suffix: "windows-x86_64.msi", match: /windows.*\.msi$/i, req: "Windows 10+ · x64", steps: ["Run the installer", "If SmartScreen appears: More info → Run anyway"], onlyIfReleased: true, otherwise: "windowsZip" },
+    windowsZip: { label: "Windows", suffix: "windows-x86_64.zip", match: /windows.*\.zip$/i, req: "Windows 10+ · x64", steps: ["Unzip and run disk-analyzer.exe", "If SmartScreen appears: More info → Run anyway"] },
     linux: { label: "Linux", suffix: "linux-x86_64.tar.gz", match: /linux-x86_64\.tar\.gz$/i, req: "x86_64", steps: ["Extract the archive", "Run ./install.sh to add it to your app menu"] },
     linuxArm: { label: "Linux ARM64", suffix: "linux-aarch64.tar.gz", match: /linux-aarch64\.tar\.gz$/i, req: "aarch64", steps: [] }
   };
@@ -31,6 +32,7 @@
   function fallbackRelease() {
     var assets = {};
     Object.keys(PLATFORMS).forEach(function (p) {
+      if (PLATFORMS[p].onlyIfReleased) return;
       var name = fileName(FALLBACK_VERSION, p);
       assets[p] = { name: name, url: "https://github.com/" + REPO + "/releases/download/v" + FALLBACK_VERSION + "/" + name, size: null };
     });
@@ -46,7 +48,8 @@
         var assets = {};
         Object.keys(PLATFORMS).forEach(function (p) {
           var hit = (rel.assets || []).filter(function (a) { return PLATFORMS[p].match.test(a.name); })[0];
-          assets[p] = hit ? { name: hit.name, url: hit.browser_download_url, size: hit.size } : fallback.assets[p];
+          var known = hit ? { name: hit.name, url: hit.browser_download_url, size: hit.size } : fallback.assets[p];
+          if (known) assets[p] = known;
         });
         done({ version: String(rel.tag_name || "").replace(/^v/, "") || FALLBACK_VERSION, assets: assets, live: true });
       })
@@ -97,20 +100,30 @@
     root.querySelectorAll("[data-da-card]").forEach(function (card) {
       if (card.getAttribute("data-da-card") === os) card.setAttribute("data-current", "");
     });
+    function offered(p) {
+      return release ? Boolean(release.assets[p]) : !PLATFORMS[p].onlyIfReleased;
+    }
+    function chosen() {
+      return offered(platform) ? platform : PLATFORMS[platform].otherwise;
+    }
     function wireHero() {
       if (!release) return;
+      var pick = chosen();
       root.querySelectorAll("[data-da-primary]").forEach(function (el) {
-        el.setAttribute("href", os ? release.assets[platform].url : "#download");
+        el.setAttribute("href", os ? release.assets[pick].url : "#download");
         var label = el.querySelector("[data-da-primary-label]");
-        if (label) label.textContent = os ? "Download for " + PLATFORMS[platform].label : "Download";
+        if (label) label.textContent = os ? "Download for " + PLATFORMS[pick].label : "Download";
       });
     }
-    markPrimary(root, platform);
+    function refresh() {
+      markPrimary(root, chosen());
+      wireHero();
+    }
+    refresh();
     if (os === "linux") {
       detectArm(function (arm) {
         platform = arm ? "linuxArm" : "linux";
-        markPrimary(root, platform);
-        wireHero();
+        refresh();
       });
     }
     resolveRelease(function (rel) {
@@ -118,13 +131,15 @@
       root.querySelectorAll("[data-da-os]").forEach(function (el) {
         var asset = rel.assets[el.getAttribute("data-da-os")];
         if (asset) el.setAttribute("href", asset.url);
+        el.hidden = !asset;
       });
       root.querySelectorAll("[data-da-file]").forEach(function (el) {
         var asset = rel.assets[el.getAttribute("data-da-file")];
+        el.hidden = !asset;
         if (!asset) return;
         el.textContent = asset.size ? formatBytes(asset.size) : "";
       });
-      wireHero();
+      refresh();
     });
     return os;
   }

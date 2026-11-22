@@ -119,6 +119,8 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
 .da-dl-badge { font: 500 11px/1 var(--font-mono); letter-spacing: .06em; text-transform: uppercase; color: var(--accent); }
 .da-dl .da-btn { justify-content: center; }
 .da-dl-arch { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4) var(--space-2); }
+.da-dl-arch:has(> [hidden]) { grid-template-columns: 1fr; }
+.da-dl [hidden] { display: none; }
 .da-dl-arch .da-btn { padding: 0 var(--space-3); }
 .da-dl-alt { display: flex; gap: var(--space-3); font-size: 13px; }
 
