@@ -46,5 +46,7 @@
 
     <ui:WixUI Id="WixUI_Minimal" />
     <WixVariable Id="WixUILicenseRtf" Value="$(LicenseRtf)" />
+    <WixVariable Id="WixUIBannerBmp" Value="$(Banner)" />
+    <WixVariable Id="WixUIDialogBmp" Value="$(Dialog)" />
   </Package>
 </Wix>

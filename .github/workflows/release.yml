@@ -180,6 +180,8 @@ jobs:
             -d License=LICENSE `
             -d LicenseRtf=packaging/windows/LICENSE.rtf `
             -d Icon=assets/icon/icon.ico `
+            -d Banner=assets/icon/installer-banner.bmp `
+            -d Dialog=assets/icon/installer-dialog.bmp `
             -o "$env:PACKAGE.msi"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           wix msi validate "$env:PACKAGE.msi"

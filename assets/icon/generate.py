@@ -170,6 +170,39 @@ mac[1024].save(OUT / "icon.icns", append_images=[mac[s] for s in [16, 32, 64, 12
 
 (OUT / f"window-icon-{WINDOW_ICON_SIDE}x{WINDOW_ICON_SIDE}.rgba").write_bytes(flat[WINDOW_ICON_SIDE].tobytes())
 
+INSTALLER_BANNER = (493, 58)
+INSTALLER_DIALOG = (493, 312)
+INSTALLER_PANEL_WIDTH = 164
+INSTALLER_BANNER_ICON = 44
+INSTALLER_DIALOG_ICON = 96
+WHITE = (255, 255, 255)
+
+
+def installer_banner():
+    banner = Image.new("RGBA", INSTALLER_BANNER, WHITE + (255,))
+    icon = render(DETAILED, FLAT_MARGIN, INSTALLER_BANNER_ICON)
+    inset = (INSTALLER_BANNER[1] - INSTALLER_BANNER_ICON) // 2
+    banner.alpha_composite(icon, (INSTALLER_BANNER[0] - INSTALLER_BANNER_ICON - inset, inset))
+    return banner.convert("RGB")
+
+
+def installer_dialog():
+    width, height = INSTALLER_DIALOG
+    dialog = Image.new("RGBA", INSTALLER_DIALOG, WHITE + (255,))
+    panel = Image.new("RGBA", (INSTALLER_PANEL_WIDTH, height))
+    for y in range(height):
+        t = y / (height - 1)
+        shade = tuple(round(a + (b - a) * t) for a, b in zip(BG_TOP, BG_BOTTOM)) + (255,)
+        ImageDraw.Draw(panel).line((0, y, INSTALLER_PANEL_WIDTH, y), fill=shade)
+    dialog.alpha_composite(panel, (0, 0))
+    icon = render(DETAILED, FLAT_MARGIN, INSTALLER_DIALOG_ICON)
+    dialog.alpha_composite(icon, ((INSTALLER_PANEL_WIDTH - INSTALLER_DIALOG_ICON) // 2, height // 3 - INSTALLER_DIALOG_ICON // 2))
+    return dialog.convert("RGB")
+
+
+installer_banner().save(OUT / "installer-banner.bmp")
+installer_dialog().save(OUT / "installer-dialog.bmp")
+
 if len(sys.argv) < 2:
     sys.exit()
 
