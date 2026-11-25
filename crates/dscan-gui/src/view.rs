@@ -39,7 +39,41 @@ pub fn view(app: &App) -> Element<'_, Message> {
         Screen::Start => start(app),
         Screen::Browse(b) => browse(b),
     };
-    container(content).width(Fill).height(Fill).style(|_| container::background(theme::BG)).into()
+    let screen = container(content).width(Fill).height(Fill).style(|_| container::background(theme::BG));
+    match dragged_in_phrase(&app.dragged_over_window) {
+        Some(dragged_in) => stack![screen, drop_overlay(dragged_in)].into(),
+        None => screen.into(),
+    }
+}
+
+const DROP_OVERLAY_INSET: f32 = 16.0;
+const DROP_OVERLAY_RADIUS: f32 = 16.0;
+const DROP_OVERLAY_ICON_SIZE: f32 = 56.0;
+
+fn dragged_in_phrase(dragged_over_window: &[std::path::PathBuf]) -> Option<String> {
+    match dragged_over_window {
+        [] => None,
+        [one] => Some(one.file_name().unwrap_or(one.as_os_str()).to_string_lossy().into_owned()),
+        many => Some(items_phrase(many.len())),
+    }
+}
+
+fn drop_overlay<'a>(dragged_in: String) -> Element<'a, Message> {
+    let prompt = column![
+        icon::folder(DROP_OVERLAY_ICON_SIZE, theme::ACCENT),
+        text("Drop to scan").size(22),
+        text(truncate(&dragged_in, NAME_IN_A_MESSAGE_MAX_CHARS)).size(14).color(theme::TEXT_DIM),
+    ]
+    .spacing(12)
+    .align_x(Alignment::Center);
+    let target = center(prompt)
+        .style(|_| outlined_box(theme::ACCENT.scale_alpha(0.08), DROP_OVERLAY_RADIUS, theme::ACCENT.scale_alpha(0.8)));
+    container(target)
+        .padding(DROP_OVERLAY_INSET)
+        .width(Fill)
+        .height(Fill)
+        .style(|_| container::background(theme::BG.scale_alpha(0.88)))
+        .into()
 }
 
 fn rounded_box(bg: Color, radius: f32) -> container::Style {

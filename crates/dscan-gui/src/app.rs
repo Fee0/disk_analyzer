@@ -12,7 +12,7 @@ use dscan_core::{
 };
 use iced::keyboard::{self, Key, key::Named};
 use iced::widget::canvas::Cache;
-use iced::{Point, Size, Subscription, Task, event, mouse};
+use iced::{Point, Size, Subscription, Task, event, mouse, window};
 
 use crate::animation::{Advance, ChartAnimation};
 use crate::collector::Collector;
@@ -85,6 +85,7 @@ pub struct App {
     chart: ChartPrefs,
     chart_size: Option<Size>,
     stepped_back_from_newest_parked: bool,
+    pub dragged_over_window: Vec<PathBuf>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -217,6 +218,10 @@ pub enum Message {
     ScanVolume(PathBuf),
     OpenFolder,
     FolderPicked(Option<PathBuf>),
+    DragEnteredWindow(PathBuf),
+    DragLeftWindow,
+    DroppedOnWindow(PathBuf),
+    DropChecked { dropped: PathBuf, folder: Option<PathBuf> },
     OpenFdaSettings,
     RefreshVolumes,
     ScanProgressTick,
@@ -294,6 +299,7 @@ impl App {
             chart: ChartPrefs::default(),
             chart_size: None,
             stepped_back_from_newest_parked: false,
+            dragged_over_window: Vec::new(),
         };
         let load = Self::load_volumes();
         let task = match initial {
@@ -352,6 +358,13 @@ impl App {
         self.scans.iter().find(|job| job.id == id)
     }
 
+    fn scan_options_for(&self, folder: PathBuf) -> ScanOptions {
+        match self.volumes.iter().flatten().find(|v| v.mount == folder) {
+            Some(volume) => ScanOptions::volume(&volume.mount, &volume.name),
+            None => ScanOptions::folder(folder),
+        }
+    }
+
     fn start_scan(&mut self, opts: ScanOptions) -> Task<Message> {
         let id = next_id();
         let progress = Arc::new(Progress::default());
@@ -394,6 +407,19 @@ impl App {
                 );
             }
             Message::FolderPicked(Some(path)) => return self.start_scan(ScanOptions::folder(path)),
+            Message::DragEnteredWindow(path) => self.dragged_over_window.push(path),
+            Message::DragLeftWindow => self.dragged_over_window.clear(),
+            Message::DroppedOnWindow(dropped) => {
+                self.dragged_over_window.clear();
+                let path = dropped.clone();
+                return Task::perform(off_thread(move || dscan_core::existing_folder(path)), move |folder| {
+                    Message::DropChecked { dropped, folder: folder.ok().flatten() }
+                });
+            }
+            Message::DropChecked { folder: Some(folder), .. } => return self.start_scan(self.scan_options_for(folder)),
+            Message::DropChecked { dropped, folder: None } => {
+                return self.report_scan_failure(not_a_folder_phrase(&dropped));
+            }
             Message::OpenFdaSettings => {
                 if let Some(settings) = dscan_core::FULL_DISK_ACCESS_SETTINGS {
                     let _ = std::process::Command::new("open").arg(settings).spawn();
@@ -589,8 +615,16 @@ fn as_on_a_latin_keyboard_without_caps_lock_or_shift(key: Key, pressed: keyboard
     }
 }
 
+fn not_a_folder_phrase(dropped: &Path) -> String {
+    let name = dropped.file_name().unwrap_or(dropped.as_os_str()).to_string_lossy();
+    format!("{} isn't a folder. Drop a folder to scan it.", truncate(&name, NAME_IN_A_MESSAGE_MAX_CHARS))
+}
+
 fn global_event(event: iced::Event, status: event::Status, _window: iced::window::Id) -> Option<Message> {
     match event {
+        iced::Event::Window(window::Event::FileHovered(path)) => Some(Message::DragEnteredWindow(path)),
+        iced::Event::Window(window::Event::FilesHoveredLeft) => Some(Message::DragLeftWindow),
+        iced::Event::Window(window::Event::FileDropped(path)) => Some(Message::DroppedOnWindow(path)),
         iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, physical_key, .. }) => {
             let key = as_on_a_latin_keyboard_without_caps_lock_or_shift(key, physical_key);
             let not_taken_by_focused_widget = status == event::Status::Ignored;
@@ -2015,6 +2049,19 @@ mod tests {
         assert_eq!(
             as_on_a_latin_keyboard_without_caps_lock_or_shift(arrow.clone(), Physical::Code(Code::ArrowUp)),
             arrow
+        );
+    }
+
+    #[test]
+    fn files_dragged_over_and_dropped_on_the_window_become_drop_messages() {
+        let dropped = PathBuf::from("Photos");
+        let map = |event| global_event(iced::Event::Window(event), event::Status::Ignored, iced::window::Id::unique());
+        assert!(
+            matches!(map(window::Event::FileHovered(dropped.clone())), Some(Message::DragEnteredWindow(p)) if p == dropped)
+        );
+        assert!(matches!(map(window::Event::FilesHoveredLeft), Some(Message::DragLeftWindow)));
+        assert!(
+            matches!(map(window::Event::FileDropped(dropped.clone())), Some(Message::DroppedOnWindow(p)) if p == dropped)
         );
     }
 

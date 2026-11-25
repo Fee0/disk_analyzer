@@ -689,6 +689,86 @@ fn scanning_the_same_place_again_replaces_its_running_scan() {
     assert_eq!(app.scans.len(), 1);
 }
 
+fn drop_on_the_window(app: &mut App, dropped: &Path) {
+    let _check_task_never_run = app.update(Message::DroppedOnWindow(dropped.to_path_buf()));
+    let folder = dscan_core::existing_folder(dropped.to_path_buf());
+    let _scan_task_never_run = app.update(Message::DropChecked { dropped: dropped.to_path_buf(), folder });
+}
+
+#[test]
+fn a_folder_dragged_over_the_window_shows_where_to_drop_it_on_every_screen() -> Result<(), Error> {
+    let dir = tempfile::tempdir().unwrap();
+    let (start, _) = App::new(None);
+    for (mut app, screen) in [(start, "start"), (browser_app(dir.path()), "browse")] {
+        let _ = app.update(Message::DragEnteredWindow(dir.path().join("Photos")));
+        {
+            let mut ui = sim(&app);
+            shoot(&mut ui, &format!("drop-over-{screen}"))?;
+            let texts = texts_on_screen(&mut ui);
+            assert_eq!(count_of(&texts, "Drop to scan"), 1, "{screen}: {texts:?}");
+            assert_eq!(count_of(&texts, "Photos"), 1, "{screen} names what is dragged in: {texts:?}");
+        }
+        let _ = app.update(Message::DragEnteredWindow(dir.path().join("Music")));
+        assert!(texts_on_screen(&mut sim(&app)).contains(&"2 items".to_string()), "{screen} counts several items");
+        let _ = app.update(Message::DragLeftWindow);
+        assert_eq!(count_of(&texts_on_screen(&mut sim(&app)), "Drop to scan"), 0, "{screen}: dragging away hides it");
+    }
+    Ok(())
+}
+
+#[test]
+fn dropping_a_folder_scans_it_from_any_screen() {
+    let dropped = tempfile::tempdir().unwrap();
+    let (mut app, _) = App::new(None);
+    let _ = app.update(Message::DragEnteredWindow(dropped.path().to_path_buf()));
+    drop_on_the_window(&mut app, dropped.path());
+    assert!(app.dragged_over_window.is_empty(), "the drop ends the drag, though no drag-left event follows it");
+    let canonical = dscan_core::existing_folder(dropped.path().to_path_buf()).unwrap();
+    assert!(
+        matches!(&app.scans[..], [job] if job.opts.root == canonical && !job.opts.whole_disk),
+        "the dropped folder is scanned as a folder"
+    );
+
+    let shown = tempfile::tempdir().unwrap();
+    let mut app = browser_app(shown.path());
+    drop_on_the_window(&mut app, dropped.path());
+    assert!(matches!(app.screen, Screen::Start), "a drop on a result shows the scan's progress, like a rescan");
+    assert_eq!(app.parked_newest_first.len(), 1, "the result that was shown waits under open results");
+    assert_eq!(app.scans.len(), 1);
+}
+
+#[test]
+fn dropping_a_disk_s_root_scans_the_whole_disk() {
+    let mount = tempfile::tempdir().unwrap();
+    let canonical_mount = dscan_core::existing_folder(mount.path().to_path_buf()).unwrap();
+    let (mut app, _) = App::new(None);
+    app.volumes = Some(vec![disk("Macintosh HD", &canonical_mount, 0.5)]);
+    drop_on_the_window(&mut app, mount.path());
+    assert!(
+        matches!(&app.scans[..], [job] if job.opts.whole_disk && job.opts.root == canonical_mount),
+        "a disk dropped on the window is scanned like clicking its Scan button"
+    );
+}
+
+#[test]
+fn dropping_a_file_says_only_folders_can_be_scanned() {
+    let dir = tempfile::tempdir().unwrap();
+    write_files(dir.path(), &[("notes.txt", 10)], 1);
+    let file = dir.path().join("notes.txt");
+
+    let (mut app, _) = App::new(None);
+    drop_on_the_window(&mut app, &file);
+    assert!(app.scans.is_empty());
+    assert_eq!(app.error.as_deref(), Some("notes.txt isn't a folder. Drop a folder to scan it."));
+
+    let mut app = browser_app(dir.path());
+    drop_on_the_window(&mut app, &file);
+    assert!(app.scans.is_empty() && matches!(app.screen, Screen::Browse(_)), "the shown result stays");
+    let notice = on_screen(&app).notice.as_ref().expect("the refusal floats over the result");
+    assert_eq!(notice.kind, NoticeKind::Error);
+    assert!(notice.text.contains("notes.txt"), "{notice:?}");
+}
+
 fn finish_scan_of(app: &mut App, job_id: u64, folder: &Path) {
     let job = app.scans.iter().find(|job| job.id == job_id).expect("the scan is running");
     *job.result_slot.lock() = Some(scan_result(&ScanOptions::folder(folder)));
