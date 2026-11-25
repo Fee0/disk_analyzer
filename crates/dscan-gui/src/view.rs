@@ -228,12 +228,7 @@ fn start(app: &App) -> Element<'_, Message> {
 }
 
 fn start_content(app: &App, width: f32) -> Column<'_, Message> {
-    let footer = row![
-        outlined_text_button(SCAN_FOLDER_LABEL, Message::OpenFolder),
-        Space::new().width(Fill),
-        icon_button(icon::refresh(14.0, theme::TEXT_DIM), "Refresh disks", Message::RefreshVolumes),
-    ]
-    .align_y(Alignment::Center);
+    let footer = row![outlined_text_button(SCAN_FOLDER_LABEL, Message::OpenFolder),].align_y(Alignment::Center);
 
     let mut col = column![disk_list(app, width), footer].spacing(START_SECTION_GAP).width(width);
 

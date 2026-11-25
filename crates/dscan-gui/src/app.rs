@@ -31,6 +31,7 @@ const HOLD_PROGRESS_REFRESH: Duration = Duration::from_millis(33);
 const SCAN_PROGRESS_REFRESH: Duration = Duration::from_millis(100);
 const REMOVAL_PROGRESS_REFRESH: Duration = Duration::from_millis(50);
 const SEARCH_TYPING_PAUSE: Duration = Duration::from_millis(150);
+const DISK_REFRESH: Duration = Duration::from_secs(5);
 
 pub type PanicMessage = String;
 
@@ -86,6 +87,7 @@ pub struct App {
     chart_size: Option<Size>,
     stepped_back_from_newest_parked: bool,
     pub dragged_over_window: Vec<PathBuf>,
+    volumes_loading: bool,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -300,8 +302,9 @@ impl App {
             chart_size: None,
             stepped_back_from_newest_parked: false,
             dragged_over_window: Vec::new(),
+            volumes_loading: false,
         };
-        let load = Self::load_volumes();
+        let load = app.load_volumes();
         let task = match initial {
             Some(path) => Task::batch([load, app.start_scan(ScanOptions::folder(path))]),
             None => load,
@@ -309,7 +312,11 @@ impl App {
         (app, task)
     }
 
-    fn load_volumes() -> Task<Message> {
+    fn load_volumes(&mut self) -> Task<Message> {
+        if self.volumes_loading {
+            return Task::none();
+        }
+        self.volumes_loading = true;
         Task::perform(off_thread(|| (dscan_core::list_volumes(), dscan_core::has_full_disk_access())), |r| {
             let (volumes, fda) = r.unwrap_or_default();
             Message::VolumesLoaded(volumes, fda)
@@ -331,9 +338,13 @@ impl App {
         match &self.screen {
             Screen::Start if self.scans.iter().any(|job| !job.cancel.is_paused()) => Subscription::batch([
                 event::listen_with(global_event),
+                iced::time::every(DISK_REFRESH).map(|_| Message::RefreshVolumes),
                 iced::time::every(SCAN_PROGRESS_REFRESH).map(|_| Message::ScanProgressTick),
             ]),
-            Screen::Start => event::listen_with(global_event),
+            Screen::Start => Subscription::batch([
+                event::listen_with(global_event),
+                iced::time::every(DISK_REFRESH).map(|_| Message::RefreshVolumes),
+            ]),
             Screen::Browse(b) => {
                 let mut subscriptions = vec![event::listen_with(global_event)];
                 if b.drag.is_some() {
@@ -385,6 +396,7 @@ impl App {
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::VolumesLoaded(volumes, fda) => {
+                self.volumes_loading = false;
                 self.volumes = Some(volumes);
                 self.full_disk_access = fda;
             }
@@ -425,7 +437,7 @@ impl App {
                     let _ = std::process::Command::new("open").arg(settings).spawn();
                 }
             }
-            Message::RefreshVolumes => return Self::load_volumes(),
+            Message::RefreshVolumes => return self.load_volumes(),
             Message::ScanProgressTick => {
                 for job in &mut self.scans {
                     job.snapshot = job.progress.snapshot();
@@ -554,7 +566,7 @@ impl App {
         }
         self.stepped_back_from_newest_parked = true;
         self.error = None;
-        Self::load_volumes()
+        self.load_volumes()
     }
 
     fn resume_parked(&mut self, i: usize) -> Task<Message> {
@@ -2050,6 +2062,15 @@ mod tests {
             as_on_a_latin_keyboard_without_caps_lock_or_shift(arrow.clone(), Physical::Code(Code::ArrowUp)),
             arrow
         );
+    }
+
+    #[test]
+    fn a_disk_refresh_waits_for_the_one_still_running_so_a_share_that_never_answers_cannot_pile_them_up() {
+        let (mut app, _first_listing_never_run) = App::new(None);
+        assert_eq!(app.update(Message::RefreshVolumes).units(), 0, "the launch listing is still running");
+        let _ = app.update(Message::VolumesLoaded(Vec::new(), true));
+        assert_eq!(app.update(Message::RefreshVolumes).units(), 1, "once it answers, the next refresh starts");
+        assert_eq!(app.update(Message::RefreshVolumes).units(), 0);
     }
 
     #[test]

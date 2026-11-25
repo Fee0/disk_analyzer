@@ -12,8 +12,6 @@ fn black_line_icon_svg(paths: &str) -> Handle {
 
 static HOME: LazyLock<Handle> =
     LazyLock::new(|| black_line_icon_svg(r#"<path d="M3 10.5 12 3l9 7.5"/><path d="M5.5 9v11.5h4.5v-6h4v6h4.5V9"/>"#));
-static REFRESH: LazyLock<Handle> =
-    LazyLock::new(|| black_line_icon_svg(r#"<path d="M20 12a8 8 0 1 1-2.34-5.66L20 8.5"/><path d="M20 3.5v5h-5"/>"#));
 
 static CLOSE: LazyLock<Handle> = LazyLock::new(|| black_line_icon_svg(r#"<path d="M6 6l12 12M18 6 6 18"/>"#));
 
@@ -75,10 +73,6 @@ fn tinted<'a>(black_icon: &Handle, size: f32, color: Color) -> Svg<'a, Theme> {
 
 pub fn home<'a>(size: f32, color: Color) -> Svg<'a, Theme> {
     tinted(&HOME, size, color)
-}
-
-pub fn refresh<'a>(size: f32, color: Color) -> Svg<'a, Theme> {
-    tinted(&REFRESH, size, color)
 }
 
 pub fn close<'a>(size: f32, color: Color) -> Svg<'a, Theme> {
