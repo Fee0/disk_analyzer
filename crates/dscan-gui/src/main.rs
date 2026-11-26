@@ -63,6 +63,7 @@ fn main() -> iced::Result {
             min_size: Some(view::MIN_WINDOW_SIZE),
             icon: window_icon(),
             platform_specific: platform_window_settings(),
+            exit_on_close_request: false,
             ..window::Settings::default()
         })
         .antialiasing(true)

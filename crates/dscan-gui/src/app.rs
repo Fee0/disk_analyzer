@@ -225,6 +225,7 @@ pub enum Message {
     DragLeftWindow,
     DroppedOnWindow(PathBuf),
     DropChecked { dropped: PathBuf, folder: Option<PathBuf> },
+    CloseRequested,
     OpenFdaSettings,
     RefreshVolumes,
     ScanProgressTick,
@@ -367,6 +368,17 @@ impl App {
         self.scans.iter().find(|job| job.id == id)
     }
 
+    fn stop_work_that_would_hold_up_quitting(&mut self) {
+        self.scans.clear();
+        let shown = match &self.screen {
+            Screen::Browse(b) => Some(b.as_ref()),
+            Screen::Start => None,
+        };
+        for browser in shown.into_iter().chain(&self.parked_newest_first) {
+            browser.search_cancel.cancel();
+        }
+    }
+
     fn scan_options_for(&self, folder: PathBuf) -> ScanOptions {
         match self.volumes.iter().flatten().find(|v| v.mount == folder) {
             Some(volume) => ScanOptions::volume(&volume.mount, &volume.name),
@@ -465,6 +477,10 @@ impl App {
                         self.report_scan_failure(format!("The scan failed unexpectedly: {why}"))
                     }
                 };
+            }
+            Message::CloseRequested => {
+                self.stop_work_that_would_hold_up_quitting();
+                return iced::exit();
             }
             Message::GoHome => return self.go_home(),
             Message::Back if matches!(&self.screen, Screen::Browse(b) if !b.can_back()) => return self.go_home(),
@@ -638,6 +654,7 @@ fn global_event(event: iced::Event, status: event::Status, _window: iced::window
         iced::Event::Window(window::Event::FileHovered(path)) => Some(Message::DragEnteredWindow(path)),
         iced::Event::Window(window::Event::FilesHoveredLeft) => Some(Message::DragLeftWindow),
         iced::Event::Window(window::Event::FileDropped(path)) => Some(Message::DroppedOnWindow(path)),
+        iced::Event::Window(window::Event::CloseRequested) => Some(Message::CloseRequested),
         iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, physical_key, .. }) => {
             let key = as_on_a_latin_keyboard_without_caps_lock_or_shift(key, physical_key);
             let not_taken_by_focused_widget = status == event::Status::Ignored;
@@ -2063,6 +2080,27 @@ mod tests {
             as_on_a_latin_keyboard_without_caps_lock_or_shift(arrow.clone(), Physical::Code(Code::ArrowUp)),
             arrow
         );
+    }
+
+    #[test]
+    fn closing_the_window_stops_scans_and_searches_first_because_quitting_waits_for_running_background_work() {
+        let (shown_dir, parked_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let mut app = app_showing(browser(shown_dir.path()));
+        let _scan_task_never_run = app.update(Message::FolderPicked(Some(shown_dir.path().to_path_buf())));
+        app.parked_newest_first.push(browser(parked_dir.path()));
+        let _ = app.update(Message::ResumeParked(app.parked_newest_first[0].id));
+        let shown_search = on_screen(&app).search_cancel.clone();
+        let parked_search = app.parked_newest_first[0].search_cancel.clone();
+        let scan = app.scans[0].cancel.clone();
+
+        let close = iced::Event::Window(window::Event::CloseRequested);
+        let message = global_event(close, event::Status::Ignored, iced::window::Id::unique()).unwrap();
+        let quit = app.update(message);
+
+        assert!(scan.is_cancelled() && app.scans.is_empty(), "the running scan is told to stop");
+        assert!(shown_search.is_cancelled(), "the shown result's search stops");
+        assert!(parked_search.is_cancelled(), "a parked result's search stops");
+        assert_eq!(quit.units(), 1, "then the app quits");
     }
 
     #[test]
