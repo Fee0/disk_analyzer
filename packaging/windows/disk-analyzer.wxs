@@ -1,4 +1,6 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <?define ExplorerMenuLabel = "Scan with Disk Analyzer" ?>
+  <?define InstalledExe = "[INSTALLFOLDER]disk-analyzer.exe" ?>
   <Package
     Name="Disk Analyzer"
     Manufacturer="Frederik Peukert"
@@ -23,6 +25,27 @@
         <Component Id="License">
           <File Id="LicenseFile" Source="$(License)" Name="LICENSE.txt" KeyPath="yes" />
         </Component>
+        <Component Id="ExplorerMenuOnFolders">
+          <RegistryKey Root="HKLM" Key="Software\Classes\Directory\shell\DiskAnalyzer" ForceDeleteOnUninstall="yes">
+            <RegistryValue Type="string" Value="$(ExplorerMenuLabel)" KeyPath="yes" />
+            <RegistryValue Name="Icon" Type="string" Value="&quot;$(InstalledExe)&quot;,0" />
+            <RegistryValue Key="command" Type="string" Value="&quot;$(InstalledExe)&quot; &quot;%V\.&quot;" />
+          </RegistryKey>
+        </Component>
+        <Component Id="ExplorerMenuInsideFolders">
+          <RegistryKey Root="HKLM" Key="Software\Classes\Directory\Background\shell\DiskAnalyzer" ForceDeleteOnUninstall="yes">
+            <RegistryValue Type="string" Value="$(ExplorerMenuLabel)" KeyPath="yes" />
+            <RegistryValue Name="Icon" Type="string" Value="&quot;$(InstalledExe)&quot;,0" />
+            <RegistryValue Key="command" Type="string" Value="&quot;$(InstalledExe)&quot; &quot;%V\.&quot;" />
+          </RegistryKey>
+        </Component>
+        <Component Id="ExplorerMenuOnDrives">
+          <RegistryKey Root="HKLM" Key="Software\Classes\Drive\shell\DiskAnalyzer" ForceDeleteOnUninstall="yes">
+            <RegistryValue Type="string" Value="$(ExplorerMenuLabel)" KeyPath="yes" />
+            <RegistryValue Name="Icon" Type="string" Value="&quot;$(InstalledExe)&quot;,0" />
+            <RegistryValue Key="command" Type="string" Value="&quot;$(InstalledExe)&quot; &quot;%V\.&quot;" />
+          </RegistryKey>
+        </Component>
       </Directory>
     </StandardDirectory>
 
@@ -38,13 +61,28 @@
       </Component>
     </StandardDirectory>
 
-    <Feature Id="Main">
+    <Feature
+      Id="Main"
+      Title="Disk Analyzer"
+      Description="The app and its Start menu shortcut."
+      AllowAbsent="no"
+      AllowAdvertise="no"
+      Display="expand">
       <ComponentRef Id="Executable" />
       <ComponentRef Id="License" />
       <ComponentRef Id="StartMenuShortcut" />
+      <Feature
+        Id="ExplorerMenu"
+        Title="Explorer menu entry"
+        Description="Adds “$(ExplorerMenuLabel)” when you right-click a folder or a drive."
+        AllowAdvertise="no">
+        <ComponentRef Id="ExplorerMenuOnFolders" />
+        <ComponentRef Id="ExplorerMenuInsideFolders" />
+        <ComponentRef Id="ExplorerMenuOnDrives" />
+      </Feature>
     </Feature>
 
-    <ui:WixUI Id="WixUI_Minimal" />
+    <ui:WixUI Id="WixUI_FeatureTree" />
     <WixVariable Id="WixUILicenseRtf" Value="$(LicenseRtf)" />
     <WixVariable Id="WixUIBannerBmp" Value="$(Banner)" />
     <WixVariable Id="WixUIDialogBmp" Value="$(Dialog)" />

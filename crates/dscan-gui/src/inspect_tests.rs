@@ -751,6 +751,28 @@ fn dropping_a_disk_s_root_scans_the_whole_disk() {
 }
 
 #[test]
+fn a_folder_given_at_launch_is_scanned_once_the_disks_are_known_so_a_disk_s_root_scans_the_whole_disk() {
+    let mount = tempfile::tempdir().unwrap();
+    let canonical_mount = dscan_core::existing_folder(mount.path().to_path_buf()).unwrap();
+    let (mut app, _) = App::new(Some(canonical_mount.clone()));
+    assert!(app.scans.is_empty(), "the scan waits for the disk list");
+    let disks = vec![disk("Local Disk (C:)", &canonical_mount, 0.5)];
+    let _scan_task_never_run = app.update(Message::VolumesLoaded(disks.clone(), true));
+    assert!(
+        matches!(&app.scans[..], [job] if job.opts.whole_disk && job.opts.root == canonical_mount),
+        "a disk opened from Explorer's menu is scanned like clicking its Scan button"
+    );
+    let _ = app.update(Message::StopScan(app.scans[0].id));
+    let _ = app.update(Message::VolumesLoaded(disks, true));
+    assert!(app.scans.is_empty(), "later disk refreshes don't scan the launch folder again");
+
+    let folder = tempfile::tempdir().unwrap();
+    let (mut app, _) = App::new(Some(folder.path().to_path_buf()));
+    let _scan_task_never_run = app.update(Message::VolumesLoaded(Vec::new(), true));
+    assert!(matches!(&app.scans[..], [job] if !job.opts.whole_disk && job.opts.root == folder.path()));
+}
+
+#[test]
 fn dropping_a_file_says_only_folders_can_be_scanned() {
     let dir = tempfile::tempdir().unwrap();
     write_files(dir.path(), &[("notes.txt", 10)], 1);

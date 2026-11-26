@@ -88,6 +88,7 @@ pub struct App {
     stepped_back_from_newest_parked: bool,
     pub dragged_over_window: Vec<PathBuf>,
     volumes_loading: bool,
+    folder_to_scan_once_disks_are_known: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -303,13 +304,10 @@ impl App {
             stepped_back_from_newest_parked: false,
             dragged_over_window: Vec::new(),
             volumes_loading: false,
+            folder_to_scan_once_disks_are_known: initial,
         };
         let load = app.load_volumes();
-        let task = match initial {
-            Some(path) => Task::batch([load, app.start_scan(ScanOptions::folder(path))]),
-            None => load,
-        };
-        (app, task)
+        (app, load)
     }
 
     fn load_volumes(&mut self) -> Task<Message> {
@@ -399,6 +397,9 @@ impl App {
                 self.volumes_loading = false;
                 self.volumes = Some(volumes);
                 self.full_disk_access = fda;
+                if let Some(folder) = self.folder_to_scan_once_disks_are_known.take() {
+                    return self.start_scan(self.scan_options_for(folder));
+                }
             }
             Message::ScanVolume(mount) => {
                 let volume = self.volumes.iter().flatten().find(|v| v.mount == mount);
